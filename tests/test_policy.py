@@ -1084,13 +1084,92 @@ def test_low_health_acu_retreat_allows_independent_factory_production() -> None:
     )
 
 
-def test_current_intel_defense_preempts_expansion_and_attack() -> None:
+def test_non_immediate_contact_defends_with_home_reserve_while_macro_work_continues() -> None:
     snapshot = commander_snapshot()
     snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
+    engineers = [unit for unit in snapshot["units"] if unit["role"] == "engineer"]
+    combat = [
+        unit
+        for unit in snapshot["units"]
+        if unit["role"] in {"tank", "artillery", "anti_air", "lab"}
+    ]
+    combat[0]["assignedToWave"] = True
+    combat[0]["frontierEscort"] = True
+    combat[1]["assignedToWave"] = True
+    combat[1]["frontierEscort"] = True
+    combat[2]["role"] = "anti_air"
+    combat[2]["token"] = "900:1"
+    snapshot["pending"] = [
+        {
+            "actorToken": engineers[0]["token"],
+            "kind": "build_structure",
+            "buildRole": "mass_extractor",
+            "siteKey": "frontier",
+            "clusterKey": "cluster-a",
+            "reason": "frontier_expansion",
+        }
+    ]
+    snapshot["sites"]["mass"] = [
+        {
+            "key": "lost",
+            "name": "lost",
+            "position": [22, 2, 20],
+            "distance": 12,
+            "reachable": True,
+            "buildable": True,
+            "occupied": False,
+            "complete": False,
+            "reserved": False,
+            "localSite": False,
+            "lost": True,
+            "frontierSelected": False,
+            "clusterKey": "none",
+        },
+        {
+            "key": "frontier",
+            "name": "frontier",
+            "position": [40, 2, 20],
+            "distance": 30,
+            "reachable": True,
+            "buildable": True,
+            "occupied": False,
+            "complete": False,
+            "reserved": True,
+            "localSite": False,
+            "lost": False,
+            "frontierSelected": True,
+            "clusterKey": "cluster-a",
+        },
+    ]
+    snapshot["macro"] = {
+        "lostMexCount": 1,
+        "constructionBacklog": 2,
+        "frontierScreenCount": 2,
+        "homeReserveCount": len(combat) - 2,
+        "selectedFrontierCluster": "cluster-a",
+        "selectedFrontierSite": "frontier",
+        "engineerDemand": 4,
+        "factoryDemand": 2,
+        "massSurplusTicks": 0,
+        "rallyPosition": snapshot["basePosition"],
+    }
     result = decide(snapshot)
     defense = intents_of(result, "defend_wave")
-    assert defense and len(defense[0]["actorTokens"]) == 24
-    assert not intents_of(result, "build_structure")
+    rebuild = [
+        intent
+        for intent in intents_of(result, "build_structure")
+        if intent.get("reason") == "rebuild_mex"
+    ]
+    screen = intents_of(result, "frontier_screen")
+
+    assert defense
+    assert len(rebuild) == 1
+    assert screen and any(
+        next(unit for unit in snapshot["units"] if unit["token"] == token)["role"] == "anti_air"
+        for token in screen[0]["actorTokens"]
+    )
+    assert set(defense[0]["actorTokens"]).isdisjoint(screen[0]["actorTokens"])
+    assert set(defense[0]["actorTokens"]).isdisjoint({combat[0]["token"], combat[1]["token"]})
     assert not intents_of(result, "attack_wave")
     assert not any(intent["kind"] in COMMANDER_KINDS for intent in result)
 

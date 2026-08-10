@@ -397,7 +397,7 @@ def test_progressing_long_trip_survives_past_900_ticks_and_refreshes_progress_cl
     assert harness.controller.pending["1:1"].lastProgressTick == 1800
 
 
-def test_true_no_progress_stall_is_bounded_and_releases_site_for_retry() -> None:
+def test_true_no_progress_travel_is_bounded_by_derived_deadline_and_releases_for_retry() -> None:
     harness = make_harness()
     engineer = harness.unit(
         entityId=1,
@@ -415,13 +415,20 @@ def test_true_no_progress_stall_is_bounded_and_releases_site_for_retry() -> None
     )
     engineer.options.idleState = False
     engineer.options.states = lua_value(harness.lua, {"Moving": True})
+    deadline = int(harness.controller.pending["1:1"].deadlineTick)
     harness.brain.tick = 901
+    current = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, current)
+
+    assert harness.controller.pending["1:1"] is not None
+
+    harness.brain.tick = deadline + 1
     current = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, current)
 
     assert harness.controller.pending["1:1"] is None
     assert harness.controller.reservations["far"] is None
-    assert any("reason=stalled" in line for line in harness.logs)
+    assert any("reason=timeout" in line for line in harness.logs)
 
 
 def test_incomplete_foundation_retains_job_and_fraction_progress_refreshes_clock() -> None:
@@ -779,6 +786,32 @@ def test_frontier_escorts_are_never_consumed_by_home_defense_or_regroup() -> Non
     assert tactical_tokens.isdisjoint({unit["token"] for unit in assigned})
 
 
+def install_pending_frontier_operation(
+    harness: Any,
+    engineer_token: str = "1:1",
+    cluster_key: str = "cluster-a",
+) -> None:
+    harness.controller.pending[engineer_token] = lua_value(
+        harness.lua,
+        {
+            "actorToken": engineer_token,
+            "kind": "build_structure",
+            "buildRole": "mass_extractor",
+            "siteKey": "frontier",
+            "position": [40, 2, 20],
+            "issuedTick": 0,
+            "deadlineTick": 5000,
+            "lastProgressTick": 0,
+            "lastDistance": 30,
+            "lastFraction": 0,
+            "phase": "travelling",
+            "accepted": True,
+            "reason": "frontier_expansion",
+            "clusterKey": cluster_key,
+        },
+    )
+
+
 def test_frontier_screen_executes_exact_clear_then_guard_and_persists_ownership() -> None:
     harness = make_harness()
     engineer = harness.unit(entityId=1, blueprintId="uel0105")
@@ -786,6 +819,7 @@ def test_frontier_screen_executes_exact_clear_then_guard_and_persists_ownership(
     aa = harness.unit(entityId=3, blueprintId="uel0104")
     harness.brain.units = harness.lua.table_from([engineer, tank, aa])
     observation = harness.observe()
+    install_pending_frontier_operation(harness)
 
     execute_intents(
         harness,
@@ -807,6 +841,7 @@ def test_frontier_screen_reinforcement_extends_existing_mission_atomically() -> 
     aa = harness.unit(entityId=3, blueprintId="uel0104")
     harness.brain.units = harness.lua.table_from([engineer, tank, aa])
     observation = harness.observe()
+    install_pending_frontier_operation(harness)
     execute_intents(
         harness,
         [{"kind": "frontier_screen", "engineerToken": "1:1", "actorTokens": ["2:1"], "clusterKey": "cluster-a", "priority": 24, "reason": "secure_frontier"}],
@@ -832,6 +867,7 @@ def test_frontier_screen_order_failure_rolls_back_without_leaking_ownership(fail
     tank = harness.unit(entityId=2, blueprintId="uel0201")
     harness.brain.units = harness.lua.table_from([engineer, tank])
     observation = harness.observe()
+    install_pending_frontier_operation(harness)
     harness.calls[failure] = True
     intent = {"kind": "frontier_screen", "engineerToken": "1:1", "actorTokens": ["2:1"], "clusterKey": "cluster-a", "priority": 24, "reason": "secure_frontier"}
 
@@ -851,6 +887,7 @@ def test_frontier_screen_rejects_dead_captured_or_recycled_engineer_atomically()
         tank = harness.unit(entityId=2, blueprintId="uel0201")
         harness.brain.units = harness.lua.table_from([engineer, tank])
         observation = harness.observe()
+        install_pending_frontier_operation(harness)
         if mutation == "dead":
             engineer.Dead = True
         elif mutation == "captured":
@@ -1001,9 +1038,12 @@ def test_reclaim_candidates_ignore_units_stale_malformed_noise_and_sort_determin
 
 def test_reclaim_is_lowest_priority_and_one_prop_has_one_engineer_owner() -> None:
     snapshot = macro_snapshot("engineer")
+    engineers = [unit for unit in snapshot["units"] if unit["role"] == "engineer"]
+    for index, engineer in enumerate(engineers):
+        engineer.update(position=[10 + index, 2, 20], visionRadius=10)
     snapshot["reclaim"] = [
-        {"key": "prop:2", "position": [14, 2, 20], "mass": 50, "reserved": False},
-        {"key": "prop:4", "position": [12, 2, 20], "mass": 40, "reserved": False},
+        {"key": "prop:2", "position": [14, 2, 20], "mass": 50, "reserved": False, "observerToken": engineers[0]["token"], "observedTick": 0, "visionRadius": 10},
+        {"key": "prop:4", "position": [12, 2, 20], "mass": 40, "reserved": False, "observerToken": engineers[0]["token"], "observedTick": 0, "visionRadius": 10},
     ]
 
     reclaim = intents_of(decide(snapshot), "reclaim")
@@ -1107,6 +1147,7 @@ def test_controller_defense_cannot_consume_persistently_owned_frontier_escort() 
     reserve = harness.unit(entityId=3, blueprintId="uel0201")
     harness.brain.units = harness.lua.table_from([engineer, escort, reserve])
     observation = harness.observe()
+    install_pending_frontier_operation(harness)
     execute_intents(
         harness,
         [{"kind": "frontier_screen", "engineerToken": "1:1", "actorTokens": ["2:1"], "clusterKey": "cluster-a", "priority": 24, "reason": "secure_frontier"}],

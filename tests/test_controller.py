@@ -78,6 +78,14 @@ def make_harness() -> ControllerHarness:
                 return states[name] or false
             end
             function unit:IsPaused() return self.options.paused or false end
+            function unit:IsIntelEnabled(kind)
+                return kind == 'Vision' and self.options.visionEnabled ~= false
+            end
+            function unit:GetIntelRadius(kind)
+                if kind ~= 'Vision' then return 0 end
+                local intel = self.options.blueprintIntel or {}
+                return self.options.visionRadius or intel.VisionRadius or 10
+            end
             function unit:CanBuild(blueprintId)
                 local canBuild = self.options.canBuild or {}
                 return canBuild[blueprintId] == true
@@ -127,6 +135,12 @@ def make_harness() -> ControllerHarness:
             massIncome = 2,
             massUsage = 1,
             massRequested = 1,
+            armyStats = {
+                Economy_TotalProduced_Mass = 0,
+                Economy_TotalConsumed_Mass = 0,
+                Economy_Reclaimed_Mass = 0,
+                Economy_AccumExcess_Mass = 0,
+            },
         }
         function brain:GetArmyStartPos() return self.startX, self.startZ end
         function brain:GetFactionIndex() return self.faction end
@@ -143,6 +157,12 @@ def make_harness() -> ControllerHarness:
         function brain:GetEconomyIncome(resource) return resource == 'ENERGY' and self.energyIncome or self.massIncome end
         function brain:GetEconomyUsage(resource) return resource == 'ENERGY' and self.energyUsage or self.massUsage end
         function brain:GetEconomyRequested(resource) return resource == 'ENERGY' and self.energyUsage or self.massRequested end
+        function brain:GetArmyStat(name, default)
+            local value = self.armyStats and self.armyStats[name]
+            if value == nil then return { Value = default } end
+            if type(value) == 'table' then return value end
+            return { Value = value }
+        end
         function brain:CanBuildStructureAt(blueprintId, position)
             table.insert(calls.canBuild, { blueprintId, {position[1], position[2], position[3]} })
             if type(self.canBuildAt) == 'function' then return self.canBuildAt(blueprintId, position) end
@@ -196,6 +216,7 @@ def make_harness() -> ControllerHarness:
         end
         function IssueBuildMobile(units, position, blueprintId, alternatives)
             table.insert(calls.buildMobile, { units = units, position = position, blueprintId = blueprintId, alternatives = alternatives, argc = 4 })
+            if calls.failBuildMobile then error('build mobile failed') end
             return { kind = 'build-mobile' }
         end
         function IssueBuildFactory(units, blueprintId, count)
@@ -272,6 +293,9 @@ def make_harness() -> ControllerHarness:
     lua.execute(source("lua/AI/Overmind4/Controller.lua"))
     brain = lua.globals().brain
     controller = lua.globals().Controller.Create(brain)
+    assert controller.crossMapOffenseEnabled is False
+    # Legacy executor tests opt back into dormant offense adapters explicitly.
+    controller.crossMapOffenseEnabled = True
     return ControllerHarness(
         lua=lua,
         brain=brain,

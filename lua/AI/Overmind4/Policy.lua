@@ -10,6 +10,8 @@ local ATTACK_ARTILLERY = 4
 local ACU_RETREAT_HEALTH_RATIO = 0.55
 local COMMANDER_PUSH_HEALTH_RATIO = 0.75
 local LOW_ENERGY_STORED_RATIO = 0.35
+local MIN_RECOVERY_ENGINEERS = 1
+local CONTROLLED_RECLAIM_RADIUS = 10
 local TableGetn = table.getn
 local TableInsert = table.insert
 
@@ -62,19 +64,74 @@ local function IsUsablePosition(position)
         and type(position[3]) == 'number'
 end
 
-local function CountRoles(units, pending)
+local function PositionDistanceSquared(a, b)
+    if not IsUsablePosition(a) or not IsUsablePosition(b) then
+        return 1000000000000
+    end
+    local dx = a[1] - b[1]
+    local dz = a[3] - b[3]
+    return dx * dx + dz * dz
+end
+
+local function ReclaimVisibleToEngineer(candidate, engineer)
+    if engineer.visionEnabled == false then return false end
+    local radius = math.min(
+        CONTROLLED_RECLAIM_RADIUS,
+        tonumber(engineer.visionRadius) or CONTROLLED_RECLAIM_RADIUS,
+        tonumber(candidate.visionRadius) or CONTROLLED_RECLAIM_RADIUS
+    )
+    return radius > 0
+        and PositionDistanceSquared(candidate.position, engineer.position)
+            <= radius * radius
+end
+
+local function PendingMatchesFoundation(operation, foundations)
+    for _, foundation in ipairs(foundations or {}) do
+        if operation.buildRole == foundation.role
+            and ((operation.targetToken
+                    and operation.targetToken == foundation.targetToken)
+                or (operation.placementKey
+                    and operation.placementKey == foundation.placementKey)
+                or (IsUsablePosition(operation.position)
+                    and PositionDistanceSquared(operation.position, foundation.position) <= 4))
+        then
+            return true
+        end
+    end
+    return false
+end
+
+local function CountRoles(units, pending, foundations)
     local counts = {}
     for _, unit in ipairs(units) do
         if unit.role and unit.complete == true then
             counts[unit.role] = (counts[unit.role] or 0) + 1
         end
     end
+    for _, foundation in ipairs(foundations or {}) do
+        if foundation.role and type(foundation.targetToken) == 'string' then
+            counts[foundation.role] = (counts[foundation.role] or 0) + 1
+        end
+    end
     for _, operation in ipairs(pending or {}) do
-        if operation.buildRole then
+        if operation.buildRole
+            and not PendingMatchesFoundation(operation, foundations)
+        then
             counts[operation.buildRole] = (counts[operation.buildRole] or 0) + 1
         end
     end
     return counts
+end
+
+local function SortFoundations(foundations)
+    local sorted = CopyArray(foundations)
+    table.sort(sorted, function(a, b)
+        local ar = tostring(a.role or '')
+        local br = tostring(b.role or '')
+        if ar == br then return tostring(a.targetToken or '') < tostring(b.targetToken or '') end
+        return ar < br
+    end)
+    return sorted
 end
 
 local function PendingActors(pending)
@@ -248,6 +305,34 @@ local function BuildAtPlacement(actor, role, position, priority, reason)
         position = position,
         priority = priority,
         reason = reason,
+    }
+end
+
+local function FirstOrphanFoundation(snapshot, engineer, virtualFoundations)
+    for _, foundation in ipairs(SortFoundations(snapshot.foundations or {})) do
+        if type(foundation.targetToken) == 'string'
+            and type(foundation.role) == 'string'
+            and IsUsablePosition(foundation.position)
+            and foundation.reserved ~= true
+            and not virtualFoundations[foundation.targetToken]
+            and CanBuild(engineer, foundation.role)
+        then
+            return foundation
+        end
+    end
+    return nil
+end
+
+local function AssistFoundation(actor, foundation)
+    return {
+        kind = 'assist_structure',
+        actorToken = actor.token,
+        buildRole = foundation.role,
+        targetToken = foundation.targetToken,
+        placementKey = foundation.placementKey,
+        position = foundation.position,
+        priority = 18,
+        reason = 'finish_orphan',
     }
 end
 
@@ -535,8 +620,10 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         return av > bv
     end)
     local virtualReclaim = {}
+    local virtualFoundations = {}
     for _, operation in ipairs(snapshot.pending or {}) do
         if operation.targetKey then virtualReclaim[operation.targetKey] = true end
+        if operation.targetToken then virtualFoundations[operation.targetToken] = true end
     end
     local placementIndex = {
         power_generator = (counts.power_generator or 0) + 1,
@@ -551,6 +638,19 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 virtualReserved[site.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(engineer, 'mass_extractor', site, 18, 'rebuild_mex')
+            end
+        end
+
+
+        if not intent and not underContact then
+            local foundation = FirstOrphanFoundation(
+                snapshot,
+                engineer,
+                virtualFoundations
+            )
+            if foundation then
+                virtualFoundations[foundation.targetToken] = true
+                intent = AssistFoundation(engineer, foundation)
             end
         end
 
@@ -588,7 +688,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and not lostOutstanding
             and not underContact
             and not plannedFactory
-            and allowPlacement
             and CanBuild(engineer, 'land_factory')
         then
             local currentFactories = counts.land_factory or 0
@@ -656,6 +755,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     and candidate.reserved ~= true
                     and not virtualReclaim[candidate.key]
                     and (tonumber(candidate.mass) or 0) > 0
+                    and ReclaimVisibleToEngineer(candidate, engineer)
                 then
                     plannedReclaim = true
                     virtualReclaim[candidate.key] = true
@@ -708,6 +808,14 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
         or (tonumber(economy.massTrend) or 0) < 0
         or (tonumber(economy.massStoredRatio) or 0) < 0.1
     local plannedEngineer = false
+    local completedEngineers = 0
+    for _, unit in ipairs(units or {}) do
+        if unit.role == 'engineer' and unit.complete == true then
+            completedEngineers = completedEngineers + 1
+        end
+    end
+    local recoveryMode = completedEngineers < MIN_RECOVERY_ENGINEERS
+    local recoveryOutstanding = (counts.engineer or 0) >= MIN_RECOVERY_ENGINEERS
     local rallyPosition = macro and macro.rallyPosition
         or snapshot.rallyPosition
         or snapshot.basePosition
@@ -728,7 +836,17 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             else
                 local role = nil
                 local reason = 'continuous_land_production'
-                if not plannedEngineer
+                if recoveryMode
+                    and not plannedEngineer
+                    and not recoveryOutstanding
+                    and CanBuild(factory, 'engineer')
+                then
+                    role = 'engineer'
+                    reason = 'recovery_engineer_floor'
+                    plannedEngineer = true
+                    recoveryOutstanding = true
+                elseif not recoveryMode
+                    and not plannedEngineer
                     and not massStalled
                     and (counts.engineer or 0) < engineerDemand
                     and CanBuild(factory, 'engineer')
@@ -736,9 +854,12 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     role = 'engineer'
                     reason = macro and 'construction_capacity' or reason
                     plannedEngineer = true
-                elseif (counts.scout or 0) < 1 and CanBuild(factory, 'scout') then
+                elseif not recoveryMode
+                    and (counts.scout or 0) < 1
+                    and CanBuild(factory, 'scout')
+                then
                     role = 'scout'
-                else
+                elseif not recoveryMode then
                     local candidate = NextCombatRole(counts)
                     if CanBuild(factory, candidate) then
                         role = candidate
@@ -1033,7 +1154,7 @@ Policy.Decide = function(snapshot)
         nil
     )
 
-    local counts = CountRoles(units, pending)
+    local counts = CountRoles(units, pending, snapshot.foundations or {})
     local virtualReserved = {}
     local virtualPlacements = {}
     for _, operation in ipairs(pending) do
@@ -1050,6 +1171,7 @@ Policy.Decide = function(snapshot)
         AddIntent(intents, intent)
     end
     local underContact = snapshot.enemyContact ~= nil
+        and snapshot.enemyContact.immediate == true
     local commanderRecovery = state and state.commanderRetreating == true
     local commanderClaimsAcu = false
     local opening = nil
@@ -1078,6 +1200,23 @@ Policy.Decide = function(snapshot)
     end
     if not underContact and not emergency and not commanderRecovery then
         FrontierScreenDecision(snapshot, units, pendingActors, intents)
+        local screened = {}
+        for _, intent in ipairs(intents) do
+            if intent.kind == 'frontier_screen' then
+                for _, token in ipairs(intent.actorTokens or {}) do screened[token] = true end
+            end
+        end
+        if next(screened) then
+            for _, intent in ipairs(intents) do
+                if intent.kind == 'defend_wave' then
+                    local retained = {}
+                    for _, token in ipairs(intent.actorTokens or {}) do
+                        if not screened[token] then TableInsert(retained, token) end
+                    end
+                    intent.actorTokens = retained
+                end
+            end
+        end
     end
     FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     if not underContact and not emergency and not commanderRecovery then

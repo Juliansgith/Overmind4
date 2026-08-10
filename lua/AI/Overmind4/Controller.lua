@@ -27,11 +27,12 @@ local WAVE_STUCK_TICKS = 300
 local SNAPSHOT_INTERVAL_TICKS = 300
 local SITE_BACKOFF_TICKS = 300
 local FRONTIER_CLUSTER_DISTANCE = 18
-local FRONTIER_CONNECTION_DISTANCE = 60
 local FRONTIER_SCREEN_MAX = 4
 local HOME_RESERVE_MIN = 4
 local MASS_SURPLUS_TICKS = 300
-local MASS_SURPLUS_PER_TICK = 1
+-- A UEF T1 land factory's most expensive normal queue member is T1 AA:
+-- 55 mass / (220 build time / 20 factory build rate) / 10 ticks per second.
+local NEXT_FACTORY_SAFE_DRAIN_PER_TICK = 0.5
 local MASS_STORED_FLOOR = 0.15
 local RECLAIM_QUERY_INTERVAL_TICKS = 300
 local RECLAIM_QUERY_RADIUS = 10
@@ -41,6 +42,7 @@ local MAX_RECLAIM_CANDIDATES = 64
 local MIN_RECLAIM_MASS = 1
 local TableGetn = table.getn
 local TableInsert = table.insert
+local LiveOwnedActor
 
 local BUILD_ROLES = {
     acu = { 'land_factory', 'power_generator', 'mass_extractor' },
@@ -55,12 +57,25 @@ local COMBAT_ROLES = {
     tank = true,
 }
 
+local PLACEMENT_FOUNDATION_ROLES = {
+    land_factory = true,
+    power_generator = true,
+}
+
 local function SafeCall(defaultValue, fn, ...)
     local ok, value = pcall(fn, unpack(arg))
     if ok then
         return value
     end
     return defaultValue
+end
+
+local function SafeArmyStat(brain, name)
+    local raw = SafeCall(nil, brain.GetArmyStat, brain, name, -1)
+    if type(raw) ~= 'table' then return -1 end
+    local value = tonumber(raw.Value)
+    if value == nil then return -1 end
+    return value
 end
 
 local function CopyPosition(position)
@@ -325,11 +340,16 @@ local function PendingArray(controller)
             issuedTick = operation.issuedTick,
             deadlineTick = operation.deadlineTick,
             lastProgressTick = operation.lastProgressTick,
+            lastDistance = operation.lastDistance,
+            lastFraction = operation.lastFraction,
+            phase = operation.phase,
             reason = operation.reason,
             clusterKey = operation.clusterKey,
             targetToken = operation.targetToken,
             targetKey = operation.targetKey,
             targetValue = operation.targetValue,
+            observerToken = operation.observerToken,
+            observedTick = operation.observedTick,
         })
     end
     return pending
@@ -374,11 +394,13 @@ local function NormalizeOwnUnit(controller, unit)
 
     local fraction = tonumber(SafeCall(0, unit.GetFractionComplete, unit)) or 0
     local complete = fraction >= 1
+    local buildingState = SafeCall(false, unit.IsUnitState, unit, 'Building') == true
+    local movingState = SafeCall(false, unit.IsUnitState, unit, 'Moving') == true
     local busy = SafeCall(false, unit.IsIdleState, unit) ~= true
-        or SafeCall(false, unit.IsUnitState, unit, 'Building') == true
+        or buildingState
         or SafeCall(false, unit.IsUnitState, unit, 'Upgrading') == true
         or SafeCall(false, unit.IsUnitState, unit, 'Enhancing') == true
-        or SafeCall(false, unit.IsUnitState, unit, 'Moving') == true
+        or movingState
         or SafeCall(false, unit.IsPaused, unit) == true
     local token = UnitToken(controller, unit, entityId)
     local canBuild = {}
@@ -404,7 +426,11 @@ local function NormalizeOwnUnit(controller, unit)
     local buildRate = tonumber(SafeCall(nil, unit.GetBuildRate, unit))
         or tonumber(economy.BuildRate)
         or 1
+    local buildDistance = tonumber(economy.MaxBuildDistance) or 10
     local visionRadius = tonumber(intel.VisionRadius) or RECLAIM_QUERY_RADIUS
+    local liveVisionRadius = tonumber(SafeCall(nil, unit.GetIntelRadius, unit, 'Vision'))
+    if liveVisionRadius and liveVisionRadius >= 0 then visionRadius = liveVisionRadius end
+    local visionEnabled = SafeCall(true, unit.IsIntelEnabled, unit, 'Vision') ~= false
 
     controller.unitRefs[token] = unit
     return {
@@ -414,6 +440,8 @@ local function NormalizeOwnUnit(controller, unit)
         fractionComplete = fraction,
         idle = complete and not busy,
         busy = busy,
+        building = buildingState,
+        moving = movingState,
         healthRatio = healthRatio,
         position = position,
         canBuild = canBuild,
@@ -425,7 +453,9 @@ local function NormalizeOwnUnit(controller, unit)
         nearRally = nearRally,
         moveSpeed = moveSpeed,
         buildRate = buildRate,
+        buildDistance = buildDistance,
         visionRadius = visionRadius,
+        visionEnabled = visionEnabled,
         availableForWave = COMBAT_ROLES[role] == true and complete and not assigned and nearStaging,
     }
 end
@@ -512,6 +542,59 @@ local function SiteSnapshot(controller, markers, ownRecords)
         return ad < bd
     end)
     return sites
+end
+
+local function RefreshFoundationReservations(controller, foundations)
+    local reservedTargets = {}
+    local reservedPlacements = {}
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.targetToken then reservedTargets[operation.targetToken] = true end
+        if operation.placementKey then reservedPlacements[operation.placementKey] = true end
+    end
+    for _, foundation in ipairs(foundations or {}) do
+        foundation.reserved = reservedTargets[foundation.targetToken] == true
+            or reservedPlacements[foundation.placementKey] == true
+        if foundation.reserved ~= true then
+            for _, operation in pairs(controller.pending or {}) do
+                if operation.buildRole == foundation.role
+                    and operation.position
+                    and DistanceSquared(operation.position, foundation.position)
+                        <= PLACEMENT_MATCH_DISTANCE * PLACEMENT_MATCH_DISTANCE
+                then
+                    foundation.reserved = true
+                    break
+                end
+            end
+        end
+    end
+end
+
+local function FoundationSnapshot(controller, ownRecords)
+    local foundations = {}
+    for _, unit in ipairs(ownRecords or {}) do
+        if PLACEMENT_FOUNDATION_ROLES[unit.role] == true
+            and unit.complete ~= true
+            and type(unit.token) == 'string'
+            and CopyPosition(unit.position)
+        then
+            local placementKey = PlacementKey(unit.position)
+            TableInsert(foundations, {
+                key = 'Foundation:' .. unit.token,
+                targetToken = unit.token,
+                role = unit.role,
+                position = CopyPosition(unit.position),
+                placementKey = placementKey,
+                fractionComplete = tonumber(unit.fractionComplete) or 0,
+                reserved = false,
+            })
+        end
+    end
+    table.sort(foundations, function(a, b)
+        if a.role == b.role then return a.targetToken < b.targetToken end
+        return a.role < b.role
+    end)
+    RefreshFoundationReservations(controller, foundations)
+    return foundations
 end
 
 local function UpdateMexHistory(controller, massSites)
@@ -610,7 +693,10 @@ local function FrontierClusters(controller, massSites)
                 local distance = SiteDistanceToAnchors(member, anchors)
                 if distance < adjacentDistance then adjacentDistance = distance end
             end
-            if TableGetn(unfinished) > 0 and adjacentDistance <= FRONTIER_CONNECTION_DISTANCE then
+            -- CanPathTo on both the engineer and land-screen layers is the
+            -- connectivity contract.  A Euclidean cutoff deadlocks sparse
+            -- maps such as SCMP_006 even though the next cluster is pathable.
+            if TableGetn(unfinished) > 0 then
                 table.sort(unfinished, function(a, b)
                     local ad = SiteDistanceToAnchors(a, anchors)
                     local bd = SiteDistanceToAnchors(b, anchors)
@@ -729,7 +815,7 @@ local function PropAlive(prop)
         and SafeCall(true, prop.BeenDestroyed, prop) ~= true
 end
 
-local function NormalizeReclaimProp(prop, center, radius)
+local function NormalizeReclaimProp(prop, center, radius, observerToken, observedTick)
     if SafeCall(false, IsProp, prop) ~= true or not PropAlive(prop) then return nil end
     local position = CopyPosition(prop.CachePosition or SafeCall(nil, prop.GetPosition, prop))
     if not position or Distance(position, center) > radius then return nil end
@@ -744,6 +830,9 @@ local function NormalizeReclaimProp(prop, center, radius)
         position = position,
         mass = mass,
         reference = prop,
+        observerToken = observerToken,
+        observedTick = observedTick,
+        visionRadius = radius,
     }
 end
 
@@ -757,6 +846,9 @@ local function ReclaimSnapshot(controller)
                 position = CopyPosition(candidate.position),
                 mass = candidate.mass,
                 reserved = controller.reclaimReservations[candidate.key] ~= nil,
+                observerToken = candidate.observerToken,
+                observedTick = candidate.observedTick,
+                visionRadius = candidate.visionRadius,
             })
         end
     end
@@ -772,12 +864,11 @@ local function RefreshReclaim(controller, ownRecords, massSites)
     local byKey = {}
     local refs = {}
     local engineerCount = 0
-    local considered = 0
     for _, record in ipairs(ownRecords or {}) do
         if engineerCount < MAX_RECLAIM_QUERY_ENGINEERS
-            and considered < MAX_RECLAIM_CANDIDATES
             and record.role == 'engineer'
             and record.complete == true
+            and record.visionEnabled ~= false
             and PositionControlled(controller, record.position, massSites)
         then
             engineerCount = engineerCount + 1
@@ -802,17 +893,24 @@ local function RefreshReclaim(controller, ownRecords, massSites)
                 end
                 local raw = SafeCall({}, function() return GetReclaimablesInRect(rectangle) end)
                 for _, prop in pairs(raw or {}) do
-                    if considered < MAX_RECLAIM_CANDIDATES then
-                        considered = considered + 1
-                        local candidate = NormalizeReclaimProp(prop, record.position, radius)
-                        if candidate
-                            and PositionControlled(controller, candidate.position, massSites)
+                    local candidate = NormalizeReclaimProp(
+                        prop,
+                        record.position,
+                        radius,
+                        record.token,
+                        tick
+                    )
+                    if candidate
+                        and PositionControlled(controller, candidate.position, massSites)
+                    then
+                        local previous = byKey[candidate.key]
+                        if not previous
+                            or candidate.mass > previous.mass
+                            or (candidate.mass == previous.mass
+                                and candidate.observerToken < previous.observerToken)
                         then
-                            local previous = byKey[candidate.key]
-                            if not previous or candidate.mass > previous.mass then
-                                byKey[candidate.key] = candidate
-                                refs[candidate.key] = candidate.reference
-                            end
+                            byKey[candidate.key] = candidate
+                            refs[candidate.key] = candidate.reference
                         end
                     end
                 end
@@ -829,8 +927,23 @@ local function RefreshReclaim(controller, ownRecords, massSites)
         if a.mass == b.mass then return a.key < b.key end
         return a.mass > b.mass
     end)
-    controller.reclaimCandidates = candidates
-    controller.reclaimRefs = refs
+    local selected = {}
+    local selectedRefs = {}
+    for index = 1, math.min(TableGetn(candidates), MAX_RECLAIM_CANDIDATES) do
+        local candidate = candidates[index]
+        TableInsert(selected, candidate)
+        selectedRefs[candidate.key] = refs[candidate.key]
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.kind == 'reclaim'
+            and operation.targetKey
+            and refs[operation.targetKey]
+        then
+            selectedRefs[operation.targetKey] = refs[operation.targetKey]
+        end
+    end
+    controller.reclaimCandidates = selected
+    controller.reclaimRefs = selectedRefs
     return ReclaimSnapshot(controller)
 end
 
@@ -842,7 +955,7 @@ local function UpdateMassSurplus(controller, economy)
     local unused = math.max(0, income - requested)
     economy.unusedMass = unused
     local healthy = requested <= income
-        and unused >= MASS_SURPLUS_PER_TICK
+        and unused >= NEXT_FACTORY_SAFE_DRAIN_PER_TICK
         and stored >= MASS_STORED_FLOOR
         and (trend > 0 or stored >= 0.8)
     local tick = CurrentTick(controller)
@@ -862,18 +975,54 @@ local function StructureOperation(operation)
         and (operation.kind == 'build_structure' or operation.kind == 'assist_structure')
 end
 
+local function StructureWorkKey(controller, operation)
+    if operation.siteKey then return 'Site:' .. tostring(operation.siteKey) end
+    for _, foundation in ipairs(controller.currentFoundations or {}) do
+        if operation.buildRole == foundation.role
+            and ((operation.targetToken
+                    and operation.targetToken == foundation.targetToken)
+                or (operation.placementKey
+                    and operation.placementKey == foundation.placementKey)
+                or (operation.position
+                    and DistanceSquared(operation.position, foundation.position)
+                        <= PLACEMENT_MATCH_DISTANCE * PLACEMENT_MATCH_DISTANCE))
+        then
+            return foundation.placementKey
+                or ('Foundation:' .. tostring(foundation.targetToken))
+        end
+    end
+    return operation.placementKey
+        or (operation.targetToken and ('Foundation:' .. operation.targetToken))
+        or ('Actor:' .. tostring(operation.actorToken))
+end
+
 local function MacroSnapshot(controller, units)
     local rebuildJobs = 0
     local frontierJobs = 0
     local reclaimJobs = 0
     local structureJobs = 0
-    local pendingFactories = 0
+    local constructionWork = {}
+    local factoryWork = {}
+    for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
+        if site.complete ~= true
+            and (site.lost == true or site.frontierSelected == true)
+        then
+            constructionWork['Site:' .. tostring(site.key)] = true
+        end
+    end
+    for _, foundation in ipairs(controller.currentFoundations or {}) do
+        local key = foundation.placementKey or ('Foundation:' .. tostring(foundation.targetToken))
+        constructionWork[key] = true
+        if foundation.role == 'land_factory' then factoryWork[key] = true end
+    end
     for _, operation in pairs(controller.pending or {}) do
         if StructureOperation(operation) then
             structureJobs = structureJobs + 1
             if operation.reason == 'rebuild_mex' then rebuildJobs = rebuildJobs + 1 end
             if operation.reason == 'frontier_expansion' then frontierJobs = frontierJobs + 1 end
-            if operation.buildRole == 'land_factory' then pendingFactories = pendingFactories + 1 end
+            local key = StructureWorkKey(controller, operation)
+            constructionWork[key] = true
+            if operation.buildRole == 'land_factory' then factoryWork[key] = true end
         elseif operation.kind == 'reclaim' then
             reclaimJobs = reclaimJobs + 1
         end
@@ -884,9 +1033,9 @@ local function MacroSnapshot(controller, units)
             frontierWork = frontierWork + 1
         end
     end
-    local constructionBacklog = controller.lostMexCount + frontierWork + structureJobs
+    local constructionBacklog = CountArray(constructionWork)
     local engineerDemand = math.max(2, 2 + math.floor((constructionBacklog + 1) / 2))
-    local factories = CountRole(units, 'land_factory') + pendingFactories
+    local factories = CountRole(units, 'land_factory') + CountArray(factoryWork)
     local factoryDemand = math.max(2, factories)
     if controller.massSurplusTicks >= MASS_SURPLUS_TICKS then
         factoryDemand = factoryDemand + 1
@@ -1000,6 +1149,11 @@ local function ReleaseOperation(controller, token, reason)
     then
         controller.reclaimReservations[operation.targetKey] = nil
     end
+    if operation.targetToken
+        and controller.foundationReservations[operation.targetToken] == token
+    then
+        controller.foundationReservations[operation.targetToken] = nil
+    end
     if StructureOperation(operation)
         and (reason == 'rejected'
             or reason == 'timeout'
@@ -1068,13 +1222,36 @@ local function OperationCompleted(controller, operation, observation, record)
         and record.idle == true
 end
 
-local function OperationProgress(operation, observation, record)
+local function SetOperationPhase(controller, operation, phase)
+    if not phase or operation.phase == phase then return end
+    local previous = operation.phase or 'unknown'
+    operation.phase = phase
+    operation.lastProgressTick = CurrentTick(controller)
+    Emit(controller, 'job_phase_changed', {
+        actor = operation.actorToken,
+        from = previous,
+        phase = phase,
+    })
+end
+
+local function OperationProgress(controller, operation, observation, record)
     local progressed = false
+    local remainingDistance = nil
     if operation.position and record and record.position then
         local distance = Distance(record.position, operation.position)
-        if distance + 1 < (tonumber(operation.lastDistance) or 1000000000000) then
-            operation.lastDistance = distance
-            progressed = true
+        remainingDistance = distance
+        operation.lastDistance = distance
+        if operation.phase == 'travelling' then
+            local speed = tonumber(record.moveSpeed) or DEFAULT_ENGINEER_SPEED
+            local heartbeatDistance = math.max(4, speed * 5)
+            if not operation.lastProgressPosition then
+                operation.lastProgressPosition = CopyPosition(record.position)
+            elseif Distance(record.position, operation.lastProgressPosition)
+                    >= heartbeatDistance
+            then
+                operation.lastProgressPosition = CopyPosition(record.position)
+                progressed = true
+            end
         end
     end
     if StructureOperation(operation) then
@@ -1082,8 +1259,28 @@ local function OperationProgress(operation, observation, record)
             and SiteState(observation, operation.siteKey)
             or PlacementState(observation, operation)
         local fraction = state and tonumber(state.fractionComplete) or 0
+        local assistArrived = operation.kind ~= 'assist_structure'
+            or record.building == true
+            or (remainingDistance ~= nil
+                and remainingDistance <= (tonumber(record.buildDistance) or 10))
+        if state and state.occupied == true and assistArrived then
+            SetOperationPhase(controller, operation, 'building')
+        end
         if fraction > (tonumber(operation.lastFraction) or 0) + 0.001 then
             operation.lastFraction = fraction
+            progressed = true
+        end
+    elseif operation.kind == 'reclaim' then
+        local reference = operation.targetKey and controller.reclaimRefs[operation.targetKey] or nil
+        local remaining = reference
+            and (tonumber(reference.MaxMassReclaim) or 0)
+                * (tonumber(reference.ReclaimLeft) or 0)
+            or 0
+        if record and record.busy == true then
+            SetOperationPhase(controller, operation, 'reclaiming')
+        end
+        if remaining + 0.001 < (tonumber(operation.lastTargetValue) or 1000000000000) then
+            operation.lastTargetValue = remaining
             progressed = true
         end
     end
@@ -1159,6 +1356,16 @@ local function RecordPending(controller, intent, record)
     local buildTicks = math.ceil((buildTime / buildRate) * 10 * 2)
     local deadline = tick + math.max(OPERATION_TIMEOUT_TICKS,
         travelTicks + buildTicks + BUILD_FINISH_ALLOWANCE_TICKS)
+    local phase = 'travelling'
+    if intent.kind == 'assist_structure'
+        and initialDistance <= (tonumber(record and record.buildDistance) or 10)
+    then
+        phase = 'building'
+    elseif intent.kind == 'reclaim' and initialDistance <= 2 then
+        phase = 'reclaiming'
+    elseif intent.kind == 'factory_build' then
+        phase = 'building'
+    end
     local operation = {
         actorToken = intent.actorToken,
         kind = intent.kind,
@@ -1170,14 +1377,20 @@ local function RecordPending(controller, intent, record)
         deadlineTick = deadline,
         lastProgressTick = tick,
         lastDistance = initialDistance,
+        lastProgressPosition = record and CopyPosition(record.position) or nil,
         initialDistance = initialDistance,
         lastFraction = 0,
+        phase = phase,
         accepted = false,
         reason = intent.reason,
         clusterKey = intent.clusterKey,
         targetToken = intent.targetToken,
         targetKey = intent.targetKey,
         targetValue = intent.targetValue,
+        lastTargetValue = intent.targetValue,
+        observerToken = intent.observerToken,
+        observedTick = intent.observedTick,
+        visionRadius = intent.visionRadius,
     }
     controller.pending[intent.actorToken] = operation
     if intent.siteKey then
@@ -1188,6 +1401,9 @@ local function RecordPending(controller, intent, record)
     end
     if intent.targetKey then
         controller.reclaimReservations[intent.targetKey] = intent.actorToken
+    end
+    if intent.targetToken then
+        controller.foundationReservations[intent.targetToken] = intent.actorToken
     end
 end
 
@@ -1206,12 +1422,19 @@ local function ExecuteStructure(controller, intent, record)
     local blueprintId = Catalog.IdFor(intent.buildRole)
     local position = TerrainPosition(intent.position)
     if not blueprintId or not position then return false end
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, record.role)
+    if not actor
+        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or SafeCall(false, actor.IsUnitState, actor, 'Building') == true
+        or SafeCall(false, actor.IsUnitState, actor, 'Moving') == true
+        or not CanUnitBuild(actor, blueprintId)
+    then
+        return false
+    end
     if SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, position) ~= true then
         BlockSite(controller, intent.siteKey or PlacementKey(position), 'preflight')
         return false
     end
-    local actor = controller.unitRefs[intent.actorToken]
-    if not actor or not CanUnitBuild(actor, blueprintId) then return false end
 
     RecordPending(controller, intent, record)
     local ok = pcall(function() IssueBuildMobile({ actor }, position, blueprintId, {}) end)
@@ -1291,7 +1514,7 @@ local function HealthyCommander(record)
         and health >= COMMANDER_PUSH_HEALTH_RATIO
 end
 
-local function LiveOwnedActor(controller, token, record, expectedRole)
+LiveOwnedActor = function(controller, token, record, expectedRole)
     if type(token) ~= 'string'
         or not record
         or record.token ~= token
@@ -1355,6 +1578,71 @@ local function LiveOwnedConstructionTarget(controller, token, record, expectedRo
     return target
 end
 
+local function LiveOwnedReference(controller, token, expectedRole)
+    if type(token) ~= 'string' then return nil, nil end
+    local actor = controller.unitRefs[token]
+    if not actor
+        or actor.Dead == true
+        or SafeCall(true, actor.BeenDestroyed, actor) == true
+        or SafeCall(-1, actor.GetArmy, actor) ~= controller.brain.Army
+        or (tonumber(SafeCall(0, actor.GetFractionComplete, actor)) or 0) < 1
+    then
+        return nil, nil
+    end
+    local entityId = SafeCall(nil, actor.GetEntityId, actor)
+    local generation = entityId and controller.entityGenerations[entityId] or nil
+    local blueprint = SafeCall(nil, actor.GetBlueprint, actor)
+    if not generation
+        or generation.reference ~= actor
+        or token ~= tostring(entityId) .. ':' .. tostring(generation.generation)
+        or not blueprint
+        or Catalog.RoleFor(blueprint.BlueprintId) ~= expectedRole
+    then
+        return nil, nil
+    end
+    return actor, CopyPosition(SafeCall(nil, actor.GetPosition, actor))
+end
+
+local function LiveVisionRadius(actor)
+    if not actor or SafeCall(true, actor.IsIntelEnabled, actor, 'Vision') == false then
+        return nil
+    end
+    local radius = tonumber(SafeCall(nil, actor.GetIntelRadius, actor, 'Vision'))
+    if radius == nil then
+        local blueprint = SafeCall(nil, actor.GetBlueprint, actor)
+        radius = blueprint and blueprint.Intel and tonumber(blueprint.Intel.VisionRadius) or nil
+    end
+    if not radius or radius <= 0 then return nil end
+    return math.min(RECLAIM_QUERY_RADIUS, radius)
+end
+
+local function ReclaimCandidate(controller, key)
+    for _, candidate in ipairs(controller.reclaimCandidates or {}) do
+        if candidate.key == key then return candidate end
+    end
+    return nil
+end
+
+local function CurrentReclaimTargetVisible(actor, center, radius, target)
+    if not actor or not center or not radius or not target then return false end
+    local rectangle = SafeCall(nil, Rect,
+        center[1] - radius,
+        center[3] - radius,
+        center[1] + radius,
+        center[3] + radius
+    ) or {
+        center[1] - radius,
+        center[3] - radius,
+        center[1] + radius,
+        center[3] + radius,
+    }
+    local raw = SafeCall({}, function() return GetReclaimablesInRect(rectangle) end)
+    for _, candidate in pairs(raw or {}) do
+        if candidate == target then return true end
+    end
+    return false
+end
+
 local function ExecuteAssistStructure(controller, intent, record, recordByToken)
     if controller.pending[intent.actorToken]
         or record.complete ~= true
@@ -1363,6 +1651,7 @@ local function ExecuteAssistStructure(controller, intent, record, recordByToken)
         or record.canBuild[intent.buildRole] ~= true
         or type(intent.targetToken) ~= 'string'
         or (intent.siteKey and controller.reservations[intent.siteKey])
+        or controller.foundationReservations[intent.targetToken]
     then
         return false
     end
@@ -1374,7 +1663,12 @@ local function ExecuteAssistStructure(controller, intent, record, recordByToken)
         targetRecord,
         intent.buildRole
     )
-    if not actor or not target then return false end
+    if not actor
+        or not target
+        or SafeCall(false, actor.IsIdleState, actor) ~= true
+    then
+        return false
+    end
 
     RecordPending(controller, intent, record)
     local ok = pcall(function() IssueGuard({ actor }, target) end)
@@ -1417,15 +1711,49 @@ local function ExecuteReclaim(controller, intent, record)
     then
         return false
     end
-    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'engineer')
+    local actor, actorPosition = LiveOwnedActor(controller, intent.actorToken, record, 'engineer')
+    local candidate = ReclaimCandidate(controller, intent.targetKey)
     local target = controller.reclaimRefs[intent.targetKey]
     local targetPosition = target
         and CopyPosition(target.CachePosition or SafeCall(nil, target.GetPosition, target))
         or nil
+    local observer = nil
+    local observerPosition = nil
+    if candidate then
+        observer, observerPosition = LiveOwnedReference(
+            controller,
+            candidate.observerToken,
+            'engineer'
+        )
+    end
+    local actorRadius = LiveVisionRadius(actor)
+    local observerRadius = LiveVisionRadius(observer)
+    local observedTick = candidate and tonumber(candidate.observedTick) or nil
+    local targetMass = target
+        and (tonumber(target.MaxMassReclaim) or 0)
+            * (tonumber(target.ReclaimLeft) or 0)
+        or 0
     if not actor
+        or not actorPosition
+        or not candidate
+        or not observer
+        or not observerPosition
+        or not observedTick
+        or CurrentTick(controller) - observedTick > RECLAIM_QUERY_INTERVAL_TICKS
+        or not actorRadius
+        or not observerRadius
         or not PropAlive(target)
         or SafeCall(false, IsProp, target) ~= true
         or not targetPosition
+        or Distance(actorPosition, targetPosition) > actorRadius
+        or Distance(observerPosition, targetPosition) > observerRadius
+        or targetMass < MIN_RECLAIM_MASS
+        or not CurrentReclaimTargetVisible(
+            actor,
+            actorPosition,
+            actorRadius,
+            target
+        )
         or not PositionControlled(
             controller,
             targetPosition,
@@ -1434,8 +1762,11 @@ local function ExecuteReclaim(controller, intent, record)
     then
         return false
     end
-    intent.targetValue = tonumber(intent.targetValue)
-        or ((tonumber(target.MaxMassReclaim) or 0) * (tonumber(target.ReclaimLeft) or 1))
+    intent.position = targetPosition
+    intent.targetValue = targetMass
+    intent.observerToken = candidate.observerToken
+    intent.observedTick = observedTick
+    intent.visionRadius = candidate.visionRadius
     RecordPending(controller, intent, record)
     local ok = pcall(function() IssueReclaim({ actor }, target) end)
     if not ok then
@@ -1454,6 +1785,14 @@ end
 
 local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActors)
     if type(intent.engineerToken) ~= 'string' then return false end
+    local frontierOperation = controller.pending[intent.engineerToken]
+    if not frontierOperation
+        or frontierOperation.reason ~= 'frontier_expansion'
+        or not StructureOperation(frontierOperation)
+        or frontierOperation.clusterKey ~= intent.clusterKey
+    then
+        return false
+    end
     local existingMission = controller.frontierMission
     if existingMission
         and (existingMission.engineerToken ~= intent.engineerToken
@@ -1994,6 +2333,7 @@ Controller.Create = function(brain)
         pending = {},
         reservations = {},
         reclaimReservations = {},
+        foundationReservations = {},
         reclaimCandidates = {},
         reclaimRefs = {},
         blockedSites = {},
@@ -2026,6 +2366,7 @@ Controller.Create = function(brain)
         lastSnapshotTick = -SNAPSHOT_INTERVAL_TICKS,
         lastReclaimQueryTick = -RECLAIM_QUERY_INTERVAL_TICKS,
         lastErrorTick = -REORDER_COOLDOWN_TICKS,
+        crossMapOffenseEnabled = false,
     }
     Controller.InitializeMap(controller)
     local base = controller.basePosition or {}
@@ -2078,6 +2419,8 @@ Controller.Observe = function(controller)
     UpdateMexHistory(controller, sites.mass)
     UpdateFrontier(controller, sites.mass)
     controller.currentSites = sites
+    local foundations = FoundationSnapshot(controller, units)
+    controller.currentFoundations = foundations
     for _, unit in ipairs(units) do
         unit.nearRally = DistanceSquared(unit.position, controller.rallyPosition)
             <= STAGING_RADIUS * STAGING_RADIUS
@@ -2097,6 +2440,7 @@ Controller.Observe = function(controller)
         units = units,
         enemyContact = NormalizeEnemyContact(controller, enemies, units),
         sites = sites,
+        foundations = foundations,
         reclaim = reclaim,
         placements = PlacementSnapshot(controller),
         pending = PendingArray(controller),
@@ -2175,7 +2519,7 @@ Controller.Reconcile = function(controller, observation)
         then
             ReleaseOperation(controller, token, 'target_missing')
         else
-            OperationProgress(operation, observation, record)
+            OperationProgress(controller, operation, observation, record)
             if StructureOperation(operation)
                 and operation.accepted == true
                 and record.idle == true
@@ -2187,11 +2531,14 @@ Controller.Reconcile = function(controller, observation)
                 and record.idle == true
             then
                 ReleaseOperation(controller, token, 'rejected')
+            elseif tick >= (tonumber(operation.deadlineTick) or (operation.issuedTick + OPERATION_TIMEOUT_TICKS)) then
+                ReleaseOperation(controller, token, 'timeout')
             elseif elapsed >= VERIFY_TICKS then
                 if record.busy then operation.accepted = true end
                 if not operation.accepted and elapsed > REJECT_TICKS then
                     ReleaseOperation(controller, token, 'rejected')
                 elseif StructureOperation(operation)
+                    and operation.phase == 'building'
                     and tick - (tonumber(operation.lastProgressTick) or operation.issuedTick)
                         > BUILD_STALL_TICKS
                 then
@@ -2210,6 +2557,8 @@ Controller.Reconcile = function(controller, observation)
             site.reserved = controller.reservations[site.key] ~= nil
         end
     end
+    RefreshFoundationReservations(controller, observation.foundations)
+    controller.currentFoundations = observation.foundations or {}
 
     if controller.commanderPushActive == true
         or controller.commanderMobilizing == true
@@ -2296,7 +2645,9 @@ Controller.Execute = function(controller, intents, observation)
     for _, intent in ipairs(ordered) do
         if intent.kind == 'frontier_screen' then
             ExecuteFrontierScreen(controller, intent, records, usedActors)
-        elseif intent.kind == 'mobilize_commander' then
+        elseif intent.kind == 'mobilize_commander'
+            and controller.crossMapOffenseEnabled == true
+        then
             ExecuteCommanderMobilization(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
                 usedActors[intent.acuToken] = true
@@ -2304,7 +2655,9 @@ Controller.Execute = function(controller, intents, observation)
             for _, token in ipairs(intent.actorTokens or {}) do
                 if type(token) == 'string' then usedActors[token] = true end
             end
-        elseif intent.kind == 'commander_push' then
+        elseif intent.kind == 'commander_push'
+            and controller.crossMapOffenseEnabled == true
+        then
             ExecuteCommanderPush(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
                 usedActors[intent.acuToken] = true
@@ -2312,7 +2665,9 @@ Controller.Execute = function(controller, intents, observation)
             for _, token in ipairs(intent.actorTokens or {}) do
                 if type(token) == 'string' then usedActors[token] = true end
             end
-        elseif intent.kind == 'reinforce_commander' then
+        elseif intent.kind == 'reinforce_commander'
+            and controller.crossMapOffenseEnabled == true
+        then
             ExecuteCommanderReinforcement(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
                 usedActors[intent.acuToken] = true
@@ -2320,7 +2675,8 @@ Controller.Execute = function(controller, intents, observation)
             for _, token in ipairs(intent.actorTokens or {}) do
                 if type(token) == 'string' then usedActors[token] = true end
             end
-        elseif intent.kind == 'attack_wave'
+        elseif (intent.kind == 'attack_wave'
+            and controller.crossMapOffenseEnabled == true)
             or intent.kind == 'defend_wave'
             or intent.kind == 'regroup_wave'
         then
@@ -2383,6 +2739,13 @@ Controller.Step = function(controller)
         local completedPgen = 0
         local completedHydro = 0
         local completedAa = 0
+        local buildingMex = 0
+        local buildingFactories = 0
+        local buildingEngineers = 0
+        local buildingPgen = 0
+        local buildingHydro = 0
+        local buildingCombat = 0
+        local buildingAa = 0
         local assignedMinTargetDistance = -1
         local assignedMaxTargetDistance = -1
         for _, unit in ipairs(observation.units) do
@@ -2409,6 +2772,9 @@ Controller.Step = function(controller)
                         end
                     end
                 end
+            elseif COMBAT_ROLES[unit.role] then
+                buildingCombat = buildingCombat + 1
+                if unit.role == 'anti_air' then buildingAa = buildingAa + 1 end
             end
         end
         for _, unit in ipairs(observation.units) do
@@ -2418,6 +2784,36 @@ Controller.Step = function(controller)
                 if unit.role == 'engineer' then completedEngineers = completedEngineers + 1 end
                 if unit.role == 'power_generator' then completedPgen = completedPgen + 1 end
                 if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
+            else
+                if unit.role == 'mass_extractor' then buildingMex = buildingMex + 1 end
+                if unit.role == 'land_factory' then buildingFactories = buildingFactories + 1 end
+                if unit.role == 'engineer' then buildingEngineers = buildingEngineers + 1 end
+                if unit.role == 'power_generator' then buildingPgen = buildingPgen + 1 end
+                if unit.role == 'hydrocarbon' then buildingHydro = buildingHydro + 1 end
+            end
+        end
+        local oldestActor = 'none'
+        local oldestKind = 'none'
+        local oldestPhase = 'none'
+        local oldestAge = -1
+        local oldestDistance = -1
+        local oldestFraction = -1
+        local oldestProgressTick = -1
+        local oldestDeadline = -1
+        local oldestIssued = nil
+        for _, token in ipairs(SortedKeys(controller.pending)) do
+            local operation = controller.pending[token]
+            local issued = tonumber(operation.issuedTick) or tick
+            if oldestIssued == nil or issued < oldestIssued then
+                oldestIssued = issued
+                oldestActor = token
+                oldestKind = tostring(operation.kind or 'none')
+                oldestPhase = tostring(operation.phase or 'unknown')
+                oldestAge = math.max(0, tick - issued)
+                oldestDistance = tonumber(operation.lastDistance) or -1
+                oldestFraction = tonumber(operation.lastFraction) or -1
+                oldestProgressTick = tonumber(operation.lastProgressTick) or -1
+                oldestDeadline = tonumber(operation.deadlineTick) or -1
             end
         end
         local firstIntent = intents[1] or {}
@@ -2452,6 +2848,13 @@ Controller.Step = function(controller)
             completed_hydro = completedHydro,
             completed_combat = combatTotal,
             completed_aa = completedAa,
+            building_mex = buildingMex,
+            building_factories = buildingFactories,
+            building_engineers = buildingEngineers,
+            building_pgen = buildingPgen,
+            building_hydro = buildingHydro,
+            building_combat = buildingCombat,
+            building_aa = buildingAa,
             mass_income_per_tick = tonumber(economy.massIncome) or 0,
             mass_usage_per_tick = tonumber(economy.massUsage) or 0,
             mass_requested_per_tick = tonumber(economy.massRequested) or 0,
@@ -2473,6 +2876,30 @@ Controller.Step = function(controller)
             factory_demand = tonumber(macro.factoryDemand) or 0,
             reclaim_target = tostring(macro.reclaimTarget or 'none'),
             reclaim_value = tonumber(macro.reclaimValue) or -1,
+            oldest_job_actor = oldestActor,
+            oldest_job_kind = oldestKind,
+            oldest_job_phase = oldestPhase,
+            oldest_job_age = oldestAge,
+            oldest_job_remaining_distance = oldestDistance,
+            oldest_job_fraction = oldestFraction,
+            oldest_job_last_progress_tick = oldestProgressTick,
+            oldest_job_deadline = oldestDeadline,
+            mass_produced_total = SafeArmyStat(
+                controller.brain,
+                'Economy_TotalProduced_Mass'
+            ),
+            mass_consumed_total = SafeArmyStat(
+                controller.brain,
+                'Economy_TotalConsumed_Mass'
+            ),
+            mass_reclaimed_total = SafeArmyStat(
+                controller.brain,
+                'Economy_Reclaimed_Mass'
+            ),
+            mass_excess_total = SafeArmyStat(
+                controller.brain,
+                'Economy_AccumExcess_Mass'
+            ),
             combat_total = combatTotal,
             combat_assigned = combatAssigned,
             combat_available = combatAvailable,
