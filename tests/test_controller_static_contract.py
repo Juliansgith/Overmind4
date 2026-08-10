@@ -37,6 +37,7 @@ ALLOWED_ISSUES = {
     "IssueBuildFactory",
     "IssueFactoryRallyPoint",
     "IssueAggressiveMove",
+    "IssueGuard",
     "IssueMove",
     "IssueClearCommands",
 }

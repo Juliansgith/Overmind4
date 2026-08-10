@@ -8,6 +8,7 @@ local COMBAT_ROLES = {
 local ATTACK_COMBAT = 24
 local ATTACK_ARTILLERY = 4
 local ACU_RETREAT_HEALTH_RATIO = 0.55
+local COMMANDER_PUSH_HEALTH_RATIO = 0.75
 local LOW_ENERGY_STORED_RATIO = 0.35
 local TableGetn = table.getn
 local TableInsert = table.insert
@@ -237,7 +238,7 @@ local function ActorTokens(units)
     return tokens
 end
 
-local function SafetyDecision(snapshot, units)
+local function FindAcu(units)
     local acu = nil
     for _, unit in ipairs(units) do
         if unit.role == 'acu' and unit.complete == true then
@@ -245,10 +246,36 @@ local function SafetyDecision(snapshot, units)
             break
         end
     end
+    return acu
+end
+
+local function DoctrineState(snapshot)
+    local state = snapshot.state
+    if type(state) ~= 'table' or type(state.initialWaveSent) ~= 'boolean' then
+        return nil
+    end
+    return state
+end
+
+local function SafetyDecision(snapshot, units, state)
+    local acu = FindAcu(units)
 
     local contact = snapshot.enemyContact
+    local commanderRecovery = state and state.commanderRetreating == true
+    local commanderSafety = state and state.commanderPushActive == true
+    local health = acu and tonumber(acu.healthRatio) or nil
+    local healthEmergency = false
+    if commanderRecovery then
+        healthEmergency = acu ~= nil
+    elseif commanderSafety then
+        healthEmergency = acu and (
+            not health or health < COMMANDER_PUSH_HEALTH_RATIO
+        )
+    elseif health then
+        healthEmergency = health < ACU_RETREAT_HEALTH_RATIO
+    end
     local emergency = acu and (
-        (tonumber(acu.healthRatio) or 1) < ACU_RETREAT_HEALTH_RATIO
+        healthEmergency
         or (contact and contact.immediate == true)
     )
     local combat = DefensiveCombatUnits(units)
@@ -481,13 +508,77 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     end
 end
 
-local function AttackDecision(snapshot, units, intents)
+local function AttackDecision(snapshot, units, pendingActors, state, intents)
     if snapshot.targetPath ~= true or not IsUsablePosition(snapshot.targetPosition) then
-        return
+        return false
     end
 
     local combat, artillery = CombatUnits(units)
-    if TableGetn(combat) >= ATTACK_COMBAT and artillery >= ATTACK_ARTILLERY then
+    if TableGetn(combat) < ATTACK_COMBAT or artillery < ATTACK_ARTILLERY then
+        return false
+    end
+
+    if not state then
+        return false
+    end
+
+    if state.initialWaveSent ~= true then
+        local acu = FindAcu(units)
+        local health = acu and tonumber(acu.healthRatio) or nil
+        if not acu
+            or not health
+            or health < COMMANDER_PUSH_HEALTH_RATIO
+            or pendingActors[acu.token]
+        then
+            return false
+        end
+        if acu.idle ~= true then
+            return true
+        end
+        if acu.nearStaging == false and IsUsablePosition(snapshot.stagingPosition) then
+            AddIntent(intents, {
+                kind = 'stage_acu',
+                actorToken = acu.token,
+                position = snapshot.stagingPosition,
+                priority = 34,
+                reason = 'stage_commander',
+            })
+            return true
+        end
+        if acu.nearStaging ~= true then
+            return true
+        end
+        AddIntent(intents, {
+            kind = 'commander_push',
+            acuToken = acu.token,
+            actorTokens = ActorTokens(combat),
+            position = snapshot.targetPosition,
+            priority = 40,
+            reason = 'acu_led_concentration',
+        })
+        return true
+    end
+
+    if state.commanderPushActive == true then
+        local acu = FindAcu(units)
+        if acu then
+            local health = tonumber(acu.healthRatio)
+            if not health or health < COMMANDER_PUSH_HEALTH_RATIO then
+                return false
+            end
+            AddIntent(intents, {
+                kind = 'reinforce_commander',
+                acuToken = acu.token,
+                actorTokens = ActorTokens(combat),
+                position = snapshot.targetPosition,
+                priority = 40,
+                reason = 'reinforce_commander',
+            })
+            return true
+        end
+    end
+
+    if state.commanderRetreating ~= true then
         AddIntent(intents, {
             kind = 'attack_wave',
             actorTokens = ActorTokens(combat),
@@ -496,6 +587,7 @@ local function AttackDecision(snapshot, units, intents)
             reason = 'concentration_gate',
         })
     end
+    return false
 end
 
 local function RegroupDecision(snapshot, units, intents)
@@ -551,7 +643,8 @@ Policy = {}
 Policy.Decide = function(snapshot)
     snapshot = snapshot or {}
     local units = SortRecords(snapshot.units or {})
-    local safety, emergency = SafetyDecision(snapshot, units)
+    local state = DoctrineState(snapshot)
+    local safety, emergency = SafetyDecision(snapshot, units, state)
 
     local pending = snapshot.pending or {}
     local counts = CountRoles(units, pending)
@@ -571,14 +664,25 @@ Policy.Decide = function(snapshot)
     for _, intent in ipairs(safety or {}) do
         AddIntent(intents, intent)
     end
+    local underContact = snapshot.enemyContact ~= nil
+    local commanderRecovery = state and state.commanderRetreating == true
+    local commanderClaimsAcu = false
+    if not underContact and not emergency and not commanderRecovery then
+        commanderClaimsAcu = AttackDecision(
+            snapshot,
+            units,
+            pendingActors,
+            state,
+            intents
+        )
+    end
     local opening = nil
-    if not emergency then
+    if not emergency and not underContact and not commanderRecovery and not commanderClaimsAcu then
         opening = AcuOpening(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors)
     end
     if opening then
         AddIntent(intents, opening)
     end
-    local underContact = snapshot.enemyContact ~= nil
     local localMass = CountClaimedLocalSites(((snapshot.sites or {}).mass) or {}, virtualReserved)
     local openingComplete = (counts.land_factory or 0) >= 2
         and (counts.power_generator or 0) >= 2
@@ -595,9 +699,8 @@ Policy.Decide = function(snapshot)
         intents
     )
     FactoryDecisions(snapshot, units, counts, pendingActors, intents)
-    if not underContact and not emergency then
+    if not underContact and not emergency and not commanderRecovery then
         RegroupDecision(snapshot, units, intents)
-        AttackDecision(snapshot, units, intents)
     end
     return SortIntents(intents)
 end
