@@ -329,3 +329,43 @@ def test_ordered_extra_army_array_preserves_faf_token_order() -> None:
         "ARMY_17",
         "NEUTRAL_CIVILIAN",
     ]
+
+
+def test_sparse_numeric_extra_armies_stop_the_ordered_prefix_at_first_hole() -> None:
+    lua, _, launched = _runtime(_valid_args())
+    map_utils = lua.globals().import_("/lua/ui/maputil.lua")
+    sparse_extras = lua.eval('{ "PREFIX_CIV", nil, "SPARSE_CIV" }')
+    map_utils.GetExtraArmies = lambda _: sparse_extras
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    team_info = launched[0].teamInfo
+    assert [team_info[index].ArmyName for index in range(5, 9)] == [
+        "PREFIX_CIV",
+        "SPARSE_CIV",
+        "ARMY_17",
+        "NEUTRAL_CIVILIAN",
+    ]
+
+
+def test_mixed_extra_armies_sort_every_entry_after_the_contiguous_prefix_once() -> None:
+    lua, _, launched = _runtime(_valid_args())
+    map_utils = lua.globals().import_("/lua/ui/maputil.lua")
+    mixed_extras = lua.eval(
+        '{ "PREFIX_2", "PREFIX_1", nil, "Z_NUMERIC", hash = "A_HASH" }'
+    )
+    map_utils.GetExtraArmies = lambda _: mixed_extras
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    team_info = launched[0].teamInfo
+    assert [team_info[index].ArmyName for index in range(5, 11)] == [
+        "PREFIX_2",
+        "PREFIX_1",
+        "A_HASH",
+        "Z_NUMERIC",
+        "ARMY_17",
+        "NEUTRAL_CIVILIAN",
+    ]

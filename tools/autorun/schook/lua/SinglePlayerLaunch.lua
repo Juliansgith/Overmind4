@@ -212,7 +212,10 @@ function StartCommandLineSession(mapName, isPerfTest)
     local nextIndex = armyCount + 1
     local extras = MapUtils.GetExtraArmies(scenario)
     if extras then
-        local orderedCount = table.getn(extras)
+        local orderedCount = 0
+        while extras[orderedCount + 1] ~= nil do
+            orderedCount = orderedCount + 1
+        end
         for index = 1, orderedCount do
             AddCivilian(sessionInfo.teamInfo, nextIndex, extras[index])
             nextIndex = nextIndex + 1
