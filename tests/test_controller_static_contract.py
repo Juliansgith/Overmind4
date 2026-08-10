@@ -85,3 +85,29 @@ def test_controller_has_exact_engine_observation_calls() -> None:
     controller = source("lua/AI/Overmind4/Controller.lua")
     assert re.search(r"GetListOfUnits\s*\(\s*categories\.ALLUNITS\s*,\s*false\s*,\s*false\s*\)", controller)
     assert re.search(r"GetUnitsAroundPoint\s*\(\s*categories\.MOBILE\s*,[^\n]+,[^\n]+,\s*'Enemy'\s*\)", controller)
+
+
+def test_controller_varargs_use_installed_luaplus_50_arg_semantics() -> None:
+    controller = source("lua/AI/Overmind4/Controller.lua")
+    assert "pcall(fn, ...)" not in controller
+    assert "pcall(fn, unpack(arg))" in controller
+
+
+def test_runtime_avoids_lua51_length_operator_in_installed_luaplus_50() -> None:
+    for relative in (
+        "lua/AI/Overmind4/Policy.lua",
+        "lua/AI/Overmind4/Controller.lua",
+    ):
+        executable = "\n".join(
+            line.split("--", 1)[0]
+            for line in source(relative).splitlines()
+        )
+        assert re.search(r"#\s*[A-Za-z_{(]", executable) is None, relative
+
+
+def test_runtime_does_not_use_missing_game_math_huge() -> None:
+    for relative in (
+        "lua/AI/Overmind4/Policy.lua",
+        "lua/AI/Overmind4/Controller.lua",
+    ):
+        assert "math.huge" not in source(relative), relative

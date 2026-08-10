@@ -17,6 +17,8 @@ local REORDER_COOLDOWN_TICKS = 100
 local WAVE_STUCK_TICKS = 300
 local WAVE_STUCK_DISTANCE = 4
 local SNAPSHOT_INTERVAL_TICKS = 300
+local TableGetn = table.getn
+local TableInsert = table.insert
 
 local BUILD_ROLES = {
     acu = { 'land_factory', 'power_generator', 'mass_extractor' },
@@ -32,7 +34,7 @@ local COMBAT_ROLES = {
 }
 
 local function SafeCall(defaultValue, fn, ...)
-    local ok, value = pcall(fn, ...)
+    local ok, value = pcall(fn, unpack(arg))
     if ok then
         return value
     end
@@ -60,7 +62,7 @@ end
 
 local function DistanceSquared(a, b)
     if not a or not b then
-        return math.huge
+        return 1000000000000
     end
     local dx = a[1] - b[1]
     local dz = a[3] - b[3]
@@ -89,7 +91,7 @@ end
 local function SortedKeys(values)
     local keys = {}
     for key, _ in pairs(values or {}) do
-        keys[#keys + 1] = key
+        TableInsert(keys, key)
     end
     table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
     return keys
@@ -112,11 +114,11 @@ local function MarkerArray(kind)
         if marker then
             local position = CopyPosition(marker.Position or marker.position)
             if position then
-                copy[#copy + 1] = {
+                TableInsert(copy, {
                     name = tostring(marker.Name or marker.name or (kind .. ' ' .. tostring(index))),
                     position = position,
                     occupiedSpawn = marker.IsOccupied == true,
-                }
+                })
             end
         end
     end
@@ -129,10 +131,30 @@ local function SortMarkers(markers, basePosition)
     end
     table.sort(markers, function(a, b)
         if a.distance == b.distance then
+            if a.name == b.name then
+                if a.position[1] == b.position[1] then
+                    return a.position[3] < b.position[3]
+                end
+                return a.position[1] < b.position[1]
+            end
             return a.name < b.name
         end
         return a.distance < b.distance
     end)
+end
+
+local function QuantizedCoordinate(value)
+    value = value * 1000
+    if value >= 0 then
+        return math.floor(value + 0.5)
+    end
+    return math.ceil(value - 0.5)
+end
+
+local function ResourceKey(kind, position)
+    return kind .. ':'
+        .. tostring(QuantizedCoordinate(position[1])) .. ':'
+        .. tostring(QuantizedCoordinate(position[3]))
 end
 
 local function Reachable(basePosition, position)
@@ -143,12 +165,18 @@ end
 local function ResourceMarkers(kind, basePosition)
     local resources = MarkerArray(kind)
     SortMarkers(resources, basePosition)
+    local unique = {}
+    local seen = {}
     for _, marker in ipairs(resources) do
-        marker.key = kind .. ':' .. marker.name
-        marker.reachable = Reachable(basePosition, marker.position)
-        marker.localSite = marker.distance <= LOCAL_MASS_DISTANCE
+        marker.key = ResourceKey(kind, marker.position)
+        if not seen[marker.key] then
+            seen[marker.key] = true
+            marker.reachable = Reachable(basePosition, marker.position)
+            marker.localSite = marker.distance <= LOCAL_MASS_DISTANCE
+            TableInsert(unique, marker)
+        end
     end
-    return resources
+    return unique
 end
 
 local function ChooseTarget(spawns, basePosition)
@@ -156,13 +184,13 @@ local function ChooseTarget(spawns, basePosition)
     local fallback = {}
     for _, spawn in ipairs(spawns) do
         if DistanceSquared(spawn.position, basePosition) > 25 then
-            fallback[#fallback + 1] = spawn
+            TableInsert(fallback, spawn)
             if spawn.occupiedSpawn then
-                occupied[#occupied + 1] = spawn
+                TableInsert(occupied, spawn)
             end
         end
     end
-    local candidates = #occupied > 0 and occupied or fallback
+    local candidates = TableGetn(occupied) > 0 and occupied or fallback
     table.sort(candidates, function(a, b)
         if a.distance == b.distance then
             return a.name < b.name
@@ -201,7 +229,7 @@ local function PlacementSeeds(controller)
     for _, offset in ipairs(offsets) do
         local x = base[1] + fx * offset[1] + sx * offset[2]
         local z = base[3] + fz * offset[1] + sz * offset[2]
-        seeds[#seeds + 1] = TerrainPosition({ x, 0, z })
+        TableInsert(seeds, TerrainPosition({ x, 0, z }))
     end
     return seeds
 end
@@ -228,13 +256,13 @@ local function PendingArray(controller)
     local pending = {}
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
-        pending[#pending + 1] = {
+        TableInsert(pending, {
             actorToken = operation.actorToken,
             kind = operation.kind,
             buildRole = operation.buildRole,
             siteKey = operation.siteKey,
             issuedTick = operation.issuedTick,
-        }
+        })
     end
     return pending
 end
@@ -279,11 +307,11 @@ local function NormalizeOwnUnit(controller, unit)
 
     local fraction = tonumber(SafeCall(0, unit.GetFractionComplete, unit)) or 0
     local complete = fraction >= 1
-    local queue = SafeCall({}, unit.GetCommandQueue, unit) or {}
-    local busy = CountArray(queue) > 0
+    local busy = SafeCall(false, unit.IsIdleState, unit) ~= true
         or SafeCall(false, unit.IsUnitState, unit, 'Building') == true
         or SafeCall(false, unit.IsUnitState, unit, 'Upgrading') == true
         or SafeCall(false, unit.IsUnitState, unit, 'Enhancing') == true
+        or SafeCall(false, unit.IsUnitState, unit, 'Moving') == true
         or SafeCall(false, unit.IsPaused, unit) == true
     local token = UnitToken(controller, unit, entityId)
     local canBuild = {}
@@ -307,6 +335,8 @@ local function NormalizeOwnUnit(controller, unit)
         position = position,
         canBuild = canBuild,
         needsRally = role == 'land_factory' and controller.rallied[token] ~= true,
+        assignedToWave = assigned,
+        nearStaging = nearStaging,
         availableForWave = COMBAT_ROLES[role] == true and complete and not assigned and nearStaging,
     }
 end
@@ -316,7 +346,7 @@ local function NormalizeEnemyContact(controller, enemies, ownRecords)
     for _, enemy in pairs(enemies or {}) do
         local position = CopyPosition(SafeCall(nil, enemy.GetPosition, enemy))
         if position then
-            positions[#positions + 1] = position
+            TableInsert(positions, position)
         end
     end
     table.sort(positions, function(a, b)
@@ -328,7 +358,7 @@ local function NormalizeEnemyContact(controller, enemies, ownRecords)
         end
         return ad < bd
     end)
-    if #positions == 0 then
+    if TableGetn(positions) == 0 then
         return nil
     end
 
@@ -357,16 +387,23 @@ local function SiteSnapshot(controller, markers, ownRecords)
                 break
             end
         end
-        sites[#sites + 1] = {
+        TableInsert(sites, {
             key = marker.key,
             name = marker.name,
             position = CopyPosition(marker.position),
             distance = marker.distance,
             localSite = marker.localSite,
             reachable = marker.reachable,
+            buildable = SafeCall(
+                false,
+                controller.brain.CanBuildStructureAt,
+                controller.brain,
+                Catalog.IdFor(expectedRole),
+                marker.position
+            ) == true,
             occupied = occupied,
             reserved = controller.reservations[marker.key] ~= nil,
-        }
+        })
     end
     return sites
 end
@@ -377,7 +414,7 @@ local function PlacementSnapshot(controller)
         local blueprintId = Catalog.IdFor(role)
         for _, seed in ipairs(controller.placementSeeds) do
             if SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, seed) == true then
-                placements[role][#placements[role] + 1] = CopyPosition(seed)
+                TableInsert(placements[role], CopyPosition(seed))
             end
         end
     end
@@ -558,7 +595,7 @@ end
 local function GroupRecords(controller, tokens, recordByToken, usedActors)
     local selected = {}
     local sorted = {}
-    for _, token in ipairs(tokens or {}) do sorted[#sorted + 1] = token end
+    for _, token in ipairs(tokens or {}) do TableInsert(sorted, token) end
     table.sort(sorted)
     for _, token in ipairs(sorted) do
         local record = recordByToken[token]
@@ -567,7 +604,7 @@ local function GroupRecords(controller, tokens, recordByToken, usedActors)
             and record.complete == true
             and not usedActors[token]
         then
-            selected[#selected + 1] = record
+            TableInsert(selected, record)
         end
     end
     return selected
@@ -580,11 +617,11 @@ local function ExecuteCombatGroup(controller, intent, recordByToken, usedActors)
     for _, record in ipairs(records) do
         local actor = controller.unitRefs[record.token]
         if actor and (intent.kind ~= 'attack_wave' or not controller.waveAssignments[record.token]) then
-            actors[#actors + 1] = actor
-            tokens[#tokens + 1] = record.token
+            TableInsert(actors, actor)
+            TableInsert(tokens, record.token)
         end
     end
-    if #actors == 0 then return false end
+    if TableGetn(actors) == 0 then return false end
 
     local position = TerrainPosition(intent.position)
     if not position then return false end
@@ -598,7 +635,12 @@ local function ExecuteCombatGroup(controller, intent, recordByToken, usedActors)
             controller.safetyCleared[clearKey] = true
         end
     end
-    local ok = pcall(function() IssueAggressiveMove(actors, position) end)
+    local ok
+    if intent.kind == 'regroup_wave' then
+        ok = pcall(function() IssueMove(actors, position) end)
+    else
+        ok = pcall(function() IssueAggressiveMove(actors, position) end)
+    end
     if not ok then return false end
 
     local tick = CurrentTick(controller)
@@ -618,14 +660,14 @@ local function ExecuteCombatGroup(controller, intent, recordByToken, usedActors)
             controller.initialWaveSent = true
             controller.lastWaveTick = tick
             controller.lastReinforcementTick = tick
-            Emit(controller, 'milestone', { name = 'first_wave', units = #actors })
+            Emit(controller, 'milestone', { name = 'first_wave', units = TableGetn(actors) })
         end
     end
     Emit(controller, 'order', {
         actor = 'group',
         command = intent.kind,
         role = 'combat',
-        units = #actors,
+        units = TableGetn(actors),
     })
     return true
 end
@@ -637,6 +679,7 @@ local function ExecuteRetreat(controller, intent, record)
     if not actor or not position then return false end
     local signature = Signature(intent)
     if not OrderAllowed(controller, signature) then return false end
+    ReleaseOperation(controller, intent.actorToken, 'retreat_preempted')
     local clearKey = 'retreat:' .. intent.actorToken
     if not controller.safetyCleared[clearKey] then
         IssueClearCommands({ actor })
@@ -709,7 +752,7 @@ Controller.Observe = function(controller)
     local units = {}
     for _, unit in pairs(ownUnits) do
         local record = NormalizeOwnUnit(controller, unit)
-        if record then units[#units + 1] = record end
+        if record then TableInsert(units, record) end
     end
     table.sort(units, function(a, b) return a.token < b.token end)
 
@@ -791,7 +834,7 @@ end
 Controller.Execute = function(controller, intents, observation)
     local records = RecordByToken(observation.units)
     local ordered = {}
-    for _, intent in ipairs(intents or {}) do ordered[#ordered + 1] = intent end
+    for _, intent in ipairs(intents or {}) do TableInsert(ordered, intent) end
     table.sort(ordered, function(a, b)
         local ap = tonumber(a.priority) or 1000
         local bp = tonumber(b.priority) or 1000
@@ -801,7 +844,10 @@ Controller.Execute = function(controller, intents, observation)
     local usedActors = {}
 
     for _, intent in ipairs(ordered) do
-        if intent.kind == 'attack_wave' or intent.kind == 'defend_wave' then
+        if intent.kind == 'attack_wave'
+            or intent.kind == 'defend_wave'
+            or intent.kind == 'regroup_wave'
+        then
             ExecuteCombatGroup(controller, intent, records, usedActors)
         elseif intent.actorToken and not usedActors[intent.actorToken] then
             local record = records[intent.actorToken]
@@ -839,7 +885,7 @@ Controller.Step = function(controller)
         controller.lastSnapshotTick = tick
         Emit(controller, 'snapshot', {
             phase = phase,
-            units = #observation.units,
+            units = TableGetn(observation.units),
             pending = CountArray(controller.pending),
             reservations = CountArray(controller.reservations),
         })

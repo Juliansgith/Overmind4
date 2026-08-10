@@ -56,6 +56,17 @@ def make_harness() -> ControllerHarness:
             function unit:GetHealth() return self.options.health or 100 end
             function unit:GetMaxHealth() return self.options.maxHealth or 100 end
             function unit:GetCommandQueue() return self.options.queue or {} end
+            function unit:IsIdleState()
+                if self.options.idleState ~= nil then return self.options.idleState end
+                local states = self.options.states or {}
+                return not (
+                    self.options.paused
+                    or states.Building
+                    or states.Upgrading
+                    or states.Enhancing
+                    or states.Moving
+                )
+            end
             function unit:IsUnitState(name)
                 local states = self.options.states or {}
                 return states[name] or false
@@ -134,10 +145,22 @@ def make_harness() -> ControllerHarness:
         end
         function IssueBuildFactory(units, blueprintId, count)
             table.insert(calls.buildFactory, { units = units, blueprintId = blueprintId, count = count })
+            for _, factory in ipairs(units) do
+                factory.options.queue = { { commandType = 7, blueprintId = blueprintId } }
+                factory.options.idleState = false
+                factory.options.states = factory.options.states or {}
+                factory.options.states.Building = true
+            end
             return { kind = 'build-factory' }
         end
         function IssueFactoryRallyPoint(units, position)
             table.insert(calls.rally, { units = units, position = position })
+            for _, factory in ipairs(units) do
+                factory.options.queue = {
+                    { commandType = 2, type = 'Move', position = position, isRally = true },
+                }
+                factory.options.idleState = true
+            end
             return { kind = 'rally' }
         end
         function IssueAggressiveMove(units, position)
@@ -262,13 +285,118 @@ def test_incomplete_paused_upgrading_busy_and_cannot_build_are_fail_closed() -> 
         harness.unit(entityId=1, blueprintId=factory_id, fraction=0.5, canBuild={"uel0201": True}),
         harness.unit(entityId=2, blueprintId=factory_id, paused=True, canBuild={"uel0201": True}),
         harness.unit(entityId=3, blueprintId=factory_id, states={"Upgrading": True}, canBuild={"uel0201": True}),
-        harness.unit(entityId=4, blueprintId=factory_id, queue=[{"command": 1}], canBuild={"uel0201": True}),
+        harness.unit(entityId=4, blueprintId=factory_id, queue=[{"commandType": 7}], idleState=False, states={"Building": True}, canBuild={"uel0201": True}),
         harness.unit(entityId=5, blueprintId=factory_id, canBuild={"uel0201": False}),
     ]
     harness.brain.units = harness.lua.table_from(units)
     observed = plain(harness.observe().units)
     assert [unit["idle"] for unit in observed[:4]] == [False, False, False, False]
     assert observed[4]["canBuild"]["tank"] is False
+
+
+def test_rally_only_queue_is_idle_but_active_build_and_moving_actor_are_busy() -> None:
+    harness = make_harness()
+    rally = {"commandType": 2, "type": "Move", "position": [35, 2, 45], "isRally": True}
+    rallied_factory = harness.unit(
+        entityId=1,
+        blueprintId="ueb0101",
+        queue=[rally],
+        idleState=True,
+        canBuild={"uel0105": True},
+    )
+    building_factory = harness.unit(
+        entityId=2,
+        blueprintId="ueb0101",
+        queue=[{"commandType": 7, "blueprintId": "uel0201"}],
+        idleState=False,
+        states={"Building": True},
+        canBuild={"uel0201": True},
+    )
+    moving_engineer = harness.unit(
+        entityId=3,
+        blueprintId="uel0105",
+        queue=[{"commandType": 2}],
+        idleState=False,
+        states={"Moving": True},
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([rallied_factory, building_factory, moving_engineer])
+
+    observed = plain(harness.observe().units)
+
+    assert [record["idle"] for record in observed] == [True, False, False]
+    assert [record["busy"] for record in observed] == [False, True, True]
+
+
+def test_rally_integration_leaves_factory_eligible_for_production_next_step() -> None:
+    harness = make_harness()
+    factory = harness.unit(
+        entityId=1,
+        blueprintId="ueb0101",
+        idleState=True,
+        canBuild={"uel0105": True},
+    )
+    harness.brain.units = harness.lua.table_from([factory])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.rally) == 1
+    assert factory.options.queue[1].isRally is True
+
+    harness.brain.tick = 10
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].blueprintId == "uel0105"
+
+
+def test_same_name_resource_markers_get_coordinate_identity_and_stable_sort() -> None:
+    harness = make_harness()
+    duplicate_name_markers = [
+        {"Name": "Unknown", "Position": [12, 3, 20]},
+        {"Name": "Unknown", "Position": [8, 3, 20]},
+        {"Name": "Unknown", "Position": [12, 3, 20]},
+    ]
+    harness.marker_sources.Mass = lua_value(harness.lua, duplicate_name_markers)
+    first = harness.lua.globals().Controller.Create(harness.brain)
+    first_sites = plain(first.markers.mass)
+
+    harness.marker_sources.Mass = lua_value(harness.lua, list(reversed(duplicate_name_markers)))
+    second = harness.lua.globals().Controller.Create(harness.brain)
+    second_sites = plain(second.markers.mass)
+
+    first_keys = [site["key"] for site in first_sites]
+    second_keys = [site["key"] for site in second_sites]
+    assert first_keys == second_keys
+    assert len(first_keys) == len(set(first_keys)) == 2
+
+    first.reservations[first_keys[0]] = lua_value(harness.lua, {"actorToken": "1:1", "issuedTick": 0})
+    snapshot = plain(harness.lua.globals().Controller.Observe(first))
+    reserved_by_key = {site["key"]: site["reserved"] for site in snapshot["sites"]["mass"]}
+    assert reserved_by_key[first_keys[0]] is True
+    assert reserved_by_key[first_keys[1]] is False
+
+
+def test_resource_site_snapshot_marks_blocked_nearest_without_enemy_intel() -> None:
+    harness = make_harness()
+    harness.marker_sources.Mass = lua_value(
+        harness.lua,
+        [
+            {"Name": "Near", "Position": [12, 3, 20]},
+            {"Name": "Far", "Position": [40, 3, 40]},
+        ],
+    )
+    harness.marker_sources.Hydrocarbon = lua_value(harness.lua, [])
+    harness.lua.execute(
+        "brain.canBuildAt = function(blueprintId, position) return position[1] ~= 12 end"
+    )
+    controller = harness.lua.globals().Controller.Create(harness.brain)
+
+    sites = plain(harness.lua.globals().Controller.Observe(controller).sites.mass)
+
+    assert [(site["name"], site["buildable"]) for site in sites] == [
+        ("Near", False),
+        ("Far", True),
+    ]
 
 
 def test_build_mobile_uses_exact_four_arguments_terrain_height_and_empty_alternatives() -> None:
@@ -394,6 +522,47 @@ def test_retreat_and_defense_clear_only_once_for_same_intent_signature() -> None
     execute_intents(harness, [defense], observation)
     execute_intents(harness, [defense], observation)
     assert len(harness.calls.clear) == 2 and len(harness.calls.aggressive) == 1
+
+
+def test_retreat_releases_preempted_build_pending_and_reservation_immediately() -> None:
+    harness = make_harness()
+    acu = harness.unit(entityId=1, blueprintId="uel0001", canBuild={"ueb1103": True})
+    harness.brain.units = harness.lua.table_from([acu])
+    observation = harness.observe()
+    build = {
+        "kind": "build_structure",
+        "actorToken": "1:1",
+        "buildRole": "mass_extractor",
+        "siteKey": "Mass:12000:20000",
+        "position": [12, 0, 20],
+    }
+    execute_intents(harness, [build], observation)
+    assert harness.controller.pending["1:1"] is not None
+    assert harness.controller.reservations[build["siteKey"]] is not None
+
+    execute_intents(
+        harness,
+        [{"kind": "retreat", "actorToken": "1:1", "position": [10, 0, 20]}],
+        observation,
+    )
+
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.reservations[build["siteKey"]] is None
+
+
+def test_regroup_uses_bounded_move_without_clear_or_aggressive_order() -> None:
+    harness = make_harness()
+    tank = harness.unit(entityId=2, blueprintId="uel0201", position=[70, 2, 70])
+    harness.brain.units = harness.lua.table_from([tank])
+    observation = harness.observe()
+    regroup = {"kind": "regroup_wave", "actorTokens": ["2:1"], "position": [35, 0, 45]}
+
+    execute_intents(harness, [regroup], observation)
+    execute_intents(harness, [regroup], observation)
+
+    assert len(harness.calls.move) == 1
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.aggressive) == 0
 
 
 def test_controller_run_yields_positive_ticks_and_recovers_from_step_exception() -> None:

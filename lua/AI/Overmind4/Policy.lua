@@ -14,6 +14,8 @@ local REINFORCEMENT_DELAY_TICKS = 900
 local REINFORCEMENT_DELAY_COMBAT = 4
 local ACU_RETREAT_HEALTH_RATIO = 0.55
 local LOW_ENERGY_STORED_RATIO = 0.35
+local TableGetn = table.getn
+local TableInsert = table.insert
 
 local function CopyArray(values)
     local copy = {}
@@ -39,8 +41,8 @@ end
 local function SortSites(sites)
     local sorted = CopyArray(sites)
     table.sort(sorted, function(a, b)
-        local aDistance = tonumber(a.distance) or math.huge
-        local bDistance = tonumber(b.distance) or math.huge
+        local aDistance = tonumber(a.distance) or 1000000000
+        local bDistance = tonumber(b.distance) or 1000000000
         if aDistance == bDistance then
             local aName = tostring(a.name or a.key or '')
             local bName = tostring(b.name or b.key or '')
@@ -90,7 +92,7 @@ local function PendingActors(pending)
 end
 
 local function AddIntent(intents, intent)
-    intents[#intents + 1] = intent
+    TableInsert(intents, intent)
 end
 
 local function FirstPlacement(snapshot, role, index)
@@ -114,6 +116,7 @@ local function SiteIsAvailable(site, virtualReserved, localOnly)
         or not site.key
         or not IsUsablePosition(site.position)
         or site.reachable ~= true
+        or site.buildable == false
         or SiteIsClaimed(site, virtualReserved)
     then
         return false
@@ -177,7 +180,7 @@ local function CombatUnits(units)
             and unit.complete == true
             and unit.availableForWave == true
         then
-            combat[#combat + 1] = unit
+            TableInsert(combat, unit)
             if unit.role == 'artillery' then
                 artillery = artillery + 1
             end
@@ -186,10 +189,23 @@ local function CombatUnits(units)
     return combat, artillery
 end
 
+local function DefensiveCombatUnits(units)
+    local combat = {}
+    for _, unit in ipairs(units) do
+        if COMBAT_ROLES[unit.role]
+            and unit.complete == true
+            and unit.assignedToWave ~= true
+        then
+            TableInsert(combat, unit)
+        end
+    end
+    return combat
+end
+
 local function ActorTokens(units)
     local tokens = {}
     for _, unit in ipairs(units) do
-        tokens[#tokens + 1] = unit.token
+        TableInsert(tokens, unit.token)
     end
     table.sort(tokens)
     return tokens
@@ -209,7 +225,7 @@ local function SafetyDecision(snapshot, units)
         (tonumber(acu.healthRatio) or 1) < ACU_RETREAT_HEALTH_RATIO
         or (contact and contact.immediate == true)
     )
-    local combat = CombatUnits(units)
+    local combat = DefensiveCombatUnits(units)
 
     if emergency then
         local intents = {
@@ -221,7 +237,7 @@ local function SafetyDecision(snapshot, units)
                 reason = 'acu_safety',
             },
         }
-        if contact and IsUsablePosition(contact.position) and #combat > 0 then
+        if contact and IsUsablePosition(contact.position) and TableGetn(combat) > 0 then
             AddIntent(intents, {
                 kind = 'defend_wave',
                 actorTokens = ActorTokens(combat),
@@ -230,12 +246,12 @@ local function SafetyDecision(snapshot, units)
                 reason = 'immediate_contact',
             })
         end
-        return intents
+        return intents, true
     end
 
     if contact and IsUsablePosition(contact.position) then
         local intents = {}
-        if #combat > 0 then
+        if TableGetn(combat) > 0 then
             AddIntent(intents, {
                 kind = 'defend_wave',
                 actorTokens = ActorTokens(combat),
@@ -244,10 +260,10 @@ local function SafetyDecision(snapshot, units)
                 reason = 'base_contact',
             })
         end
-        return intents
+        return intents, false
     end
 
-    return nil
+    return nil, false
 end
 
 local function AcuOpening(snapshot, units, counts, virtualReserved, pendingActors)
@@ -293,7 +309,7 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, pendingActor
     return nil
 end
 
-local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendingActors, intents)
+local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendingActors, underContact, allowPlacement, intents)
     local engineers = {}
     for _, unit in ipairs(units) do
         if unit.role == 'engineer'
@@ -301,7 +317,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
             and unit.idle == true
             and not pendingActors[unit.token]
         then
-            engineers[#engineers + 1] = unit
+            TableInsert(engineers, unit)
         end
     end
 
@@ -320,7 +336,10 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
 
     for _, engineer in ipairs(engineers) do
         local intent = nil
-        if (counts.hydrocarbon or 0) < 1 and CanBuild(engineer, 'hydrocarbon') then
+        if not underContact
+            and (counts.hydrocarbon or 0) < 1
+            and CanBuild(engineer, 'hydrocarbon')
+        then
             local site = FirstAvailableSite(hydroSites, virtualReserved, false)
             if site then
                 virtualReserved[site.key] = true
@@ -329,7 +348,12 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
             end
         end
 
-        if not intent and lowEnergy and not plannedPower and CanBuild(engineer, 'power_generator') then
+        if not intent
+            and allowPlacement
+            and lowEnergy
+            and not plannedPower
+            and CanBuild(engineer, 'power_generator')
+        then
             local position = FirstPlacement(snapshot, 'power_generator', placementIndex.power_generator)
             if position then
                 plannedPower = true
@@ -341,6 +365,8 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
 
         if not intent
             and not plannedFactory
+            and allowPlacement
+            and (counts.land_factory or 0) >= 2
             and (counts.land_factory or 0) < 3
             and (counts.mass_extractor or 0) >= 6
             and CanBuild(engineer, 'land_factory')
@@ -354,7 +380,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
             end
         end
 
-        if not intent and CanBuild(engineer, 'mass_extractor') then
+        if not intent and not underContact and CanBuild(engineer, 'mass_extractor') then
             local site = FirstAvailableSite(massSites, virtualReserved, false)
             if site then
                 virtualReserved[site.key] = true
@@ -440,13 +466,13 @@ local function AttackDecision(snapshot, units, intents)
     local launch = false
 
     if state.initialWaveSent ~= true then
-        launch = (#combat >= FIRST_WAVE_COMBAT and artillery >= FIRST_WAVE_ARTILLERY)
-            or (tick >= FORCED_WAVE_TICK and #combat >= FORCED_WAVE_COMBAT)
+        launch = (TableGetn(combat) >= FIRST_WAVE_COMBAT and artillery >= FIRST_WAVE_ARTILLERY)
+            or (tick >= FORCED_WAVE_TICK and TableGetn(combat) >= FORCED_WAVE_COMBAT)
     else
         local lastReinforcementTick = tonumber(state.lastReinforcementTick) or tonumber(state.lastWaveTick) or 0
         local delayed = tick - lastReinforcementTick >= REINFORCEMENT_DELAY_TICKS
-        launch = #combat >= REINFORCEMENT_COMBAT
-            or (delayed and #combat >= REINFORCEMENT_DELAY_COMBAT)
+        launch = TableGetn(combat) >= REINFORCEMENT_COMBAT
+            or (delayed and TableGetn(combat) >= REINFORCEMENT_DELAY_COMBAT)
     end
 
     if launch then
@@ -456,6 +482,29 @@ local function AttackDecision(snapshot, units, intents)
             position = snapshot.targetPosition,
             priority = 40,
             reason = state.initialWaveSent == true and 'reinforcement_wave' or 'first_wave',
+        })
+    end
+end
+
+local function RegroupDecision(snapshot, units, intents)
+    if not IsUsablePosition(snapshot.stagingPosition) then return end
+    local regroup = {}
+    for _, unit in ipairs(units) do
+        if COMBAT_ROLES[unit.role]
+            and unit.complete == true
+            and unit.assignedToWave ~= true
+            and unit.nearStaging == false
+        then
+            TableInsert(regroup, unit)
+        end
+    end
+    if TableGetn(regroup) > 0 then
+        AddIntent(intents, {
+            kind = 'regroup_wave',
+            actorTokens = ActorTokens(regroup),
+            position = snapshot.stagingPosition,
+            priority = 35,
+            reason = 'return_to_staging',
         })
     end
 end
@@ -490,10 +539,7 @@ Policy = {}
 Policy.Decide = function(snapshot)
     snapshot = snapshot or {}
     local units = SortRecords(snapshot.units or {})
-    local safety = SafetyDecision(snapshot, units)
-    if safety then
-        return SortIntents(safety)
-    end
+    local safety, emergency = SafetyDecision(snapshot, units)
 
     local pending = snapshot.pending or {}
     local counts = CountRoles(units, pending)
@@ -506,12 +552,35 @@ Policy.Decide = function(snapshot)
     end
 
     local intents = {}
-    local opening = AcuOpening(snapshot, units, counts, virtualReserved, pendingActors)
+    for _, intent in ipairs(safety or {}) do
+        AddIntent(intents, intent)
+    end
+    local opening = nil
+    if not emergency then
+        opening = AcuOpening(snapshot, units, counts, virtualReserved, pendingActors)
+    end
     if opening then
         AddIntent(intents, opening)
     end
-    EngineerDecisions(snapshot, units, counts, virtualReserved, pendingActors, intents)
+    local underContact = snapshot.enemyContact ~= nil
+    local localMass = CountClaimedLocalSites(((snapshot.sites or {}).mass) or {}, virtualReserved)
+    local openingComplete = (counts.land_factory or 0) >= 2
+        and (counts.power_generator or 0) >= 2
+        and localMass >= 4
+    EngineerDecisions(
+        snapshot,
+        units,
+        counts,
+        virtualReserved,
+        pendingActors,
+        underContact or emergency,
+        openingComplete or emergency,
+        intents
+    )
     FactoryDecisions(snapshot, units, counts, pendingActors, intents)
-    AttackDecision(snapshot, units, intents)
+    if not underContact and not emergency then
+        RegroupDecision(snapshot, units, intents)
+        AttackDecision(snapshot, units, intents)
+    end
     return SortIntents(intents)
 end

@@ -4,7 +4,7 @@ import copy
 import random
 from typing import Any
 
-from conftest import execute, lua_sequence
+from conftest import execute, lua_sequence, runtime, source
 
 
 def lua_value(lua: Any, value: Any) -> Any:
@@ -94,6 +94,8 @@ def role_counts(*roles: str) -> list[dict[str, Any]]:
             "position": [20 + index, 2, 20],
             "canBuild": {},
             "availableForWave": role in {"tank", "artillery", "anti_air", "lab"},
+            "assignedToWave": False,
+            "nearStaging": True,
         }
         for index, role in enumerate(roles)
     ]
@@ -180,6 +182,24 @@ def test_malformed_occupied_reserved_and_unreachable_sites_are_ignored() -> None
     assert intents_of(decide(base_snapshot(units=units, sites={"mass": sites, "hydro": []})), "build_structure") == []
 
 
+def test_blocked_nearest_resource_site_advances_to_farther_buildable_site() -> None:
+    snapshot = post_opening_snapshot("engineer")
+    snapshot["sites"]["mass"].extend(
+        [
+            {"key": "near", "name": "Near", "position": [20, 2, 20], "distance": 14, "localSite": False, "reachable": True, "occupied": False, "reserved": False, "buildable": False},
+            {"key": "far", "name": "Far", "position": [40, 2, 40], "distance": 42, "localSite": False, "reachable": True, "occupied": False, "reserved": False, "buildable": True},
+        ]
+    )
+
+    engineer_builds = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent["actorToken"] != "1:1"
+    ]
+
+    assert engineer_builds[0]["siteKey"] == "far"
+
+
 def post_opening_snapshot(*extra_roles: str, **updates: Any) -> dict[str, Any]:
     local_sites = [
         {"key": f"local-{i}", "name": f"Local {i}", "position": [10 + i, 2, 10], "distance": i, "localSite": True, "reachable": True, "occupied": True, "reserved": False}
@@ -232,6 +252,57 @@ def test_engineers_admit_third_factory_after_six_mexes() -> None:
     assert any(i["buildRole"] == "land_factory" for i in build)
 
 
+def test_engineer_cannot_bypass_acu_second_factory_opener() -> None:
+    local_sites = [
+        {"key": f"local-{i}", "name": f"Local {i}", "position": [10 + i, 2, 10], "distance": i, "localSite": True, "reachable": True, "occupied": True, "reserved": False}
+        for i in range(1, 5)
+    ]
+    units = base_snapshot()["units"] + role_counts(
+        "land_factory",
+        "power_generator",
+        "power_generator",
+        "mass_extractor",
+        "mass_extractor",
+        "mass_extractor",
+        "mass_extractor",
+        "mass_extractor",
+        "mass_extractor",
+        "engineer",
+    )
+    engineer = next(unit for unit in units if unit["role"] == "engineer")
+    engineer["canBuild"] = {
+        "land_factory": True,
+        "mass_extractor": True,
+        "power_generator": True,
+        "hydrocarbon": True,
+    }
+    result = decide(base_snapshot(units=units, sites={"mass": local_sites, "hydro": []}))
+    factory_builders = [
+        intent["actorToken"]
+        for intent in intents_of(result, "build_structure")
+        if intent["buildRole"] == "land_factory"
+    ]
+
+    assert factory_builders == ["1:1"]
+
+
+def test_acu_power_opener_and_engineer_recovery_never_share_a_placement() -> None:
+    units = base_snapshot()["units"] + role_counts("land_factory", "engineer")
+    engineer = next(unit for unit in units if unit["role"] == "engineer")
+    engineer["canBuild"] = {"power_generator": True}
+    snapshot = base_snapshot(units=units)
+    snapshot["economy"] = {"energyTrend": -2, "energyStoredRatio": 0.1, "massTrend": 1, "massStoredRatio": 0.5}
+
+    power = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent["buildRole"] == "power_generator"
+    ]
+
+    assert len(power) == 1
+    assert power[0]["actorToken"] == "1:1"
+
+
 def test_factory_counts_completed_incomplete_and_pending_engineers() -> None:
     snapshot = post_opening_snapshot("engineer")
     snapshot["units"] += [dict(role_counts("engineer")[0], token="98:1", complete=False, idle=False)]
@@ -279,6 +350,24 @@ def test_acu_emergency_preempts_all_build_and_attack_intents() -> None:
     assert not intents_of(result, "attack_wave")
 
 
+def test_low_health_acu_retreat_allows_independent_factory_production() -> None:
+    snapshot = combat_snapshot(["tank"] * 15 + ["artillery"] * 3)
+    snapshot["units"][0]["healthRatio"] = 0.54
+    for factory in (unit for unit in snapshot["units"] if unit["role"] == "land_factory"):
+        factory["idle"] = True
+        factory["canBuild"] = {"tank": True, "artillery": True, "anti_air": True}
+
+    result = decide(snapshot)
+
+    assert intents_of(result, "retreat")
+    assert intents_of(result, "factory_build")
+    assert not intents_of(result, "attack_wave")
+    assert not any(
+        intent.get("buildRole") in {"mass_extractor", "hydrocarbon"}
+        for intent in intents_of(result, "build_structure")
+    )
+
+
 def test_current_intel_defense_preempts_expansion_and_attack() -> None:
     snapshot = combat_snapshot(["tank"] * 15 + ["artillery"] * 3)
     snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
@@ -287,6 +376,51 @@ def test_current_intel_defense_preempts_expansion_and_attack() -> None:
     assert defense and len(defense[0]["actorTokens"]) == 18
     assert not intents_of(result, "build_structure")
     assert not intents_of(result, "attack_wave")
+
+
+def test_contact_without_defenders_keeps_energy_recovery_and_factory_production_running() -> None:
+    snapshot = post_opening_snapshot("engineer", "engineer", "engineer", "scout")
+    snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
+    snapshot["economy"] = {"energyTrend": -2, "energyStoredRatio": 0.1, "massTrend": 1, "massStoredRatio": 0.5}
+    for factory in (unit for unit in snapshot["units"] if unit["role"] == "land_factory"):
+        factory["canBuild"] = {"tank": True, "artillery": True, "anti_air": True}
+
+    result = decide(snapshot)
+
+    assert any(intent.get("buildRole") == "power_generator" for intent in intents_of(result, "build_structure"))
+    assert intents_of(result, "factory_build")
+    assert not intents_of(result, "attack_wave")
+
+
+def test_defense_uses_completed_unassigned_combat_even_when_off_staging() -> None:
+    snapshot = combat_snapshot(["tank", "tank", "artillery"])
+    for unit in snapshot["units"]:
+        if unit["role"] in {"tank", "artillery"}:
+            unit["availableForWave"] = False
+            unit["nearStaging"] = False
+            unit["assignedToWave"] = False
+    snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
+
+    defense = intents_of(decide(snapshot), "defend_wave")
+
+    assert len(defense) == 1
+    assert len(defense[0]["actorTokens"]) == 3
+
+
+def test_off_staging_defenders_regroup_after_contact_clears() -> None:
+    snapshot = combat_snapshot(["tank", "tank", "artillery"])
+    for unit in snapshot["units"]:
+        if unit["role"] in {"tank", "artillery"}:
+            unit["availableForWave"] = False
+            unit["nearStaging"] = False
+            unit["assignedToWave"] = False
+    snapshot["enemyContact"] = None
+
+    regroup = intents_of(decide(snapshot), "regroup_wave")
+
+    assert len(regroup) == 1
+    assert len(regroup[0]["actorTokens"]) == 3
+    assert regroup[0]["position"] == snapshot["stagingPosition"]
 
 
 def test_attack_threshold_requires_eighteen_combat_and_three_artillery() -> None:
@@ -332,6 +466,20 @@ def test_nil_optional_fields_are_safe_and_policy_is_deterministic_under_permutat
     random.Random(77).shuffle(shuffled["units"])
     random.Random(78).shuffle(shuffled["sites"]["mass"])
     assert decide(shuffled) == baseline
+
+
+def test_policy_handles_missing_distance_when_game_math_has_no_huge() -> None:
+    lua = runtime()
+    lua.execute("math.huge = nil")
+    lua.execute(source("lua/AI/Overmind4/Policy.lua"))
+    snapshot = base_snapshot()
+    snapshot["sites"]["mass"] = [
+        {"key": "malformed", "name": "Malformed", "position": [12, 2, 12], "localSite": True, "reachable": True, "occupied": False, "reserved": False}
+    ]
+
+    result = lua.globals().Policy.Decide(lua_value(lua, snapshot))
+
+    assert result is not None
 
 
 def test_policy_uses_no_engine_global_or_import() -> None:
