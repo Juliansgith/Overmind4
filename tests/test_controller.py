@@ -289,10 +289,24 @@ def commander_push_intent(observation: Any, tokens: list[str] | None = None) -> 
     }
 
 
+def commander_mobilize_intent(observation: Any, tokens: list[str] | None = None) -> dict[str, Any]:
+    intent = commander_push_intent(observation, tokens)
+    intent.update(
+        {
+            "kind": "mobilize_commander",
+            "position": plain(observation.stagingPosition),
+            "priority": 1,
+            "reason": "assemble_commander",
+        }
+    )
+    return intent
+
+
 def test_create_converts_two_value_start_position_and_generates_navigation_once() -> None:
     harness = make_harness()
     assert plain(harness.controller.basePosition) == [10, 10.2, 20]
     assert harness.controller.commanderPushActive is False
+    assert harness.controller.commanderMobilizing is False
     assert harness.controller.commanderRetreating is False
     assert harness.controller.commanderToken is None
     assert harness.lua.globals().NavUtils.generateCalls == 1
@@ -925,27 +939,83 @@ def test_wave_orders_only_named_combat_references_in_deterministic_order() -> No
     assert [call.units[index].GetEntityId(call.units[index]) for index in (1, 2)] == [4, 9]
 
 
-def test_stage_acu_moves_once_without_clearing_or_building_and_emits_telemetry() -> None:
+def test_commander_mobilization_atomically_clears_guards_moves_and_owns_full_cohort() -> None:
     harness = make_harness()
-    _, _, observation = commander_force(harness, acu_near_staging=False)
-    intent = {
-        "kind": "stage_acu",
-        "actorToken": "1:1",
-        "position": plain(observation.stagingPosition),
-        "priority": 34,
-        "reason": "stage_commander",
-    }
+    acu, _, observation = commander_force(
+        harness,
+        combat_count=29,
+        artillery_count=5,
+        health_ratio=0.75,
+        acu_near_staging=False,
+    )
+    valid_tokens = [
+        record["token"]
+        for record in plain(observation.units)
+        if record["role"] in {"tank", "artillery"}
+    ]
+    supplied = list(reversed(valid_tokens)) + [valid_tokens[0], "1:1", "999:1", None]
+    intent = commander_mobilize_intent(observation, supplied)
+    expected_ids = [int(token.split(":")[0]) for token in sorted(valid_tokens)]
+    own_queries = len(harness.calls.own)
+    enemy_queries = len(harness.calls.enemy)
 
     execute_intents(harness, [intent], observation)
     execute_intents(harness, [intent], observation)
 
+    assert plain(harness.calls.sequence) == ["clear", "guard", "move"]
+    assert len(harness.calls.clear) == 1
+    assert [
+        harness.calls.clear[1].units[index].GetEntityId(harness.calls.clear[1].units[index])
+        for index in range(1, len(harness.calls.clear[1].units) + 1)
+    ] == expected_ids
+    assert len(harness.calls.guard) == 1
+    assert harness.lua.eval("function(a, b) return rawequal(a, b) end")(
+        harness.calls.guard[1].target,
+        acu,
+    )
+    assert [
+        harness.calls.guard[1].units[index].GetEntityId(harness.calls.guard[1].units[index])
+        for index in range(1, len(harness.calls.guard[1].units) + 1)
+    ] == expected_ids
     assert len(harness.calls.move) == 1
-    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.move[1].units) == 1
+    assert harness.lua.eval("function(a, b) return rawequal(a, b) end")(
+        harness.calls.move[1].units[1],
+        acu,
+    )
+    assert plain(harness.calls.move[1].position) == plain(harness.controller.stagingPosition)
+    assert len(harness.calls.aggressive) == 0
     assert len(harness.calls.buildMobile) == 0
-    assert any("command=stage_acu" in line for line in harness.logs)
+    assert harness.controller.initialWaveSent is False
+    assert harness.controller.commanderMobilizing is True
+    assert harness.controller.commanderPushActive is False
+    assert harness.controller.commanderRetreating is False
+    assert harness.controller.commanderToken == "1:1"
+    assert all(
+        harness.controller.waveAssignments[token] is not None
+        and harness.controller.waveAssignments[token].commanderEscort is True
+        for token in valid_tokens
+    )
+    assert harness.controller.waveAssignments["1:1"] is None
+    assert len(plain(harness.controller.waveAssignments)) == 29
+    assert len(harness.calls.own) == own_queries
+    assert len(harness.calls.enemy) == enemy_queries
+    assert any("command=mobilize_commander" in line for line in harness.logs)
 
 
-def test_stage_acu_revalidates_idle_complete_health_position_and_pending() -> None:
+def test_commander_mobilization_revalidates_acu_gate_cohort_and_position() -> None:
+    def assert_rejected(harness: ControllerHarness) -> None:
+        assert len(harness.calls.sequence) == 0
+        assert len(harness.calls.clear) == 0
+        assert len(harness.calls.guard) == 0
+        assert len(harness.calls.move) == 0
+        assert harness.controller.initialWaveSent is False
+        assert harness.controller.commanderPushActive is False
+        assert harness.controller.commanderMobilizing is False
+        assert harness.controller.commanderRetreating is False
+        assert harness.controller.commanderToken is None
+        assert plain(harness.controller.waveAssignments) == {}
+
     cases = (
         {"acu_idle": False},
         {"health_ratio": 0.749},
@@ -953,32 +1023,20 @@ def test_stage_acu_revalidates_idle_complete_health_position_and_pending() -> No
     for options in cases:
         harness = make_harness()
         _, _, observation = commander_force(harness, acu_near_staging=False, **options)
-        execute_intents(
-            harness,
-            [{"kind": "stage_acu", "actorToken": "1:1", "position": plain(observation.stagingPosition)}],
-            observation,
-        )
-        assert len(harness.calls.move) == 0
+        execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+        assert_rejected(harness)
 
     incomplete = make_harness()
     acu, _, observation = commander_force(incomplete, acu_near_staging=False)
     acu.options.fraction = 0.5
     observation = incomplete.observe()
-    execute_intents(
-        incomplete,
-        [{"kind": "stage_acu", "actorToken": "1:1", "position": plain(observation.stagingPosition)}],
-        observation,
-    )
-    assert len(incomplete.calls.move) == 0
+    execute_intents(incomplete, [commander_mobilize_intent(observation)], observation)
+    assert_rejected(incomplete)
 
     near = make_harness()
     _, _, observation = commander_force(near, acu_near_staging=True)
-    execute_intents(
-        near,
-        [{"kind": "stage_acu", "actorToken": "1:1", "position": plain(observation.stagingPosition)}],
-        observation,
-    )
-    assert len(near.calls.move) == 0
+    execute_intents(near, [commander_mobilize_intent(observation)], observation)
+    assert_rejected(near)
 
     pending = make_harness()
     _, _, observation = commander_force(pending, acu_near_staging=False)
@@ -986,26 +1044,82 @@ def test_stage_acu_revalidates_idle_complete_health_position_and_pending() -> No
         pending.lua,
         {"actorToken": "1:1", "kind": "build_structure", "issuedTick": 0},
     )
-    execute_intents(
-        pending,
-        [{"kind": "stage_acu", "actorToken": "1:1", "position": plain(observation.stagingPosition)}],
-        observation,
-    )
-    assert len(pending.calls.move) == 0
+    execute_intents(pending, [commander_mobilize_intent(observation)], observation)
+    assert_rejected(pending)
+
+    for combat_count, artillery_count in ((23, 4), (24, 3)):
+        below_gate = make_harness()
+        _, _, observation = commander_force(
+            below_gate,
+            combat_count=combat_count,
+            artillery_count=artillery_count,
+            acu_near_staging=False,
+        )
+        execute_intents(below_gate, [commander_mobilize_intent(observation)], observation)
+        assert_rejected(below_gate)
+
+    malformed_target = make_harness()
+    _, _, observation = commander_force(malformed_target, acu_near_staging=False)
+    intent = commander_mobilize_intent(observation)
+    intent["position"] = [999, 0, 999]
+    execute_intents(malformed_target, [intent], observation)
+    assert_rejected(malformed_target)
+
+    for bad_position in (None, {}, [35], "bad", 7):
+        malformed = make_harness()
+        _, _, observation = commander_force(malformed, acu_near_staging=False)
+        intent = commander_mobilize_intent(observation)
+        intent["position"] = bad_position
+        execute_intents(malformed, [intent], observation)
+        assert_rejected(malformed)
 
 
-def test_failed_stage_move_does_not_consume_cooldown() -> None:
-    harness = make_harness()
-    _, _, observation = commander_force(harness, acu_near_staging=False)
-    intent = {"kind": "stage_acu", "actorToken": "1:1", "position": plain(observation.stagingPosition)}
-    harness.calls.failMove = True
+def test_commander_mobilization_rolls_back_or_leaves_no_state_on_each_order_failure() -> None:
+    def assert_pristine(harness: ControllerHarness) -> None:
+        assert harness.controller.initialWaveSent is False
+        assert harness.controller.commanderPushActive is False
+        assert harness.controller.commanderMobilizing is False
+        assert harness.controller.commanderRetreating is False
+        assert harness.controller.commanderToken is None
+        assert plain(harness.controller.waveAssignments) == {}
 
-    execute_intents(harness, [intent], observation)
-    harness.calls.failMove = False
-    execute_intents(harness, [intent], observation)
+    clear_failure = make_harness()
+    _, _, observation = commander_force(clear_failure, acu_near_staging=False)
+    clear_intent = commander_mobilize_intent(observation)
+    clear_failure.calls.failClear = True
+    execute_intents(clear_failure, [clear_intent], observation)
+    assert plain(clear_failure.calls.sequence) == ["clear"]
+    assert_pristine(clear_failure)
+    clear_failure.calls.failClear = False
+    execute_intents(clear_failure, [clear_intent], observation)
+    assert plain(clear_failure.calls.sequence)[-3:] == ["clear", "guard", "move"]
+    assert clear_failure.controller.commanderMobilizing is True
 
-    assert len(harness.calls.move) == 2
-    assert any("command=stage_acu" in line for line in harness.logs)
+    guard_failure = make_harness()
+    _, _, observation = commander_force(guard_failure, acu_near_staging=False)
+    guard_intent = commander_mobilize_intent(observation)
+    guard_failure.calls.failGuard = True
+    execute_intents(guard_failure, [guard_intent], observation)
+    assert plain(guard_failure.calls.sequence) == ["clear", "guard"]
+    assert_pristine(guard_failure)
+    guard_failure.calls.failGuard = False
+    execute_intents(guard_failure, [guard_intent], observation)
+    assert plain(guard_failure.calls.sequence)[-3:] == ["clear", "guard", "move"]
+    assert guard_failure.controller.commanderMobilizing is True
+
+    move_failure = make_harness()
+    _, _, observation = commander_force(move_failure, acu_near_staging=False)
+    intent = commander_mobilize_intent(observation)
+    move_failure.calls.failMove = True
+    execute_intents(move_failure, [intent], observation)
+    assert plain(move_failure.calls.sequence) == ["clear", "guard", "move", "clear"]
+    assert len(move_failure.calls.clear[2].units) == 24
+    assert_pristine(move_failure)
+
+    move_failure.calls.failMove = False
+    execute_intents(move_failure, [intent], observation)
+    assert plain(move_failure.calls.sequence)[-3:] == ["clear", "guard", "move"]
+    assert move_failure.controller.commanderMobilizing is True
 
 
 def test_commander_push_guards_exact_deduplicated_combat_then_moves_only_acu() -> None:
@@ -1053,16 +1167,29 @@ def test_commander_push_guards_exact_deduplicated_combat_then_moves_only_acu() -
     assert any("name=commander_push" in line for line in harness.logs)
 
 
-def test_step_stages_then_launches_the_policy_selected_commander_battlegroup() -> None:
+def test_step_mobilizes_owned_cohort_then_launches_it_without_second_guard() -> None:
     harness = make_harness()
     acu, _, _ = commander_force(harness, acu_near_staging=False)
 
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.move) == 1
-    assert len(harness.calls.guard) == 0
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.clear) == 1
     assert len(harness.calls.aggressive) == 0
     assert harness.controller.initialWaveSent is False
+    assert harness.controller.commanderMobilizing is True
+    first_observation = harness.observe()
+    combat_records = [
+        record
+        for record in plain(first_observation.units)
+        if record["role"] in {"tank", "artillery"}
+    ]
+    assert len(combat_records) == 24
+    assert all(record["assignedToWave"] is True for record in combat_records)
+    assert all(record["commanderEscort"] is True for record in combat_records)
+    assert all(record["availableForWave"] is False for record in combat_records)
+    assert first_observation.state.commanderMobilizing is True
 
     acu.options.position = lua_value(harness.lua, plain(harness.controller.stagingPosition))
     acu.options.idleState = True
@@ -1071,8 +1198,202 @@ def test_step_stages_then_launches_the_policy_selected_commander_battlegroup() -
 
     assert len(harness.calls.guard) == 1
     assert len(harness.calls.aggressive) == 1
+    assert plain(harness.calls.sequence) == ["clear", "guard", "move", "aggressive"]
     assert harness.controller.initialWaveSent is True
+    assert harness.controller.commanderMobilizing is False
     assert harness.controller.commanderPushActive is True
+
+
+def test_persistent_immediate_contact_during_mobilization_uses_only_unassigned_reserves() -> None:
+    harness = make_harness()
+    acu, combat, observation = commander_force(harness, acu_near_staging=False)
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+    committed_tokens = {
+        record["token"]
+        for record in plain(observation.units)
+        if record["role"] in {"tank", "artillery"}
+    }
+    reserves = [
+        harness.unit(entityId=90, blueprintId="uel0201", position=plain(harness.controller.stagingPosition)),
+        harness.unit(entityId=91, blueprintId="uel0103", position=plain(harness.controller.stagingPosition)),
+    ]
+    harness.brain.units = harness.lua.table_from([acu, *combat, *reserves])
+    harness.brain.enemies = harness.lua.table_from(
+        [harness.unit(entityId=200, blueprintId="url0201", army=2, position=[11, 2, 20])]
+    )
+
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+    intents = plain(harness.lua.globals().Policy.Decide(observation))
+    defense = [intent for intent in intents if intent["kind"] == "defend_wave"]
+
+    assert not [intent for intent in intents if intent["kind"] == "retreat"]
+    assert not [intent for intent in intents if intent["kind"] == "mobilize_commander"]
+    assert not [intent for intent in intents if intent["kind"] == "commander_push"]
+    assert len(defense) == 1
+    assert set(defense[0]["actorTokens"]) == {"90:1", "91:1"}
+    assert not set(defense[0]["actorTokens"]) & committed_tokens
+
+    execute_intents(harness, intents, observation)
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.move) == 1
+    assert all(harness.controller.waveAssignments[token] is not None for token in committed_tokens)
+
+
+def test_mobilized_transition_uses_surviving_owned_tokens_not_recycled_reserves() -> None:
+    harness = make_harness()
+    acu, combat, observation = commander_force(harness, acu_near_staging=False)
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+    original_tokens = {
+        record["token"]
+        for record in plain(observation.units)
+        if record["role"] in {"tank", "artillery"}
+    }
+
+    combat[0].options.destroyed = True
+    replacement = harness.unit(
+        entityId=3,
+        blueprintId="uel0201",
+        position=plain(harness.controller.stagingPosition),
+    )
+    acu.options.position = lua_value(harness.lua, plain(harness.controller.stagingPosition))
+    acu.options.idleState = True
+    harness.brain.units = harness.lua.table_from([acu, replacement, *combat[2:]])
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+    intents = plain(harness.lua.globals().Policy.Decide(observation))
+    push = next(intent for intent in intents if intent["kind"] == "commander_push")
+
+    assert len(push["actorTokens"]) == 22
+    assert set(push["actorTokens"]) <= original_tokens
+    assert "2:1" not in push["actorTokens"]
+    assert "3:1" not in push["actorTokens"]
+    assert "3:2" not in push["actorTokens"]
+    push["actorTokens"] += [push["actorTokens"][0], "3:2", "999:1"]
+
+    execute_intents(harness, [push], observation)
+
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.aggressive) == 1
+    assert harness.controller.commanderMobilizing is False
+    assert harness.controller.commanderPushActive is True
+    assert harness.controller.initialWaveSent is True
+    assert harness.controller.waveAssignments["3:2"] is None
+    assert all(
+        harness.controller.waveAssignments[token] is not None
+        for token in push["actorTokens"]
+        if token in original_tokens
+    )
+
+
+def test_losing_every_mobilized_escort_aborts_and_rearms_for_fresh_concentration() -> None:
+    harness = make_harness()
+    acu, _, observation = commander_force(harness, acu_near_staging=False)
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+    unrelated = harness.unit(
+        entityId=90,
+        blueprintId="uel0201",
+        position=[110, 2, 120],
+    )
+    harness.controller.waveAssignments["90:1"] = lua_value(
+        harness.lua,
+        {
+            "issuedTick": 0,
+            "position": [110, 2, 120],
+            "commanderEscort": False,
+        },
+    )
+    harness.brain.units = harness.lua.table_from([acu, unrelated])
+
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+
+    assert harness.controller.commanderMobilizing is False
+    assert harness.controller.commanderPushActive is False
+    assert harness.controller.commanderRetreating is False
+    assert harness.controller.commanderToken is None
+    assert harness.controller.initialWaveSent is False
+    assert harness.controller.waveAssignments["90:1"] is not None
+
+    staging = plain(harness.controller.stagingPosition)
+    fresh = [
+        harness.unit(
+            entityId=100 + offset,
+            blueprintId="uel0103" if offset >= 20 else "uel0201",
+            position=staging,
+        )
+        for offset in range(24)
+    ]
+    harness.brain.units = harness.lua.table_from([acu, unrelated, *fresh])
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+    mobilize = next(
+        intent
+        for intent in plain(harness.lua.globals().Policy.Decide(observation))
+        if intent["kind"] == "mobilize_commander"
+    )
+
+    execute_intents(harness, [mobilize], observation)
+
+    assert len(mobilize["actorTokens"]) == 24
+    assert harness.controller.commanderMobilizing is True
+    assert harness.controller.commanderToken == "1:1"
+    assert harness.controller.waveAssignments["90:1"] is not None
+    assert all(
+        harness.controller.waveAssignments[token] is not None
+        for token in mobilize["actorTokens"]
+    )
+
+
+def test_failed_mobilized_push_keeps_latched_guard_and_retries_without_reassembly() -> None:
+    harness = make_harness()
+    acu, _, observation = commander_force(harness, acu_near_staging=False)
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+    acu.options.position = lua_value(harness.lua, plain(harness.controller.stagingPosition))
+    acu.options.idleState = True
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+    push = next(
+        intent
+        for intent in plain(harness.lua.globals().Policy.Decide(observation))
+        if intent["kind"] == "commander_push"
+    )
+    harness.calls.failAggressive = True
+
+    execute_intents(harness, [push], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "guard", "move", "aggressive"]
+    assert harness.controller.commanderMobilizing is True
+    assert harness.controller.commanderPushActive is False
+    assert harness.controller.initialWaveSent is False
+    assert len(plain(harness.controller.waveAssignments)) == 24
+
+    harness.calls.failAggressive = False
+    execute_intents(harness, [push], observation)
+    assert plain(harness.calls.sequence)[-1] == "aggressive"
+    assert len(harness.calls.guard) == 1
+    assert harness.controller.commanderMobilizing is False
+    assert harness.controller.commanderPushActive is True
+
+
+def test_low_health_mobilizing_commander_enters_existing_escort_recovery() -> None:
+    harness = make_harness()
+    acu, _, observation = commander_force(harness, acu_near_staging=False)
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+    acu.options.health = 74.9
+    acu.options.maxHealth = 100
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+    intents = plain(harness.lua.globals().Policy.Decide(observation))
+    retreat = next(intent for intent in intents if intent["kind"] == "retreat")
+
+    execute_intents(harness, [retreat], observation)
+
+    assert harness.controller.commanderMobilizing is False
+    assert harness.controller.commanderPushActive is False
+    assert harness.controller.commanderRetreating is True
+    assert harness.controller.commanderToken == "1:1"
+    assert len(plain(harness.controller.waveAssignments)) == 24
 
 
 def test_commander_push_revalidates_gate_unique_tokens_and_unit_eligibility() -> None:
@@ -1560,6 +1881,42 @@ def test_destroyed_or_captured_commander_clears_active_push_and_escorts() -> Non
         harness.lua.globals().Controller.Reconcile(harness.controller, observation)
 
         assert harness.controller.commanderPushActive is False
+        assert harness.controller.commanderToken is None
+        assert harness.controller.waveAssignments["2:1"] is None
+
+
+def test_missing_captured_or_recycled_commander_clears_mobilization_and_escorts() -> None:
+    for condition in ("missing", "captured", "recycled"):
+        harness = make_harness()
+        acu, combat, _ = commander_force(harness, acu_near_staging=False)
+        harness.controller.commanderMobilizing = True
+        harness.controller.commanderToken = "1:1"
+        harness.controller.waveAssignments["2:1"] = lua_value(
+            harness.lua,
+            {
+                "issuedTick": 0,
+                "position": plain(harness.controller.stagingPosition),
+                "commanderEscort": True,
+            },
+        )
+        if condition == "missing":
+            harness.brain.units = harness.lua.table_from(combat)
+        elif condition == "captured":
+            acu.options.army = 2
+        else:
+            replacement = harness.unit(
+                entityId=1,
+                blueprintId="uel0001",
+                position=plain(harness.controller.basePosition),
+            )
+            harness.brain.units = harness.lua.table_from([replacement, *combat])
+
+        observation = harness.observe()
+        harness.lua.globals().Controller.Reconcile(harness.controller, observation)
+
+        assert harness.controller.commanderMobilizing is False
+        assert harness.controller.commanderPushActive is False
+        assert harness.controller.commanderRetreating is False
         assert harness.controller.commanderToken is None
         assert harness.controller.waveAssignments["2:1"] is None
 

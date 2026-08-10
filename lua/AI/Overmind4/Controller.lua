@@ -67,7 +67,15 @@ local function TerrainPosition(position)
 end
 
 local function DistanceSquared(a, b)
-    if not a or not b then
+    if not a
+        or not b
+        or type(a) ~= 'table'
+        or type(b) ~= 'table'
+        or type(a[1]) ~= 'number'
+        or type(a[3]) ~= 'number'
+        or type(b[1]) ~= 'number'
+        or type(b[3]) ~= 'number'
+    then
         return 1000000000000
     end
     local dx = a[1] - b[1]
@@ -355,7 +363,8 @@ local function NormalizeOwnUnit(controller, unit)
     local health = tonumber(SafeCall(0, unit.GetHealth, unit)) or 0
     local maxHealth = tonumber(SafeCall(1, unit.GetMaxHealth, unit)) or 1
     local healthRatio = maxHealth > 0 and health / maxHealth or 0
-    local assigned = controller.waveAssignments[token] ~= nil
+    local assignment = controller.waveAssignments[token]
+    local assigned = assignment ~= nil
     local stagingRadius = role == 'acu' and COMMANDER_STAGING_RADIUS or STAGING_RADIUS
     local nearStaging = DistanceSquared(position, controller.stagingPosition)
         <= stagingRadius * stagingRadius
@@ -372,6 +381,7 @@ local function NormalizeOwnUnit(controller, unit)
         canBuild = canBuild,
         needsRally = role == 'land_factory' and controller.rallied[token] ~= true,
         assignedToWave = assigned,
+        commanderEscort = assignment and assignment.commanderEscort == true or false,
         nearStaging = nearStaging,
         availableForWave = COMBAT_ROLES[role] == true and complete and not assigned and nearStaging,
     }
@@ -459,6 +469,7 @@ local function StateSnapshot(controller)
         lastWaveTick = controller.lastWaveTick,
         lastReinforcementTick = controller.lastReinforcementTick,
         commanderPushActive = controller.commanderPushActive,
+        commanderMobilizing = controller.commanderMobilizing,
         commanderRetreating = controller.commanderRetreating,
     }
 end
@@ -701,36 +712,6 @@ local function HealthyCommander(record)
         and health >= COMMANDER_PUSH_HEALTH_RATIO
 end
 
-local function ExecuteStageAcu(controller, intent, record)
-    if controller.initialWaveSent == true
-        or controller.commanderPushActive == true
-        or controller.commanderRetreating == true
-        or not HealthyCommander(record)
-        or record.idle ~= true
-        or record.nearStaging ~= false
-        or controller.pending[intent.actorToken]
-    then
-        return false
-    end
-    if DistanceSquared(intent.position, controller.stagingPosition) > 4 then
-        return false
-    end
-    local actor = controller.unitRefs[intent.actorToken]
-    local position = TerrainPosition(controller.stagingPosition)
-    if not actor or not position then return false end
-    local signature = 'stage_acu:' .. tostring(intent.actorToken)
-    if OrderCoolingDown(controller, signature) then return false end
-    local ok = pcall(function() IssueMove({ actor }, position) end)
-    if not ok then return false end
-    RememberOrder(controller, signature)
-    Emit(controller, 'order', {
-        actor = intent.actorToken,
-        command = 'stage_acu',
-        role = 'acu',
-    })
-    return true
-end
-
 local function GroupRecords(controller, tokens, recordByToken, usedActors)
     local selected = {}
     local sorted = {}
@@ -795,7 +776,90 @@ local function AssignCommanderCohort(controller, records, usedActors)
     end
 end
 
+local function OwnedCommanderCohort(controller, recordByToken, usedActors)
+    local records = {}
+    local actors = {}
+    for _, token in ipairs(SortedKeys(controller.waveAssignments)) do
+        local assignment = controller.waveAssignments[token]
+        local record = recordByToken[token]
+        local actor = controller.unitRefs[token]
+        if assignment
+            and assignment.commanderEscort == true
+            and record
+            and COMBAT_ROLES[record.role]
+            and record.complete == true
+            and actor
+            and not usedActors[token]
+        then
+            TableInsert(records, record)
+            TableInsert(actors, actor)
+        end
+    end
+    if TableGetn(records) == 0 then return nil, nil end
+    return records, actors
+end
+
+local function ExecuteCommanderMobilization(controller, intent, recordByToken, usedActors)
+    if controller.initialWaveSent == true
+        or controller.commanderPushActive == true
+        or controller.commanderMobilizing == true
+        or controller.commanderRetreating == true
+        or type(intent.acuToken) ~= 'string'
+        or usedActors[intent.acuToken]
+        or controller.pending[intent.acuToken]
+        or controller.targetPath ~= true
+        or DistanceSquared(intent.position, controller.stagingPosition) > 4
+    then
+        return false
+    end
+    local acuRecord = recordByToken[intent.acuToken]
+    if not HealthyCommander(acuRecord)
+        or acuRecord.idle ~= true
+        or acuRecord.nearStaging ~= false
+    then
+        return false
+    end
+    local acuActor = controller.unitRefs[intent.acuToken]
+    local records, actors = CommanderCohort(
+        controller,
+        intent.actorTokens,
+        recordByToken,
+        usedActors
+    )
+    local position = TerrainPosition(controller.stagingPosition)
+    if not acuActor or not records or not position then return false end
+
+    local clearOk = pcall(function() IssueClearCommands(actors) end)
+    if not clearOk then return false end
+    local guardOk = pcall(function() IssueGuard(actors, acuActor) end)
+    if not guardOk then return false end
+    local moveOk = pcall(function() IssueMove({ acuActor }, position) end)
+    if not moveOk then
+        pcall(function() IssueClearCommands(actors) end)
+        return false
+    end
+
+    AssignCommanderCohort(controller, records, usedActors)
+    usedActors[intent.acuToken] = true
+    controller.commanderMobilizing = true
+    controller.commanderPushActive = false
+    controller.commanderRetreating = false
+    controller.commanderToken = intent.acuToken
+    Emit(controller, 'milestone', {
+        name = 'commander_mobilized',
+        units = TableGetn(actors),
+    })
+    Emit(controller, 'order', {
+        actor = intent.acuToken,
+        command = 'mobilize_commander',
+        role = 'battlegroup',
+        units = TableGetn(actors),
+    })
+    return true
+end
+
 local function ExecuteCommanderPush(controller, intent, recordByToken, usedActors)
+    local mobilized = controller.commanderMobilizing == true
     if controller.initialWaveSent == true
         or controller.commanderPushActive == true
         or controller.commanderRetreating == true
@@ -804,6 +868,7 @@ local function ExecuteCommanderPush(controller, intent, recordByToken, usedActor
         or controller.pending[intent.acuToken]
         or controller.targetPath ~= true
         or DistanceSquared(intent.position, controller.targetPosition) > 4
+        or (mobilized and controller.commanderToken ~= intent.acuToken)
     then
         return false
     end
@@ -815,22 +880,32 @@ local function ExecuteCommanderPush(controller, intent, recordByToken, usedActor
         return false
     end
     local acuActor = controller.unitRefs[intent.acuToken]
-    local records, actors = CommanderCohort(
-        controller,
-        intent.actorTokens,
-        recordByToken,
-        usedActors
-    )
+    local records = nil
+    local actors = nil
+    if mobilized then
+        records, actors = OwnedCommanderCohort(controller, recordByToken, usedActors)
+    else
+        records, actors = CommanderCohort(
+            controller,
+            intent.actorTokens,
+            recordByToken,
+            usedActors
+        )
+    end
     local position = TerrainPosition(controller.targetPosition)
     if not acuActor or not records or not position then return false end
 
-    local clearOk = pcall(function() IssueClearCommands(actors) end)
-    if not clearOk then return false end
-    local guardOk = pcall(function() IssueGuard(actors, acuActor) end)
-    if not guardOk then return false end
+    if not mobilized then
+        local clearOk = pcall(function() IssueClearCommands(actors) end)
+        if not clearOk then return false end
+        local guardOk = pcall(function() IssueGuard(actors, acuActor) end)
+        if not guardOk then return false end
+    end
     local moveOk = pcall(function() IssueAggressiveMove({ acuActor }, position) end)
     if not moveOk then
-        pcall(function() IssueClearCommands(actors) end)
+        if not mobilized then
+            pcall(function() IssueClearCommands(actors) end)
+        end
         return false
     end
 
@@ -839,6 +914,7 @@ local function ExecuteCommanderPush(controller, intent, recordByToken, usedActor
     usedActors[intent.acuToken] = true
     controller.initialWaveSent = true
     controller.commanderPushActive = true
+    controller.commanderMobilizing = false
     controller.commanderRetreating = false
     controller.commanderToken = intent.acuToken
     controller.lastWaveTick = tick
@@ -977,10 +1053,12 @@ local function ExecuteRetreat(controller, intent, record)
     local ok = pcall(function() IssueMove({ actor }, position) end)
     if not ok then return false end
     RememberOrder(controller, signature)
-    if controller.commanderPushActive == true
+    if (controller.commanderPushActive == true
+        or controller.commanderMobilizing == true)
         and controller.commanderToken == intent.actorToken
     then
         controller.commanderPushActive = false
+        controller.commanderMobilizing = false
         controller.commanderRetreating = true
     end
     Emit(controller, 'order', {
@@ -1043,6 +1121,7 @@ Controller.Create = function(brain)
         lastOrders = {},
         initialWaveSent = false,
         commanderPushActive = false,
+        commanderMobilizing = false,
         commanderRetreating = false,
         lastWaveTick = -10000,
         lastReinforcementTick = -10000,
@@ -1111,6 +1190,7 @@ end
 
 local function ClearCommanderState(controller)
     controller.commanderPushActive = false
+    controller.commanderMobilizing = false
     controller.commanderRetreating = false
     controller.commanderToken = nil
     for _, token in ipairs(SortedKeys(controller.waveAssignments)) do
@@ -1119,6 +1199,20 @@ local function ClearCommanderState(controller)
             controller.waveAssignments[token] = nil
         end
     end
+end
+
+local function HasLiveCommanderEscort(controller, records)
+    for _, token in ipairs(SortedKeys(controller.waveAssignments)) do
+        local assignment = controller.waveAssignments[token]
+        if assignment
+            and assignment.commanderEscort == true
+            and records[token]
+            and controller.unitRefs[token]
+        then
+            return true
+        end
+    end
+    return false
 end
 
 local function CompleteCommanderRecovery(controller, records)
@@ -1141,6 +1235,7 @@ local function CompleteCommanderRecovery(controller, records)
         controller.waveAssignments[token] = nil
     end
     controller.commanderPushActive = false
+    controller.commanderMobilizing = false
     controller.commanderRetreating = false
     controller.commanderToken = nil
     return true
@@ -1173,6 +1268,7 @@ Controller.Reconcile = function(controller, observation)
     end
 
     if controller.commanderPushActive == true
+        or controller.commanderMobilizing == true
         or controller.commanderRetreating == true
     then
         local commander = controller.commanderToken
@@ -1181,6 +1277,10 @@ Controller.Reconcile = function(controller, observation)
         if not commander
             or commander.role ~= 'acu'
             or commander.complete ~= true
+        then
+            ClearCommanderState(controller)
+        elseif controller.commanderMobilizing == true
+            and not HasLiveCommanderEscort(controller, records)
         then
             ClearCommanderState(controller)
         elseif controller.commanderRetreating == true
@@ -1220,7 +1320,15 @@ Controller.Execute = function(controller, intents, observation)
     local usedActors = {}
 
     for _, intent in ipairs(ordered) do
-        if intent.kind == 'commander_push' then
+        if intent.kind == 'mobilize_commander' then
+            ExecuteCommanderMobilization(controller, intent, records, usedActors)
+            if type(intent.acuToken) == 'string' then
+                usedActors[intent.acuToken] = true
+            end
+            for _, token in ipairs(intent.actorTokens or {}) do
+                if type(token) == 'string' then usedActors[token] = true end
+            end
+        elseif intent.kind == 'commander_push' then
             ExecuteCommanderPush(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
                 usedActors[intent.acuToken] = true
@@ -1256,13 +1364,10 @@ Controller.Execute = function(controller, intents, observation)
                     issued = ExecuteFactoryProduction(controller, intent, record)
                 elseif intent.kind == 'rally' then
                     issued = ExecuteRally(controller, intent, record)
-                elseif intent.kind == 'stage_acu' then
-                    issued = ExecuteStageAcu(controller, intent, record)
                 elseif intent.kind == 'retreat' then
                     issued = ExecuteRetreat(controller, intent, record)
                 end
                 if issued
-                    or intent.kind == 'stage_acu'
                     or intent.kind == 'retreat'
                 then
                     usedActors[intent.actorToken] = true

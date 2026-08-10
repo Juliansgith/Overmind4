@@ -216,12 +216,13 @@ local function CombatUnits(units)
     return combat, artillery
 end
 
-local function DefensiveCombatUnits(units)
+local function DefensiveCombatUnits(units, excluded)
     local combat = {}
     for _, unit in ipairs(units) do
         if COMBAT_ROLES[unit.role]
             and unit.complete == true
             and unit.assignedToWave ~= true
+            and not (excluded and excluded[unit.token])
         then
             TableInsert(combat, unit)
         end
@@ -254,15 +255,58 @@ local function DoctrineState(snapshot)
     if type(state) ~= 'table' or type(state.initialWaveSent) ~= 'boolean' then
         return nil
     end
+    for _, field in ipairs({
+        'commanderPushActive',
+        'commanderMobilizing',
+        'commanderRetreating',
+    }) do
+        if state[field] ~= nil and type(state[field]) ~= 'boolean' then
+            return nil
+        end
+    end
     return state
 end
 
-local function SafetyDecision(snapshot, units, state)
+local function InitialMobilization(snapshot, units, pendingActors, state)
+    if not state
+        or state.initialWaveSent == true
+        or state.commanderPushActive == true
+        or state.commanderMobilizing == true
+        or state.commanderRetreating == true
+        or snapshot.targetPath ~= true
+        or not IsUsablePosition(snapshot.stagingPosition)
+        or not IsUsablePosition(snapshot.targetPosition)
+    then
+        return nil, nil
+    end
+    local combat, artillery = CombatUnits(units)
+    if TableGetn(combat) < ATTACK_COMBAT or artillery < ATTACK_ARTILLERY then
+        return nil, nil
+    end
+    local acu = FindAcu(units)
+    local health = acu and tonumber(acu.healthRatio) or nil
+    if not acu
+        or not health
+        or health < COMMANDER_PUSH_HEALTH_RATIO
+        or acu.idle ~= true
+        or acu.nearStaging ~= false
+        or pendingActors[acu.token]
+    then
+        return nil, nil
+    end
+    return acu, combat
+end
+
+local function SafetyDecision(snapshot, units, state, mobilizingCombat)
     local acu = FindAcu(units)
 
     local contact = snapshot.enemyContact
     local commanderRecovery = state and state.commanderRetreating == true
-    local commanderSafety = state and state.commanderPushActive == true
+    local commanderMobilizing = state and state.commanderMobilizing == true
+    local commanderSafety = state and (
+        state.commanderPushActive == true
+        or commanderMobilizing
+    )
     local health = acu and tonumber(acu.healthRatio) or nil
     local healthEmergency = false
     if commanderRecovery then
@@ -274,11 +318,24 @@ local function SafetyDecision(snapshot, units, state)
     elseif health then
         healthEmergency = health < ACU_RETREAT_HEALTH_RATIO
     end
+    local assembling = mobilizingCombat ~= nil
     local emergency = acu and (
         healthEmergency
-        or (contact and contact.immediate == true)
+        or (
+            contact
+            and contact.immediate == true
+            and not commanderMobilizing
+            and not assembling
+        )
     )
-    local combat = DefensiveCombatUnits(units)
+    local excluded = nil
+    if mobilizingCombat then
+        excluded = {}
+        for _, unit in ipairs(mobilizingCombat) do
+            excluded[unit.token] = true
+        end
+    end
+    local combat = DefensiveCombatUnits(units, excluded)
 
     if emergency then
         local intents = {
@@ -513,6 +570,43 @@ local function AttackDecision(snapshot, units, pendingActors, state, intents)
         return false
     end
 
+    if state and state.commanderMobilizing == true then
+        local acu = FindAcu(units)
+        local health = acu and tonumber(acu.healthRatio) or nil
+        if state.initialWaveSent == true
+            or not acu
+            or not health
+            or health < COMMANDER_PUSH_HEALTH_RATIO
+            or pendingActors[acu.token]
+        then
+            return true
+        end
+        if acu.idle ~= true or acu.nearStaging ~= true then
+            return true
+        end
+        local escorts = {}
+        for _, unit in ipairs(units) do
+            if COMBAT_ROLES[unit.role]
+                and unit.complete == true
+                and unit.assignedToWave == true
+                and unit.commanderEscort == true
+            then
+                TableInsert(escorts, unit)
+            end
+        end
+        if TableGetn(escorts) > 0 then
+            AddIntent(intents, {
+                kind = 'commander_push',
+                acuToken = acu.token,
+                actorTokens = ActorTokens(escorts),
+                position = snapshot.targetPosition,
+                priority = 1,
+                reason = 'acu_led_concentration',
+            })
+        end
+        return true
+    end
+
     local combat, artillery = CombatUnits(units)
     if TableGetn(combat) < ATTACK_COMBAT or artillery < ATTACK_ARTILLERY then
         return false
@@ -537,11 +631,12 @@ local function AttackDecision(snapshot, units, pendingActors, state, intents)
         end
         if acu.nearStaging == false and IsUsablePosition(snapshot.stagingPosition) then
             AddIntent(intents, {
-                kind = 'stage_acu',
-                actorToken = acu.token,
+                kind = 'mobilize_commander',
+                acuToken = acu.token,
+                actorTokens = ActorTokens(combat),
                 position = snapshot.stagingPosition,
-                priority = 34,
-                reason = 'stage_commander',
+                priority = 1,
+                reason = 'assemble_commander',
             })
             return true
         end
@@ -644,11 +739,22 @@ Policy.Decide = function(snapshot)
     snapshot = snapshot or {}
     local units = SortRecords(snapshot.units or {})
     local state = DoctrineState(snapshot)
-    local safety, emergency = SafetyDecision(snapshot, units, state)
-
     local pending = snapshot.pending or {}
-    local counts = CountRoles(units, pending)
     local pendingActors = PendingActors(pending)
+    local mobilizingAcu, mobilizingCombat = InitialMobilization(
+        snapshot,
+        units,
+        pendingActors,
+        state
+    )
+    local safety, emergency = SafetyDecision(
+        snapshot,
+        units,
+        state,
+        mobilizingCombat
+    )
+
+    local counts = CountRoles(units, pending)
     local virtualReserved = {}
     local virtualPlacements = {}
     for _, operation in ipairs(pending) do
@@ -666,8 +772,16 @@ Policy.Decide = function(snapshot)
     end
     local underContact = snapshot.enemyContact ~= nil
     local commanderRecovery = state and state.commanderRetreating == true
+    local commanderMobilizing = state and state.commanderMobilizing == true
     local commanderClaimsAcu = false
-    if not underContact and not emergency and not commanderRecovery then
+    if not emergency
+        and not commanderRecovery
+        and (
+            not underContact
+            or mobilizingAcu ~= nil
+            or commanderMobilizing
+        )
+    then
         commanderClaimsAcu = AttackDecision(
             snapshot,
             units,
