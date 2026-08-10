@@ -15,6 +15,9 @@ PRODUCTION_LUA = (
     "hook/lua/aibrains/index.lua",
     "lua/AI/Overmind4/Brain.lua",
     "lua/AI/Overmind4/Telemetry.lua",
+    "lua/AI/Overmind4/Catalog.lua",
+    "lua/AI/Overmind4/Policy.lua",
+    "lua/AI/Overmind4/Controller.lua",
 )
 
 

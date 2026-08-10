@@ -50,6 +50,7 @@ class BrainHarness:
     imports: list[str]
     logs: list[str]
     forbidden_calls: list[str]
+    controller_module: Any
 
     def brain(self):
         brain = self.lua.table()
@@ -98,6 +99,12 @@ def make_harness() -> BrainHarness:
                 self.ParentDestroyCalls = (self.ParentDestroyCalls or 0) + 1
                 self.Destroyed = true
             end,
+            ForkThread = function(self, fn, argument)
+                self.ForkThreadCalls = (self.ForkThreadCalls or 0) + 1
+                self.ForkedFunction = fn
+                self.ForkedArgument = argument
+                return { handle = self.ForkThreadCalls }
+            end,
         }
         StandardBrain.__index = StandardBrain
         setmetatable(StandardBrain, {})
@@ -120,6 +127,28 @@ def make_harness() -> BrainHarness:
 
     lua.execute(source("lua/AI/Overmind4/Telemetry.lua"))
     telemetry_module = lua.table_from({"Telemetry": lua.globals().Telemetry})
+    lua.execute(
+        """
+        ControllerModule = {
+            Create = function(brain)
+                brain.ControllerCreateCalls = (brain.ControllerCreateCalls or 0) + 1
+                brain.ParentBeginAtControllerCreate = brain.ParentBeginCalls
+                return { brain = brain, stopped = false }
+            end,
+            Run = function(controller)
+                controller.run = true
+            end,
+            Stop = function(controller, reason)
+                if controller and not controller.stopped then
+                    controller.stopped = true
+                    controller.stopReason = reason
+                    controller.stopCalls = (controller.stopCalls or 0) + 1
+                end
+            end,
+        }
+        """
+    )
+    controller_module = lua.table_from({"Controller": lua.globals().ControllerModule})
     standard_module = lua.table_from({"AIBrain": lua.globals().StandardBrain})
     imports: list[str] = []
 
@@ -129,6 +158,8 @@ def make_harness() -> BrainHarness:
             return standard_module
         if path == "/mods/overmind4/lua/AI/Overmind4/Telemetry.lua":
             return telemetry_module
+        if path == "/mods/overmind4/lua/AI/Overmind4/Controller.lua":
+            return controller_module
         raise AssertionError(f"unexpected import: {path}")
 
     lua.globals()["import"] = importer
@@ -141,6 +172,7 @@ def make_harness() -> BrainHarness:
         imports=imports,
         logs=logs,
         forbidden_calls=forbidden_calls,
+        controller_module=lua.globals().ControllerModule,
     )
 
 
@@ -152,6 +184,7 @@ def test_brain_derives_directly_from_standard_aibrain() -> None:
     assert harness.imports == [
         "/lua/aibrain.lua",
         "/mods/overmind4/lua/AI/Overmind4/Telemetry.lua",
+        "/mods/overmind4/lua/AI/Overmind4/Controller.lua",
     ]
 
 
@@ -208,6 +241,15 @@ def test_begin_session_delegates_and_emits_only_once() -> None:
     brain.OnBeginSession(brain)
 
     assert brain.ParentBeginCalls == 2
+    assert brain.ParentBeginAtControllerCreate == 1
+    assert brain.ControllerCreateCalls == 1
+    assert brain.ForkThreadCalls == 1
+    harness.lua.globals().__forked_function = brain.ForkedFunction
+    harness.lua.globals().__controller_run = harness.controller_module.Run
+    harness.lua.globals().__forked_argument = brain.ForkedArgument
+    harness.lua.globals().__controller_instance = brain.Overmind4Controller
+    assert harness.lua.eval("__forked_function == __controller_run") is True
+    assert harness.lua.eval("__forked_argument == __controller_instance") is True
     begin_lines = [line for line in harness.logs if "event=begin_session" in line]
     assert begin_lines == ["OM4|v=1|kind=lifecycle|army=7|event=begin_session"]
 
@@ -268,12 +310,15 @@ def test_destroy_delegates_and_emits_once() -> None:
     harness = make_harness()
     brain = harness.brain()
     brain.OnCreateAI(brain, "alpha")
+    brain.OnBeginSession(brain)
 
     brain.OnDestroy(brain)
     brain.OnDestroy(brain)
 
     assert brain.ParentDestroyCalls == 2
     assert brain.Destroyed is True
+    assert brain.Overmind4Controller.stopped is True
+    assert brain.Overmind4Controller.stopReason == "destroyed"
     destroy_lines = [line for line in harness.logs if "event=destroyed" in line]
     assert destroy_lines == ["OM4|v=1|kind=lifecycle|army=7|event=destroyed"]
 
@@ -288,6 +333,32 @@ def test_lifecycle_never_issues_orders_queries_world_or_initializes_managers() -
     brain.OnDestroy(brain)
 
     assert harness.forbidden_calls == []
+
+
+def test_controller_is_never_created_or_forked_during_on_create_ai() -> None:
+    harness = make_harness()
+    brain = harness.brain()
+
+    brain.OnCreateAI(brain, "alpha")
+
+    assert brain.ControllerCreateCalls is None
+    assert brain.ForkThreadCalls is None
+    assert brain.Overmind4Controller is None
+
+
+def test_each_terminal_path_stops_controller_idempotently() -> None:
+    for callback, reason in (("OnVictory", "victory"), ("OnDefeat", "defeat"), ("OnDraw", "draw")):
+        harness = make_harness()
+        brain = harness.brain()
+        brain.OnCreateAI(brain, "alpha")
+        brain.OnBeginSession(brain)
+
+        getattr(brain, callback)(brain)
+        getattr(brain, callback)(brain)
+
+        assert brain.Overmind4Controller.stopped is True
+        assert brain.Overmind4Controller.stopReason == reason
+        assert brain.Overmind4Controller.stopCalls == 1
 
 
 def test_sources_do_not_import_stock_decision_brains_or_call_issue_apis() -> None:
