@@ -282,6 +282,13 @@ def test_wall_timeout_is_an_operational_failure_and_non_win() -> None:
             1,
             "load-error",
         ),
+        (
+            "warning: Error running OnFrame script in CScriptObject at 1e9a82c0: "
+            "...ata\\faforever\\gamedata\\lua.nx2\\lua\\ui\\game\\score.lua(529): "
+            "attempt to concatenate field `?' (a nil value)\n",
+            1,
+            "load-error",
+        ),
         ("info: DESYNC detected\n", 0, "desync"),
         ("OM4HARNESS|v=1|kind=failure|run=run-1|reason=mod_missing\n", 1, "load-error"),
         ("EXCEPTION_ACCESS_VIOLATION\n", 1, "crash"),
@@ -309,6 +316,10 @@ def test_operational_failures_have_distinct_states(text: str, exit_code: int, ex
         "debug: documentation example: LUA ERROR: example only\n",
         "info: tooltip text says unable to load map when missing\n",
         "warning: prior report mentioned EXCEPTION_ACCESS_VIOLATION but recovered\n",
+        (
+            "warning: release notes mention Error running OnFrame script in "
+            "CScriptObject at 1e9a82c0 but no error occurred\n"
+        ),
     ],
 )
 def test_log_parser_ignores_benign_unanchored_diagnostic_words(text: str) -> None:

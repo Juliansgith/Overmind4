@@ -252,6 +252,7 @@ function StartCommandLineSession(mapName, isPerfTest)
         GameSpeed = 'normal',
         UnitCap = tostring(unitCap),
         Victory = 'demoralization',
+        Share = 'ShareUntilDeath',
         CheatsEnabled = 'false',
         CivilianAlliance = 'enemy',
         TeamShareOverflow = 'enabled',

@@ -124,6 +124,13 @@ _ENGINE_FAILURES = (
         re.compile(r"ERROR RUNNING LUA SCRIPT(?=\s|:|$)", re.IGNORECASE),
         "lua-error",
     ),
+    (
+        re.compile(
+            r"ERROR RUNNING ONFRAME SCRIPT IN CSCRIPTOBJECT AT \S+:\s",
+            re.IGNORECASE,
+        ),
+        "lua-error",
+    ),
     (re.compile(r"ERROR IMPORTING(?=\s|:|$)", re.IGNORECASE), "import-error"),
     (re.compile(r"UNABLE TO LOAD MAP(?=\s|:|$)", re.IGNORECASE), "map-load-error"),
     (re.compile(r"DESYNC(?=\s|:|$)", re.IGNORECASE), "desync"),

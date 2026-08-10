@@ -78,6 +78,10 @@ class RaisingTail:
         "debug: documentation example: LUA ERROR: example only\n",
         "info: tooltip text says unable to load map when missing\n",
         "warning: prior report mentioned EXCEPTION_ACCESS_VIOLATION but recovered\n",
+        (
+            "warning: release notes mention Error running OnFrame script in "
+            "CScriptObject at 1e9a82c0 but no error occurred\n"
+        ),
     ],
 )
 def test_fail_fast_ignores_benign_unanchored_diagnostic_words(line: str) -> None:
@@ -98,6 +102,16 @@ def test_fail_fast_accepts_only_run_associated_structured_harness_failure() -> N
 
 def test_fail_fast_recognizes_actual_anchored_faf_lua_error_format() -> None:
     line = "warning: Error running lua script: /lua/example.lua(12): failure\n"
+
+    assert detect_fail_fast(line, run_id="run-1") == "lua-error"
+
+
+def test_fail_fast_recognizes_live_faf_onframe_lua_error_format() -> None:
+    line = (
+        "warning: Error running OnFrame script in CScriptObject at 1e9a82c0: "
+        "...ata\\faforever\\gamedata\\lua.nx2\\lua\\ui\\game\\score.lua(529): "
+        "attempt to concatenate field `?' (a nil value)\n"
+    )
 
     assert detect_fail_fast(line, run_id="run-1") == "lua-error"
 

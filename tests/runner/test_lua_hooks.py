@@ -189,6 +189,15 @@ def test_hook_executes_under_lua51_and_builds_fair_isolated_two_ai_session() -> 
     assert any("OM4HARNESS|v=1|kind=start|" in line for line in logs)
 
 
+def test_session_uses_current_faf_default_share_condition() -> None:
+    lua, _, launched = _runtime(_valid_args())
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    assert launched[0].scenarioInfo.Options.Share == "ShareUntilDeath"
+
+
 def test_speed_is_set_only_by_world_thread_and_sim_timeout_ends_session() -> None:
     lua, logs, _ = _runtime(_valid_args())
     lua.execute(HOOK.read_text(encoding="utf-8"))
