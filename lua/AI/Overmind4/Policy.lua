@@ -65,7 +65,7 @@ end
 local function CountRoles(units, pending)
     local counts = {}
     for _, unit in ipairs(units) do
-        if unit.role then
+        if unit.role and unit.complete == true then
             counts[unit.role] = (counts[unit.role] or 0) + 1
         end
     end
@@ -143,7 +143,13 @@ local function SiteIsAvailable(site, virtualReserved, localOnly)
         or not IsUsablePosition(site.position)
         or site.reachable ~= true
         or site.buildable == false
-        or SiteIsClaimed(site, virtualReserved)
+        or site.reserved == true
+        or (site.key and virtualReserved[site.key] == true)
+    then
+        return false
+    end
+    if site.occupied == true
+        and not (site.complete ~= true and type(site.targetToken) == 'string')
     then
         return false
     end
@@ -162,6 +168,47 @@ local function FirstAvailableSite(sites, virtualReserved, localOnly)
     return nil
 end
 
+local function FirstLostSite(sites, virtualReserved, localOnly)
+    for _, site in ipairs(SortSites(sites)) do
+        if site.lost == true
+            and SiteIsAvailable(site, virtualReserved, localOnly)
+        then
+            return site
+        end
+    end
+    return nil
+end
+
+local function FirstFrontierSite(sites, virtualReserved, selectedKey)
+    if type(selectedKey) == 'string' then
+        for _, site in ipairs(sites or {}) do
+            if site.key == selectedKey
+                and site.frontierSelected == true
+                and site.lost ~= true
+                and SiteIsAvailable(site, virtualReserved, false)
+            then
+                return site
+            end
+        end
+    end
+    for _, site in ipairs(SortSites(sites)) do
+        if site.frontierSelected == true
+            and site.lost ~= true
+            and SiteIsAvailable(site, virtualReserved, false)
+        then
+            return site
+        end
+    end
+    return nil
+end
+
+local function HasLostMex(sites)
+    for _, site in ipairs(sites or {}) do
+        if site.lost == true and site.complete ~= true then return true end
+    end
+    return false
+end
+
 local function CountClaimedLocalSites(sites, virtualReserved)
     local count = 0
     for _, site in ipairs(sites or {}) do
@@ -174,10 +221,15 @@ end
 
 local function BuildAtSite(actor, role, site, priority, reason)
     return {
-        kind = 'build_structure',
+        kind = site.occupied == true and site.complete ~= true
+            and type(site.targetToken) == 'string'
+            and 'assist_structure'
+            or 'build_structure',
         actorToken = actor.token,
         buildRole = role,
         siteKey = site.key,
+        clusterKey = site.clusterKey,
+        targetToken = site.targetToken,
         position = site.position,
         priority = priority,
         reason = reason,
@@ -405,6 +457,15 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
         return nil
     end
 
+    local massSites = ((snapshot.sites or {}).mass) or {}
+    if CanBuild(acu, 'mass_extractor') then
+        local lost = FirstLostSite(massSites, virtualReserved, true)
+        if lost then
+            virtualReserved[lost.key] = true
+            return BuildAtSite(acu, 'mass_extractor', lost, 9, 'rebuild_mex')
+        end
+    end
+
     if (counts.land_factory or 0) < 1 and CanBuild(acu, 'land_factory') then
         return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 1, virtualPlacements), 10, 'opening_factory')
     end
@@ -420,7 +481,6 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
         return nil
     end
 
-    local massSites = ((snapshot.sites or {}).mass) or {}
     if CountClaimedLocalSites(massSites, virtualReserved) < 4 and CanBuild(acu, 'mass_extractor') then
         local site = FirstAvailableSite(massSites, virtualReserved, true)
         if site then
@@ -452,10 +512,32 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local hydroSites = sites.hydro or {}
     local massSites = sites.mass or {}
     local economy = snapshot.economy or {}
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
     local lowEnergy = (tonumber(economy.energyTrend) or 0) < 0
         and (tonumber(economy.energyStoredRatio) or 0) < LOW_ENERGY_STORED_RATIO
+    local massIncome = tonumber(economy.massIncome) or 0
+    local massRequested = tonumber(economy.massRequested)
+        or tonumber(economy.massUsage)
+        or 0
+    local massStalled = massRequested > massIncome
+        or (tonumber(economy.massTrend) or 0) < 0
+        or (tonumber(economy.massStoredRatio) or 0) < 0.1
+    local lostOutstanding = HasLostMex(massSites)
     local plannedPower = false
     local plannedFactory = false
+    local plannedReclaim = false
+    local constructionPlanned = false
+    local reclaimCandidates = CopyArray(snapshot.reclaim or {})
+    table.sort(reclaimCandidates, function(a, b)
+        local av = tonumber(a.mass) or -1
+        local bv = tonumber(b.mass) or -1
+        if av == bv then return tostring(a.key or '') < tostring(b.key or '') end
+        return av > bv
+    end)
+    local virtualReclaim = {}
+    for _, operation in ipairs(snapshot.pending or {}) do
+        if operation.targetKey then virtualReclaim[operation.targetKey] = true end
+    end
     local placementIndex = {
         power_generator = (counts.power_generator or 0) + 1,
         land_factory = (counts.land_factory or 0) + 1,
@@ -463,7 +545,34 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
 
     for _, engineer in ipairs(engineers) do
         local intent = nil
-        if not underContact
+        if not underContact and CanBuild(engineer, 'mass_extractor') then
+            local site = FirstLostSite(massSites, virtualReserved, false)
+            if site then
+                virtualReserved[site.key] = true
+                counts.mass_extractor = (counts.mass_extractor or 0) + 1
+                intent = BuildAtSite(engineer, 'mass_extractor', site, 18, 'rebuild_mex')
+            end
+        end
+
+        if not intent
+            and not lostOutstanding
+            and lowEnergy
+            and allowPlacement
+            and not plannedPower
+            and CanBuild(engineer, 'power_generator')
+        then
+            local position = ReservePlacement(snapshot, 'power_generator', placementIndex.power_generator, virtualPlacements)
+            if position then
+                plannedPower = true
+                placementIndex.power_generator = placementIndex.power_generator + 1
+                counts.power_generator = (counts.power_generator or 0) + 1
+                intent = BuildAtPlacement(engineer, 'power_generator', position, 19, 'energy_recovery')
+            end
+        end
+
+        if not intent
+            and not lostOutstanding
+            and not underContact
             and (counts.hydrocarbon or 0) < 1
             and CanBuild(engineer, 'hydrocarbon')
         then
@@ -476,47 +585,97 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
 
         if not intent
+            and not lostOutstanding
+            and not underContact
+            and not plannedFactory
             and allowPlacement
-            and lowEnergy
-            and not plannedPower
-            and CanBuild(engineer, 'power_generator')
+            and CanBuild(engineer, 'land_factory')
         then
-            local position = ReservePlacement(snapshot, 'power_generator', placementIndex.power_generator, virtualPlacements)
-            if position then
-                plannedPower = true
-                placementIndex.power_generator = placementIndex.power_generator + 1
-                counts.power_generator = (counts.power_generator or 0) + 1
-                intent = BuildAtPlacement(engineer, 'power_generator', position, 21, 'energy_recovery')
+            local currentFactories = counts.land_factory or 0
+            local factoryDemand = macro and (tonumber(macro.factoryDemand) or currentFactories) or 3
+            local sustained = not macro
+                or (tonumber(macro.massSurplusTicks) or 0) >= 300
+            if currentFactories >= 2
+                and currentFactories < factoryDemand
+                and (macro or (counts.mass_extractor or 0) >= 6)
+                and sustained
+                and not massStalled
+            then
+                local position = ReservePlacement(snapshot, 'land_factory', placementIndex.land_factory, virtualPlacements)
+                if position then
+                    plannedFactory = true
+                    placementIndex.land_factory = placementIndex.land_factory + 1
+                    counts.land_factory = currentFactories + 1
+                    intent = BuildAtPlacement(
+                        engineer,
+                        'land_factory',
+                        position,
+                        21,
+                        macro and 'production_saturation' or 'third_factory'
+                    )
+                end
             end
         end
 
         if not intent
-            and not plannedFactory
-            and allowPlacement
-            and (counts.land_factory or 0) >= 2
-            and (counts.land_factory or 0) < 3
-            and (counts.mass_extractor or 0) >= 6
-            and CanBuild(engineer, 'land_factory')
+            and not lostOutstanding
+            and not underContact
+            and CanBuild(engineer, 'mass_extractor')
         then
-            local position = ReservePlacement(snapshot, 'land_factory', placementIndex.land_factory, virtualPlacements)
-            if position then
-                plannedFactory = true
-                placementIndex.land_factory = placementIndex.land_factory + 1
-                counts.land_factory = (counts.land_factory or 0) + 1
-                intent = BuildAtPlacement(engineer, 'land_factory', position, 22, 'third_factory')
-            end
-        end
-
-        if not intent and not underContact and CanBuild(engineer, 'mass_extractor') then
-            local site = FirstAvailableSite(massSites, virtualReserved, false)
+            local site = macro
+                and FirstFrontierSite(
+                    massSites,
+                    virtualReserved,
+                    macro.selectedFrontierSite
+                )
+                or FirstAvailableSite(massSites, virtualReserved, false)
             if site then
                 virtualReserved[site.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
-                intent = BuildAtSite(engineer, 'mass_extractor', site, 23, 'mass_expansion')
+                intent = BuildAtSite(
+                    engineer,
+                    'mass_extractor',
+                    site,
+                    22,
+                    macro and 'frontier_expansion' or 'mass_expansion'
+                )
+            end
+        end
+
+        if not intent
+            and macro
+            and not lostOutstanding
+            and not underContact
+            and not plannedReclaim
+            and not constructionPlanned
+            and (tonumber(macro.constructionBacklog) or 0) <= 0
+        then
+            for _, candidate in ipairs(reclaimCandidates) do
+                if type(candidate.key) == 'string'
+                    and IsUsablePosition(candidate.position)
+                    and candidate.reserved ~= true
+                    and not virtualReclaim[candidate.key]
+                    and (tonumber(candidate.mass) or 0) > 0
+                then
+                    plannedReclaim = true
+                    virtualReclaim[candidate.key] = true
+                    intent = {
+                        kind = 'reclaim',
+                        actorToken = engineer.token,
+                        targetKey = candidate.key,
+                        targetValue = candidate.mass,
+                        priority = 50,
+                        reason = 'controlled_reclaim',
+                    }
+                    break
+                end
             end
         end
 
         if intent then
+            if intent.kind == 'build_structure' or intent.kind == 'assist_structure' then
+                constructionPlanned = true
+            end
             AddIntent(intents, intent)
         end
     end
@@ -538,6 +697,20 @@ local function NextCombatRole(counts)
 end
 
 local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
+    local economy = snapshot.economy or {}
+    local engineerDemand = macro and (tonumber(macro.engineerDemand) or 2) or 3
+    local massIncome = tonumber(economy.massIncome) or 0
+    local massRequested = tonumber(economy.massRequested)
+        or tonumber(economy.massUsage)
+        or 0
+    local massStalled = massRequested > massIncome
+        or (tonumber(economy.massTrend) or 0) < 0
+        or (tonumber(economy.massStoredRatio) or 0) < 0.1
+    local plannedEngineer = false
+    local rallyPosition = macro and macro.rallyPosition
+        or snapshot.rallyPosition
+        or snapshot.basePosition
     for _, factory in ipairs(units) do
         if factory.role == 'land_factory'
             and factory.complete == true
@@ -548,14 +721,21 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                 AddIntent(intents, {
                     kind = 'rally',
                     actorToken = factory.token,
-                    position = snapshot.stagingPosition,
+                    position = rallyPosition,
                     priority = 30,
-                    reason = 'common_staging',
+                    reason = 'controlled_rally',
                 })
             else
                 local role = nil
-                if (counts.engineer or 0) < 3 and CanBuild(factory, 'engineer') then
+                local reason = 'continuous_land_production'
+                if not plannedEngineer
+                    and not massStalled
+                    and (counts.engineer or 0) < engineerDemand
+                    and CanBuild(factory, 'engineer')
+                then
                     role = 'engineer'
+                    reason = macro and 'construction_capacity' or reason
+                    plannedEngineer = true
                 elseif (counts.scout or 0) < 1 and CanBuild(factory, 'scout') then
                     role = 'scout'
                 else
@@ -573,7 +753,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                         actorToken = factory.token,
                         buildRole = role,
                         priority = 31,
-                        reason = 'continuous_land_production',
+                        reason = reason,
                     })
                     counts[role] = (counts[role] or 0) + 1
                 end
@@ -705,14 +885,99 @@ local function AttackDecision(snapshot, units, pendingActors, state, intents)
     return false
 end
 
+local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
+    if not macro then return end
+    local currentScreen = math.max(0, tonumber(macro.frontierScreenCount) or 0)
+    local engineerToken = nil
+    local clusterKey = nil
+    for _, operation in ipairs(snapshot.pending or {}) do
+        if operation.reason == 'frontier_expansion'
+            and type(operation.actorToken) == 'string'
+        then
+            engineerToken = operation.actorToken
+            clusterKey = operation.clusterKey
+            break
+        end
+    end
+    if not engineerToken then
+        for _, intent in ipairs(intents or {}) do
+            if intent.reason == 'frontier_expansion'
+                and type(intent.actorToken) == 'string'
+            then
+                engineerToken = intent.actorToken
+                clusterKey = intent.clusterKey
+                break
+            end
+        end
+    end
+    if not engineerToken then return end
+    local engineer = nil
+    local available = {}
+    local antiAir = {}
+    local screenHasAntiAir = false
+    for _, unit in ipairs(units or {}) do
+        if unit.token == engineerToken
+            and unit.role == 'engineer'
+            and unit.complete == true
+        then
+            engineer = unit
+        elseif COMBAT_ROLES[unit.role]
+            and unit.complete == true
+            and unit.assignedToWave ~= true
+            and not pendingActors[unit.token]
+        then
+            TableInsert(available, unit)
+            if unit.role == 'anti_air' then TableInsert(antiAir, unit) end
+        elseif unit.frontierEscort == true and unit.role == 'anti_air' then
+            screenHasAntiAir = true
+        end
+    end
+    local screenTarget = math.min(4, currentScreen + TableGetn(available) - 4)
+    local screenSize = screenTarget - currentScreen
+    if screenSize <= 0
+        and not screenHasAntiAir
+        and TableGetn(antiAir) > 0
+        and TableGetn(available) > 4
+    then
+        screenSize = 1
+    end
+    if not engineer or screenSize <= 0 then return end
+    local selected = {}
+    local selectedTokens = {}
+    if TableGetn(antiAir) > 0 then
+        TableInsert(selected, antiAir[1])
+        selectedTokens[antiAir[1].token] = true
+    end
+    for _, unit in ipairs(available) do
+        if TableGetn(selected) < screenSize and not selectedTokens[unit.token] then
+            TableInsert(selected, unit)
+            selectedTokens[unit.token] = true
+        end
+    end
+    AddIntent(intents, {
+        kind = 'frontier_screen',
+        engineerToken = engineerToken,
+        actorTokens = ActorTokens(selected),
+        clusterKey = clusterKey or tostring(macro.selectedFrontierCluster or 'none'),
+        priority = 24,
+        reason = 'secure_frontier',
+    })
+end
+
 local function RegroupDecision(snapshot, units, intents)
-    if not IsUsablePosition(snapshot.stagingPosition) then return end
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
+    local position = macro and macro.rallyPosition
+        or snapshot.rallyPosition
+        or snapshot.basePosition
+    if not IsUsablePosition(position) then return end
     local regroup = {}
     for _, unit in ipairs(units) do
         if COMBAT_ROLES[unit.role]
             and unit.complete == true
             and unit.assignedToWave ~= true
-            and unit.nearStaging == false
+            and (unit.nearRally == false
+                or (unit.nearRally == nil and unit.nearStaging == false))
         then
             TableInsert(regroup, unit)
         end
@@ -721,9 +986,9 @@ local function RegroupDecision(snapshot, units, intents)
         AddIntent(intents, {
             kind = 'regroup_wave',
             actorTokens = ActorTokens(regroup),
-            position = snapshot.stagingPosition,
+            position = position,
             priority = 35,
-            reason = 'return_to_staging',
+            reason = 'return_to_controlled_anchor',
         })
     end
 end
@@ -761,17 +1026,11 @@ Policy.Decide = function(snapshot)
     local state = DoctrineState(snapshot)
     local pending = snapshot.pending or {}
     local pendingActors = PendingActors(pending)
-    local mobilizingAcu, mobilizingCombat = InitialMobilization(
-        snapshot,
-        units,
-        pendingActors,
-        state
-    )
     local safety, emergency = SafetyDecision(
         snapshot,
         units,
         state,
-        mobilizingCombat
+        nil
     )
 
     local counts = CountRoles(units, pending)
@@ -792,30 +1051,7 @@ Policy.Decide = function(snapshot)
     end
     local underContact = snapshot.enemyContact ~= nil
     local commanderRecovery = state and state.commanderRetreating == true
-    local commanderMobilizing = state and state.commanderMobilizing == true
     local commanderClaimsAcu = false
-    if not emergency
-        and not commanderRecovery
-        and (
-            not underContact
-            or mobilizingAcu ~= nil
-            or commanderMobilizing
-            or (
-                state
-                and state.commanderPushActive == true
-                and snapshot.enemyContact
-                and snapshot.enemyContact.immediate ~= true
-            )
-        )
-    then
-        commanderClaimsAcu = AttackDecision(
-            snapshot,
-            units,
-            pendingActors,
-            state,
-            intents
-        )
-    end
     local opening = nil
     if not emergency and not underContact and not commanderRecovery and not commanderClaimsAcu then
         opening = AcuOpening(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors)
@@ -827,17 +1063,22 @@ Policy.Decide = function(snapshot)
     local openingComplete = (counts.land_factory or 0) >= 2
         and (counts.power_generator or 0) >= 2
         and localMass >= 4
-    EngineerDecisions(
-        snapshot,
-        units,
-        counts,
-        virtualReserved,
-        virtualPlacements,
-        pendingActors,
-        underContact or emergency,
-        openingComplete or emergency,
-        intents
-    )
+    if not emergency or commanderRecovery then
+        EngineerDecisions(
+            snapshot,
+            units,
+            counts,
+            virtualReserved,
+            virtualPlacements,
+            pendingActors,
+            underContact,
+            openingComplete,
+            intents
+        )
+    end
+    if not underContact and not emergency and not commanderRecovery then
+        FrontierScreenDecision(snapshot, units, pendingActors, intents)
+    end
     FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     if not underContact and not emergency and not commanderRecovery then
         RegroupDecision(snapshot, units, intents)

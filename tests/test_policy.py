@@ -520,7 +520,7 @@ def tactical_intents(result: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def test_first_push_transactionally_mobilizes_offstage_acu_and_full_cohort() -> None:
+def test_ready_offstage_force_keeps_macro_running_without_cross_map_mobilization() -> None:
     snapshot = commander_snapshot(near_staging=False)
     factory = next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
     factory["idle"] = True
@@ -539,22 +539,7 @@ def test_first_push_transactionally_mobilizes_offstage_acu_and_full_cohort() -> 
     )
 
     result = decide(snapshot)
-    mobilize = intents_of(result, "mobilize_commander")
-
-    assert mobilize == [
-        {
-            "kind": "mobilize_commander",
-            "acuToken": "1:1",
-            "actorTokens": sorted(
-                unit["token"]
-                for unit in snapshot["units"]
-                if unit["role"] in {"tank", "artillery"}
-            ),
-            "position": snapshot["stagingPosition"],
-            "priority": 1,
-            "reason": "assemble_commander",
-        }
-    ]
+    assert tactical_intents(result) == []
     assert intents_of(result, "factory_build")
     assert any(
         intent.get("buildRole") == "mass_extractor"
@@ -565,7 +550,6 @@ def test_first_push_transactionally_mobilizes_offstage_acu_and_full_cohort() -> 
         intent.get("actorToken") == "1:1" and intent["kind"] == "build_structure"
         for intent in result
     )
-    assert len(tactical_intents(result)) == 1
 
 
 def test_first_push_waits_while_offstage_acu_is_moving() -> None:
@@ -576,7 +560,7 @@ def test_first_push_waits_while_offstage_acu_is_moving() -> None:
     assert tactical_intents(result) == []
 
 
-def test_ready_offstage_commander_mobilizes_through_immediate_contact_without_retreat() -> None:
+def test_ready_offstage_commander_handles_immediate_contact_locally() -> None:
     snapshot = commander_snapshot(near_staging=False)
     snapshot["enemyContact"] = {"position": [11, 2, 10], "immediate": True}
     factory = next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
@@ -585,15 +569,13 @@ def test_ready_offstage_commander_mobilizes_through_immediate_contact_without_re
 
     result = decide(snapshot)
 
-    mobilize = intents_of(result, "mobilize_commander")
-    assert len(mobilize) == 1
-    assert len(mobilize[0]["actorTokens"]) == 24
-    assert not intents_of(result, "retreat")
-    assert not intents_of(result, "defend_wave")
+    assert tactical_intents(result) == []
+    assert intents_of(result, "retreat")
+    assert intents_of(result, "defend_wave")
     assert intents_of(result, "factory_build")
 
 
-def test_initial_contact_mobilizes_staged_cohort_and_defends_with_offstage_reserves() -> None:
+def test_initial_contact_defends_locally_without_partitioning_an_attack_cohort() -> None:
     snapshot = commander_snapshot(near_staging=False)
     reserve_tokens: list[str] = []
     for offset, role in enumerate(("tank", "artillery"), 200):
@@ -609,29 +591,31 @@ def test_initial_contact_mobilizes_staged_cohort_and_defends_with_offstage_reser
     snapshot["enemyContact"] = {"position": [11, 2, 10], "immediate": True}
 
     result = decide(snapshot)
-    mobilize = intents_of(result, "mobilize_commander")
     defense = intents_of(result, "defend_wave")
 
-    assert len(mobilize) == 1
-    assert len(mobilize[0]["actorTokens"]) == 24
+    assert tactical_intents(result) == []
     assert len(defense) == 1
-    assert defense[0]["actorTokens"] == reserve_tokens
-    assert not set(mobilize[0]["actorTokens"]) & set(defense[0]["actorTokens"])
-    assert not intents_of(result, "retreat")
+    expected = sorted(
+        unit["token"]
+        for unit in snapshot["units"]
+        if unit["role"] in {"tank", "artillery", "anti_air", "lab"}
+    )
+    assert defense[0]["actorTokens"] == expected
+    assert set(reserve_tokens) <= set(defense[0]["actorTokens"])
+    assert intents_of(result, "retreat")
 
 
-def test_offstage_mobilization_accepts_exact_health_boundary_and_every_oversized_unit() -> None:
+def test_offstage_health_boundary_and_oversized_force_still_do_not_enable_offense() -> None:
     snapshot = commander_snapshot(near_staging=False, health=0.75)
     extra_tokens = add_reserve_combat(
         snapshot,
         ("tank", "tank", "tank", "tank", "artillery"),
     )
 
-    mobilize = intents_of(decide(snapshot), "mobilize_commander")
+    result = decide(snapshot)
 
-    assert len(mobilize) == 1
-    assert len(mobilize[0]["actorTokens"]) == 29
-    assert set(extra_tokens) <= set(mobilize[0]["actorTokens"])
+    assert tactical_intents(result) == []
+    assert extra_tokens
 
 
 def test_invalid_objective_cannot_suppress_immediate_commander_safety() -> None:
@@ -670,7 +654,7 @@ def test_mobilizing_contact_preserves_owned_cohort_and_defends_with_reserves_onl
     assert intents_of(result, "factory_build")
 
 
-def test_mobilized_commander_at_staging_pushes_owned_survivors_despite_contact() -> None:
+def test_legacy_mobilized_state_defends_with_reserves_without_pushing() -> None:
     snapshot = commander_snapshot(health=0.75, commander_mobilizing=True)
     escort_tokens = mark_commander_escorts(snapshot)
     reserve_tokens = add_reserve_combat(snapshot, ("tank", "artillery"))
@@ -678,10 +662,7 @@ def test_mobilized_commander_at_staging_pushes_owned_survivors_despite_contact()
 
     result = decide(snapshot)
 
-    push = intents_of(result, "commander_push")
-    assert len(push) == 1
-    assert push[0]["actorTokens"] == escort_tokens
-    assert push[0]["acuToken"] == "1:1"
+    assert tactical_intents(result) == []
     assert not intents_of(result, "retreat")
     assert not intents_of(result, "mobilize_commander")
     defense = intents_of(result, "defend_wave")
@@ -689,7 +670,7 @@ def test_mobilized_commander_at_staging_pushes_owned_survivors_despite_contact()
     assert defense[0]["actorTokens"] == reserve_tokens
 
 
-def test_mobilized_push_excludes_incomplete_or_no_longer_owned_escorts() -> None:
+def test_legacy_mobilized_state_with_invalid_escorts_still_emits_no_push() -> None:
     snapshot = commander_snapshot(commander_mobilizing=True)
     escort_tokens = mark_commander_escorts(snapshot)
     first = next(
@@ -705,10 +686,7 @@ def test_mobilized_push_excludes_incomplete_or_no_longer_owned_escorts() -> None
     )
     second["commanderEscort"] = False
 
-    push = intents_of(decide(snapshot), "commander_push")
-
-    assert len(push) == 1
-    assert set(push[0]["actorTokens"]) == set(escort_tokens[2:])
+    assert tactical_intents(decide(snapshot)) == []
 
 
 def test_mobilizing_commander_retreats_below_point_seventy_five_and_fails_closed_malformed() -> None:
@@ -761,18 +739,11 @@ def test_mobilizing_contact_decision_is_deterministic_under_unit_permutation() -
     assert decide(shuffled) == baseline
 
 
-def test_first_push_uses_exact_near_staging_acu_and_all_available_combat() -> None:
+def test_ready_staged_force_does_not_push_commander_or_attack_wave() -> None:
     snapshot = commander_snapshot()
 
     result = decide(snapshot)
-    push = intents_of(result, "commander_push")
-
-    assert len(push) == 1
-    assert push[0]["acuToken"] == "1:1"
-    assert len(push[0]["actorTokens"]) == 24
-    assert push[0]["position"] == snapshot["targetPosition"]
-    assert push[0]["reason"] == "acu_led_concentration"
-    assert not intents_of(result, "attack_wave")
+    assert tactical_intents(result) == []
 
 
 def test_first_push_fails_closed_for_missing_incomplete_pending_or_low_acu() -> None:
@@ -814,62 +785,54 @@ def test_first_push_fails_closed_for_missing_or_malformed_state() -> None:
         assert tactical_intents(decide(snapshot)) == []
 
 
-def test_post_initial_reinforces_active_commander_or_falls_back_to_combat_wave() -> None:
+def test_legacy_post_initial_states_never_reinforce_or_fall_back_to_attack() -> None:
     active = commander_snapshot(initial_wave_sent=True, commander_push_active=True, idle=False)
-    reinforcement = intents_of(decide(active), "reinforce_commander")
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["acuToken"] == "1:1"
-    assert len(reinforcement[0]["actorTokens"]) == 24
-    assert not intents_of(decide(active), "attack_wave")
+    assert tactical_intents(decide(active)) == []
 
     inactive = commander_snapshot(initial_wave_sent=True, commander_push_active=False)
-    attack = intents_of(decide(inactive), "attack_wave")
-    assert len(attack) == 1
-    assert len(attack[0]["actorTokens"]) == 24
+    assert tactical_intents(decide(inactive)) == []
 
     missing = commander_snapshot(initial_wave_sent=True, commander_push_active=True)
     missing["units"] = [unit for unit in missing["units"] if unit["role"] != "acu"]
-    assert intents_of(decide(missing), "attack_wave")
-    assert not intents_of(decide(missing), "reinforce_commander")
+    assert tactical_intents(decide(missing)) == []
 
 
-def test_active_push_streams_one_zero_artillery_reinforcement() -> None:
+def test_active_legacy_push_streams_no_single_reinforcement() -> None:
     snapshot, tokens = streaming_reinforcement_snapshot(("tank",))
 
     reinforcement = intents_of(decide(snapshot), "reinforce_commander")
 
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["actorTokens"] == tokens
+    assert reinforcement == []
+    assert tokens
 
 
-def test_active_push_streams_twenty_three_zero_artillery_reinforcements() -> None:
+def test_active_legacy_push_streams_no_twenty_three_reinforcements() -> None:
     snapshot, tokens = streaming_reinforcement_snapshot(("tank",) * 23)
 
     reinforcement = intents_of(decide(snapshot), "reinforce_commander")
 
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["actorTokens"] == tokens
+    assert reinforcement == []
+    assert len(tokens) == 23
 
 
-def test_active_push_streams_twenty_four_zero_artillery_reinforcements() -> None:
+def test_active_legacy_push_streams_no_twenty_four_reinforcements() -> None:
     snapshot, tokens = streaming_reinforcement_snapshot(("tank",) * 24)
 
     reinforcement = intents_of(decide(snapshot), "reinforce_commander")
 
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["actorTokens"] == tokens
+    assert reinforcement == []
+    assert len(tokens) == 24
 
 
-def test_active_push_streams_every_member_of_oversized_cohort() -> None:
+def test_active_legacy_push_streams_no_oversized_reinforcement() -> None:
     snapshot, tokens = streaming_reinforcement_snapshot(
         ("tank",) * 31 + ("anti_air",) * 3 + ("artillery",) * 2
     )
 
     reinforcement = intents_of(decide(snapshot), "reinforce_commander")
 
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["actorTokens"] == tokens
-    assert len(reinforcement[0]["actorTokens"]) == 36
+    assert reinforcement == []
+    assert len(tokens) == 36
 
 
 def test_initial_offstage_launch_still_requires_twenty_four_total_and_four_artillery() -> None:
@@ -888,7 +851,7 @@ def test_initial_offstage_launch_still_requires_twenty_four_total_and_four_artil
         assert not intents_of(result, "commander_push")
 
 
-def test_ordinary_contact_partitions_staged_reinforcements_from_offstage_defenders() -> None:
+def test_ordinary_contact_keeps_staged_units_local_and_uses_offstage_defenders() -> None:
     snapshot, staged_tokens = streaming_reinforcement_snapshot(
         ("tank", "artillery", "anti_air")
     )
@@ -899,17 +862,13 @@ def test_ordinary_contact_partitions_staged_reinforcements_from_offstage_defende
     reinforcement = intents_of(result, "reinforce_commander")
     defense = intents_of(result, "defend_wave")
 
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["actorTokens"] == staged_tokens
+    assert reinforcement == []
     assert len(defense) == 1
     assert defense[0]["actorTokens"] == offstage_tokens
-    assert set(reinforcement[0]["actorTokens"]).isdisjoint(defense[0]["actorTokens"])
-    assert set(reinforcement[0]["actorTokens"]) | set(defense[0]["actorTokens"]) == set(
-        staged_tokens + offstage_tokens
-    )
+    assert set(staged_tokens).isdisjoint(defense[0]["actorTokens"])
 
 
-def test_ordinary_contact_never_reclassifies_ineligible_staged_unit_as_defender() -> None:
+def test_ordinary_contact_never_reclassifies_staged_units_as_defenders_or_reinforcements() -> None:
     snapshot, staged_tokens = streaming_reinforcement_snapshot(("tank",))
     ineligible = dict(
         role_counts("artillery")[0],
@@ -926,7 +885,7 @@ def test_ordinary_contact_never_reclassifies_ineligible_staged_unit_as_defender(
     reinforcement = intents_of(result, "reinforce_commander")
     defense = intents_of(result, "defend_wave")
 
-    assert reinforcement[0]["actorTokens"] == staged_tokens
+    assert reinforcement == []
     assert defense[0]["actorTokens"] == offstage_tokens
     assert all("450:1" not in intent.get("actorTokens", []) for intent in result)
 
@@ -945,7 +904,7 @@ def test_immediate_contact_preempts_streaming_and_defends_with_all_unassigned_co
     )
 
 
-def test_streaming_reinforcement_never_overlaps_other_combat_intents() -> None:
+def test_legacy_streaming_state_only_regroups_offstage_local_units() -> None:
     snapshot, staged_tokens = streaming_reinforcement_snapshot(("tank", "artillery", "lab"))
     offstage_tokens = add_offstage_combat(snapshot, ("tank", "anti_air"))
 
@@ -953,16 +912,15 @@ def test_streaming_reinforcement_never_overlaps_other_combat_intents() -> None:
     reinforcement = intents_of(result, "reinforce_commander")
     regroup = intents_of(result, "regroup_wave")
 
-    assert len(reinforcement) == 1
+    assert reinforcement == []
     assert len(regroup) == 1
-    assert reinforcement[0]["actorTokens"] == staged_tokens
     assert regroup[0]["actorTokens"] == offstage_tokens
     assert not intents_of(result, "attack_wave")
     assert not intents_of(result, "defend_wave")
-    assert set(reinforcement[0]["actorTokens"]).isdisjoint(regroup[0]["actorTokens"])
+    assert set(staged_tokens).isdisjoint(regroup[0]["actorTokens"])
 
 
-def test_streaming_reinforcement_leaves_existing_commander_escorts_owned() -> None:
+def test_legacy_streaming_state_leaves_existing_escorts_owned_without_reinforcement() -> None:
     snapshot, fresh_tokens = streaming_reinforcement_snapshot(("tank", "artillery"))
     escort = dict(
         role_counts("tank")[0],
@@ -981,8 +939,8 @@ def test_streaming_reinforcement_leaves_existing_commander_escorts_owned() -> No
     ]
 
     reinforcement = intents_of(result, "reinforce_commander")
-    assert len(reinforcement) == 1
-    assert reinforcement[0]["actorTokens"] == fresh_tokens
+    assert reinforcement == []
+    assert fresh_tokens
     assert all("900:1" not in intent.get("actorTokens", []) for intent in combat_intents)
 
 
@@ -1009,7 +967,7 @@ def test_streaming_fails_closed_without_one_complete_healthy_commander() -> None
         assert not intents_of(decide(snapshot), "reinforce_commander")
 
 
-def test_push_uses_point_seventy_five_retreat_threshold_without_changing_normal_threshold() -> None:
+def test_legacy_push_health_threshold_retreats_but_never_resumes_offense() -> None:
     active = commander_snapshot(
         health=0.749,
         initial_wave_sent=True,
@@ -1024,7 +982,7 @@ def test_push_uses_point_seventy_five_retreat_threshold_without_changing_normal_
         commander_push_active=False,
     )
     assert not intents_of(decide(ordinary), "retreat")
-    assert intents_of(decide(ordinary), "attack_wave")
+    assert tactical_intents(decide(ordinary)) == []
 
     boundary = commander_snapshot(
         health=0.75,
@@ -1032,7 +990,7 @@ def test_push_uses_point_seventy_five_retreat_threshold_without_changing_normal_
         commander_push_active=True,
     )
     assert not intents_of(decide(boundary), "retreat")
-    assert intents_of(decide(boundary), "reinforce_commander")
+    assert tactical_intents(decide(boundary)) == []
 
 
 def test_active_push_with_malformed_health_never_defaults_to_healthy() -> None:
@@ -1144,8 +1102,7 @@ def test_current_intel_defense_preempts_expansion_and_attack() -> None:
     active["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
     active_result = decide(active)
     reinforcement = intents_of(active_result, "reinforce_commander")
-    assert len(reinforcement) == 1
-    assert len(reinforcement[0]["actorTokens"]) == 24
+    assert reinforcement == []
     assert not intents_of(active_result, "defend_wave")
     assert not intents_of(active_result, "attack_wave")
 
@@ -1179,7 +1136,7 @@ def test_defense_uses_completed_unassigned_combat_even_when_off_staging() -> Non
     assert len(defense[0]["actorTokens"]) == 3
 
 
-def test_off_staging_defenders_regroup_after_contact_clears() -> None:
+def test_off_anchor_defenders_regroup_to_controlled_base_after_contact_clears() -> None:
     snapshot = combat_snapshot(["tank", "tank", "artillery"])
     for unit in snapshot["units"]:
         if unit["role"] in {"tank", "artillery"}:
@@ -1192,7 +1149,7 @@ def test_off_staging_defenders_regroup_after_contact_clears() -> None:
 
     assert len(regroup) == 1
     assert len(regroup[0]["actorTokens"]) == 3
-    assert regroup[0]["position"] == snapshot["stagingPosition"]
+    assert regroup[0]["position"] == snapshot["basePosition"]
 
 
 def test_twenty_four_with_only_three_artillery_never_launches_at_any_time_or_state() -> None:
@@ -1229,21 +1186,17 @@ def test_offstage_mobilization_rejects_each_concentration_gate_shortfall() -> No
     assert not intents_of(decide(only_twenty_three), "mobilize_commander")
 
 
-def test_exactly_twenty_four_with_four_artillery_launches_every_available_unit() -> None:
+def test_exactly_twenty_four_with_four_artillery_still_never_launches() -> None:
     initial = commander_snapshot()
     push = intents_of(decide(initial), "commander_push")
-    assert len(push) == 1
-    assert len(push[0]["actorTokens"]) == 24
-    assert push[0]["reason"] == "acu_led_concentration"
+    assert push == []
 
     later = commander_snapshot(initial_wave_sent=True)
     attack = intents_of(decide(later), "attack_wave")
-    assert len(attack) == 1
-    assert len(attack[0]["actorTokens"]) == 24
-    assert attack[0]["reason"] == "concentration_gate"
+    assert attack == []
 
 
-def test_oversized_concentrated_wave_launches_every_available_unit() -> None:
+def test_oversized_concentrated_wave_still_never_launches() -> None:
     snapshot = combat_snapshot(["tank"] * 27 + ["artillery"] * 5)
     snapshot["state"] = {
         "initialWaveSent": True,
@@ -1253,8 +1206,7 @@ def test_oversized_concentrated_wave_launches_every_available_unit() -> None:
 
     attack = intents_of(decide(snapshot), "attack_wave")
 
-    assert len(attack) == 1
-    assert len(attack[0]["actorTokens"]) == 32
+    assert attack == []
 
 
 def test_concentration_gate_has_no_time_escape_and_still_requires_target_path() -> None:
@@ -1278,14 +1230,12 @@ def test_concentration_gate_fails_closed_for_missing_or_malformed_state() -> Non
         assert tactical_intents(decide(snapshot)) == []
 
 
-def test_wave_never_includes_acu_engineer_scout_incomplete_or_unavailable() -> None:
+def test_noncombat_and_ineligible_units_cannot_reenable_disabled_offense() -> None:
     snapshot = commander_snapshot()
     snapshot["units"] += role_counts("engineer", "scout")
     snapshot["units"].append(dict(role_counts("tank")[0], token="99:1", complete=False, availableForWave=True))
     snapshot["units"].append(dict(role_counts("tank")[0], token="100:1", complete=True, availableForWave=False))
-    tokens = intents_of(decide(snapshot), "commander_push")[0]["actorTokens"]
-    assert "1:1" not in tokens and "99:1" not in tokens and "100:1" not in tokens
-    assert len(tokens) == 24
+    assert tactical_intents(decide(snapshot)) == []
 
 
 def test_nil_optional_fields_are_safe_and_policy_is_deterministic_under_permutation() -> None:

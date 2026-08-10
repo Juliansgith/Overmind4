@@ -16,6 +16,8 @@ local RoleById = {}
 for role, blueprintId in pairs(IdByRole) do
     RoleById[blueprintId] = role
 end
+RoleById.ueb1202 = 'mass_extractor'
+RoleById.ueb1302 = 'mass_extractor'
 
 Catalog = {}
 

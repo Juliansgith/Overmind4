@@ -33,7 +33,8 @@ def make_harness() -> ControllerHarness:
         calls = {
             own = {}, enemy = {}, nav = {}, canBuild = {}, terrain = {},
             buildMobile = {}, buildFactory = {}, rally = {}, aggressive = {},
-            guard = {}, move = {}, clear = {}, waits = {}, sequence = {},
+            guard = {}, move = {}, clear = {}, reclaim = {}, reclaimQuery = {},
+            waits = {}, sequence = {}, unitReclaimInspections = 0,
         }
 
         function Count(tableValue)
@@ -49,7 +50,12 @@ def make_harness() -> ControllerHarness:
             function unit:GetEntityId() return self.options.entityId or 1 end
             function unit:GetBlueprint()
                 if self.options.malformedBlueprint then return {} end
-                return { BlueprintId = self.options.blueprintId or 'uel0001' }
+                return {
+                    BlueprintId = self.options.blueprintId or 'uel0001',
+                    Physics = self.options.blueprintPhysics or {},
+                    Economy = self.options.blueprintEconomy or {},
+                    Intel = self.options.blueprintIntel or {},
+                }
             end
             function unit:GetFractionComplete() return self.options.fraction == nil and 1 or self.options.fraction end
             function unit:GetPosition() return self.options.position or { 10, 2, 10 } end
@@ -79,6 +85,29 @@ def make_harness() -> ControllerHarness:
             return unit
         end
 
+        function MakeProp(options)
+            local prop = {
+                options = options,
+                Dead = options.Dead or false,
+                EntityId = options.entityId,
+                MaxMassReclaim = options.mass,
+                MaxEnergyReclaim = options.energy,
+                ReclaimLeft = options.reclaimLeft == nil and 1 or options.reclaimLeft,
+                CachePosition = options.cachePosition,
+            }
+            function prop:BeenDestroyed()
+                if self.options.isUnit then
+                    calls.unitReclaimInspections = calls.unitReclaimInspections + 1
+                end
+                return self.options.destroyed or false
+            end
+            function prop:GetEntityId() return self.options.entityId end
+            function prop:GetPosition() return self.options.position end
+            return prop
+        end
+
+        function IsProp(entity) return entity and entity.options and entity.options.isUnit ~= true end
+
         brain = {
             Army = 1,
             units = {},
@@ -88,6 +117,16 @@ def make_harness() -> ControllerHarness:
             startZ = 20,
             faction = 1,
             canBuildAt = true,
+            reclaimables = {},
+            energyTrend = -1,
+            energyStoredRatio = 0.2,
+            energyIncome = 20,
+            energyUsage = 21,
+            massTrend = 1,
+            massStoredRatio = 0.5,
+            massIncome = 2,
+            massUsage = 1,
+            massRequested = 1,
         }
         function brain:GetArmyStartPos() return self.startX, self.startZ end
         function brain:GetFactionIndex() return self.faction end
@@ -99,10 +138,11 @@ def make_harness() -> ControllerHarness:
             table.insert(calls.enemy, { category, {position[1], position[2], position[3]}, radius, alliance })
             return self.enemies
         end
-        function brain:GetEconomyTrend(resource) return resource == 'ENERGY' and -1 or 1 end
-        function brain:GetEconomyStoredRatio(resource) return resource == 'ENERGY' and 0.2 or 0.5 end
-        function brain:GetEconomyIncome(resource) return resource == 'ENERGY' and 20 or 2 end
-        function brain:GetEconomyUsage(resource) return resource == 'ENERGY' and 21 or 1 end
+        function brain:GetEconomyTrend(resource) return resource == 'ENERGY' and self.energyTrend or self.massTrend end
+        function brain:GetEconomyStoredRatio(resource) return resource == 'ENERGY' and self.energyStoredRatio or self.massStoredRatio end
+        function brain:GetEconomyIncome(resource) return resource == 'ENERGY' and self.energyIncome or self.massIncome end
+        function brain:GetEconomyUsage(resource) return resource == 'ENERGY' and self.energyUsage or self.massUsage end
+        function brain:GetEconomyRequested(resource) return resource == 'ENERGY' and self.energyUsage or self.massRequested end
         function brain:CanBuildStructureAt(blueprintId, position)
             table.insert(calls.canBuild, { blueprintId, {position[1], position[2], position[3]} })
             if type(self.canBuildAt) == 'function' then return self.canBuildAt(blueprintId, position) end
@@ -139,6 +179,21 @@ def make_harness() -> ControllerHarness:
         function GetGameTick() return brain.tick end
         function GetTerrainHeight(x, z) table.insert(calls.terrain, {x, z}); return x + z / 100 end
         function GetSurfaceHeight(x, z) return GetTerrainHeight(x, z) end
+        function Rect(x0, z0, x1, z1) return { x0, z0, x1, z1 } end
+        function GetReclaimablesInRect(rect)
+            table.insert(calls.reclaimQuery, { rect[1], rect[2], rect[3], rect[4] })
+            local found = {}
+            for _, prop in pairs(brain.reclaimables or {}) do
+                local position = prop.CachePosition or prop:GetPosition()
+                if position
+                    and position[1] >= rect[1] and position[1] <= rect[3]
+                    and position[3] >= rect[2] and position[3] <= rect[4]
+                then
+                    table.insert(found, prop)
+                end
+            end
+            return found
+        end
         function IssueBuildMobile(units, position, blueprintId, alternatives)
             table.insert(calls.buildMobile, { units = units, position = position, blueprintId = blueprintId, alternatives = alternatives, argc = 4 })
             return { kind = 'build-mobile' }
@@ -186,6 +241,12 @@ def make_harness() -> ControllerHarness:
             table.insert(calls.clear, { units = units })
             if calls.failClear then error('clear failed') end
             return { kind = 'clear' }
+        end
+        function IssueReclaim(units, target)
+            table.insert(calls.sequence, 'reclaim')
+            table.insert(calls.reclaim, { units = units, target = target })
+            if calls.failReclaim then error('reclaim failed') end
+            return { kind = 'reclaim' }
         end
         function WaitTicks(ticks) table.insert(calls.waits, ticks) end
         """
@@ -766,7 +827,7 @@ def test_free_placement_key_survives_controller_pending_snapshot() -> None:
     assert pending[0].get("siteKey") is None
 
 
-def test_one_completed_mex_releases_only_its_distinct_site_reservation() -> None:
+def test_incomplete_mex_foundation_retains_only_its_distinct_site_reservation() -> None:
     harness = make_harness()
     first_engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1103": True})
     second_engineer = harness.unit(entityId=2, blueprintId="uel0105", canBuild={"ueb1103": True})
@@ -791,13 +852,13 @@ def test_one_completed_mex_releases_only_its_distinct_site_reservation() -> None
 
     harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
 
-    assert harness.controller.pending["1:1"] is None
-    assert harness.controller.reservations[near.key] is None
+    assert harness.controller.pending["1:1"] is not None
+    assert harness.controller.reservations[near.key] is not None
     assert harness.controller.pending["2:1"] is not None
     assert harness.controller.reservations[far.key] is not None
 
 
-def test_one_completed_free_placement_releases_only_matching_coordinate() -> None:
+def test_incomplete_free_placement_foundation_retains_matching_operation() -> None:
     harness = make_harness()
     first_engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1101": True})
     second_engineer = harness.unit(entityId=2, blueprintId="uel0105", canBuild={"ueb1101": True})
@@ -820,7 +881,7 @@ def test_one_completed_free_placement_releases_only_matching_coordinate() -> Non
 
     harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
 
-    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.pending["1:1"] is not None
     assert harness.controller.pending["2:1"] is not None
 
 
@@ -1189,41 +1250,20 @@ def test_commander_push_guards_exact_deduplicated_combat_then_moves_only_acu() -
     assert any("name=commander_push" in line for line in harness.logs)
 
 
-def test_step_mobilizes_owned_cohort_then_launches_it_without_second_guard() -> None:
+def test_step_keeps_ready_commander_cohort_local_during_macro_experiment() -> None:
     harness = make_harness()
-    acu, _, _ = commander_force(harness, acu_near_staging=False)
+    commander_force(harness, acu_near_staging=False)
 
     harness.lua.globals().Controller.Step(harness.controller)
 
-    assert len(harness.calls.move) == 1
-    assert len(harness.calls.guard) == 1
-    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.move) == 0
+    assert len(harness.calls.guard) == 0
+    assert len(harness.calls.clear) == 0
     assert len(harness.calls.aggressive) == 0
     assert harness.controller.initialWaveSent is False
-    assert harness.controller.commanderMobilizing is True
-    first_observation = harness.observe()
-    combat_records = [
-        record
-        for record in plain(first_observation.units)
-        if record["role"] in {"tank", "artillery"}
-    ]
-    assert len(combat_records) == 24
-    assert all(record["assignedToWave"] is True for record in combat_records)
-    assert all(record["commanderEscort"] is True for record in combat_records)
-    assert all(record["availableForWave"] is False for record in combat_records)
-    assert first_observation.state.commanderMobilizing is True
-
-    acu.options.position = lua_value(harness.lua, plain(harness.controller.stagingPosition))
-    acu.options.idleState = True
-    harness.brain.tick = 10
-    harness.lua.globals().Controller.Step(harness.controller)
-
-    assert len(harness.calls.guard) == 1
-    assert len(harness.calls.aggressive) == 1
-    assert plain(harness.calls.sequence) == ["clear", "guard", "move", "aggressive"]
-    assert harness.controller.initialWaveSent is True
     assert harness.controller.commanderMobilizing is False
-    assert harness.controller.commanderPushActive is True
+    assert harness.controller.commanderPushActive is False
+    assert len(plain(harness.controller.waveAssignments)) == 0
 
 
 def test_persistent_immediate_contact_during_mobilization_uses_only_unassigned_reserves() -> None:
@@ -1262,16 +1302,10 @@ def test_persistent_immediate_contact_during_mobilization_uses_only_unassigned_r
     assert all(harness.controller.waveAssignments[token] is not None for token in committed_tokens)
 
 
-def test_mobilized_transition_uses_surviving_owned_tokens_not_recycled_reserves() -> None:
+def test_legacy_mobilized_state_never_transitions_to_cross_map_push() -> None:
     harness = make_harness()
     acu, combat, observation = commander_force(harness, acu_near_staging=False)
     execute_intents(harness, [commander_mobilize_intent(observation)], observation)
-    original_tokens = {
-        record["token"]
-        for record in plain(observation.units)
-        if record["role"] in {"tank", "artillery"}
-    }
-
     combat[0].options.destroyed = True
     replacement = harness.unit(
         entityId=3,
@@ -1284,31 +1318,14 @@ def test_mobilized_transition_uses_surviving_owned_tokens_not_recycled_reserves(
     observation = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, observation)
     intents = plain(harness.lua.globals().Policy.Decide(observation))
-    push = next(intent for intent in intents if intent["kind"] == "commander_push")
-
-    assert len(push["actorTokens"]) == 22
-    assert set(push["actorTokens"]) <= original_tokens
-    assert "2:1" not in push["actorTokens"]
-    assert "3:1" not in push["actorTokens"]
-    assert "3:2" not in push["actorTokens"]
-    push["actorTokens"] += [push["actorTokens"][0], "3:2", "999:1"]
-
-    execute_intents(harness, [push], observation)
-
-    assert len(harness.calls.guard) == 1
-    assert len(harness.calls.aggressive) == 1
-    assert harness.controller.commanderMobilizing is False
-    assert harness.controller.commanderPushActive is True
-    assert harness.controller.initialWaveSent is True
-    assert harness.controller.waveAssignments["3:2"] is None
-    assert all(
-        harness.controller.waveAssignments[token] is not None
-        for token in push["actorTokens"]
-        if token in original_tokens
-    )
+    assert not [
+        intent for intent in intents
+        if intent["kind"] in {"mobilize_commander", "commander_push", "reinforce_commander", "attack_wave"}
+    ]
+    assert len(harness.calls.aggressive) == 0
 
 
-def test_losing_every_mobilized_escort_aborts_and_rearms_for_fresh_concentration() -> None:
+def test_losing_legacy_escorts_clears_state_without_rearming_offense() -> None:
     harness = make_harness()
     acu, _, observation = commander_force(harness, acu_near_staging=False)
     execute_intents(harness, [commander_mobilize_intent(observation)], observation)
@@ -1349,25 +1366,18 @@ def test_losing_every_mobilized_escort_aborts_and_rearms_for_fresh_concentration
     harness.brain.units = harness.lua.table_from([acu, unrelated, *fresh])
     observation = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, observation)
-    mobilize = next(
-        intent
-        for intent in plain(harness.lua.globals().Policy.Decide(observation))
-        if intent["kind"] == "mobilize_commander"
-    )
+    intents = plain(harness.lua.globals().Policy.Decide(observation))
 
-    execute_intents(harness, [mobilize], observation)
-
-    assert len(mobilize["actorTokens"]) == 24
-    assert harness.controller.commanderMobilizing is True
-    assert harness.controller.commanderToken == "1:1"
+    assert not [
+        intent for intent in intents
+        if intent["kind"] in {"mobilize_commander", "commander_push", "reinforce_commander", "attack_wave"}
+    ]
+    assert harness.controller.commanderMobilizing is False
+    assert harness.controller.commanderToken is None
     assert harness.controller.waveAssignments["90:1"] is not None
-    assert all(
-        harness.controller.waveAssignments[token] is not None
-        for token in mobilize["actorTokens"]
-    )
 
 
-def test_failed_mobilized_push_keeps_latched_guard_and_retries_without_reassembly() -> None:
+def test_legacy_mobilized_guard_is_never_given_a_push_by_policy() -> None:
     harness = make_harness()
     acu, _, observation = commander_force(harness, acu_near_staging=False)
     execute_intents(harness, [commander_mobilize_intent(observation)], observation)
@@ -1375,27 +1385,15 @@ def test_failed_mobilized_push_keeps_latched_guard_and_retries_without_reassembl
     acu.options.idleState = True
     observation = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, observation)
-    push = next(
-        intent
-        for intent in plain(harness.lua.globals().Policy.Decide(observation))
-        if intent["kind"] == "commander_push"
-    )
-    harness.calls.failAggressive = True
+    intents = plain(harness.lua.globals().Policy.Decide(observation))
 
-    execute_intents(harness, [push], observation)
-
-    assert plain(harness.calls.sequence) == ["clear", "guard", "move", "aggressive"]
+    assert not [intent for intent in intents if intent["kind"] == "commander_push"]
+    assert plain(harness.calls.sequence) == ["clear", "guard", "move"]
     assert harness.controller.commanderMobilizing is True
     assert harness.controller.commanderPushActive is False
     assert harness.controller.initialWaveSent is False
     assert len(plain(harness.controller.waveAssignments)) == 24
-
-    harness.calls.failAggressive = False
-    execute_intents(harness, [push], observation)
-    assert plain(harness.calls.sequence)[-1] == "aggressive"
     assert len(harness.calls.guard) == 1
-    assert harness.controller.commanderMobilizing is False
-    assert harness.controller.commanderPushActive is True
 
 
 def test_low_health_mobilizing_commander_enters_existing_escort_recovery() -> None:

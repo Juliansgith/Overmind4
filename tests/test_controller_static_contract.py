@@ -39,6 +39,7 @@ ALLOWED_ISSUES = {
     "IssueAggressiveMove",
     "IssueGuard",
     "IssueMove",
+    "IssueReclaim",
     "IssueClearCommands",
 }
 
@@ -86,6 +87,18 @@ def test_controller_has_exact_engine_observation_calls() -> None:
     controller = source("lua/AI/Overmind4/Controller.lua")
     assert re.search(r"GetListOfUnits\s*\(\s*categories\.ALLUNITS\s*,\s*false\s*,\s*false\s*\)", controller)
     assert re.search(r"GetUnitsAroundPoint\s*\(\s*categories\.MOBILE\s*,[^\n]+,[^\n]+,\s*'Enemy'\s*\)", controller)
+
+
+def test_reclaim_observation_is_bounded_to_live_owned_engineer_vision_rectangles() -> None:
+    controller = source("lua/AI/Overmind4/Controller.lua")
+    assert "GetReclaimablesInRect" in controller
+    assert re.search(r"GetReclaimablesInRect\s*\(\s*rectangle\s*\)", controller)
+    assert "RECLAIM_QUERY_RADIUS" in controller
+    assert "MAX_RECLAIM_QUERY_ENGINEERS" in controller
+    assert "MAX_RECLAIM_CANDIDATES" in controller
+    assert "IsProp" in controller
+    assert "GetEntitiesInRect" not in controller
+    assert "GetUnitsInRect" not in controller
 
 
 def test_controller_varargs_use_installed_luaplus_50_arg_semantics() -> None:
