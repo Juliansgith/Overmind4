@@ -15,6 +15,9 @@ param(
     [ValidateRange(1, 86400)]
     [int]$WallTime = 300,
 
+    [ValidateRange(1, 10000)]
+    [int]$UnitCap = 1000,
+
     [ValidateNotNullOrEmpty()]
     [string]$OurAI = 'overmind4',
 
@@ -62,6 +65,7 @@ $pythonArguments += @(
     '--speed', $Speed.ToString(),
     '--sim-time', $SimTime.ToString(),
     '--wall-time', $WallTime.ToString(),
+    '--unit-cap', $UnitCap.ToString(),
     '--our-ai', $OurAI,
     '--opponent-ai', $OpponentAI,
     '--our-faction', $OurFaction.ToString(),
@@ -79,4 +83,3 @@ if ($DryRun) {
 
 & $python.Source @pythonArguments
 exit $LASTEXITCODE
-

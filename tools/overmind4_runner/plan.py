@@ -57,9 +57,10 @@ def build_argv(
         str(config.speed),
         "/maxtime",
         str(config.sim_time_limit),
+        "/unitcap",
+        str(config.unit_cap),
         "/aitest",
         ai_wire,
         "/om4runid",
         run_id,
     ]
-

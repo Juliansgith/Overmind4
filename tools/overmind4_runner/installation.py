@@ -31,6 +31,7 @@ class RuntimeLayout:
     source_init: Path
     lua_archive: Path
     schook_directory: Path
+    fa_path_file: Path | None = None
 
     @property
     def generated_init(self) -> Path:
@@ -44,6 +45,7 @@ class RuntimeLayout:
             source_init=faf / "bin" / "init.lua",
             lua_archive=faf / "gamedata" / "lua.nx2",
             schook_directory=repository / "tools" / "autorun" / "schook",
+            fa_path_file=faf / "fa_path.lua",
         )
 
 

@@ -121,6 +121,7 @@ def test_exact_argv_preserves_paths_with_spaces_as_individual_arguments() -> Non
     assert argv[argv.index("/seed") + 1] == "7777"
     assert argv[argv.index("/speed") + 1] == "25"
     assert argv[argv.index("/maxtime") + 1] == "1800"
+    assert argv[argv.index("/unitcap") + 1] == "1000"
     assert argv[argv.index("/om4runid") + 1] == "run-0001"
     assert "/nobugreport" in argv
     assert "/nosound" in argv

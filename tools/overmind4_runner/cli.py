@@ -27,6 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--speed", type=int, default=25)
     parser.add_argument("--sim-time", type=int, default=1800)
     parser.add_argument("--wall-time", type=int, default=300)
+    parser.add_argument("--unit-cap", type=int, default=1000)
     parser.add_argument("--our-ai", default="overmind4")
     parser.add_argument("--opponent-ai", default="easy")
     parser.add_argument("--our-faction", type=int, default=1)
@@ -50,6 +51,7 @@ def parse_cli(argv: Sequence[str]) -> CliOptions:
             speed=args.speed,
             sim_time_limit=args.sim_time,
             wall_time_limit=args.wall_time,
+            unit_cap=args.unit_cap,
             our_ai=args.our_ai,
             opponent_ai=args.opponent_ai,
             our_faction=args.our_faction,
@@ -62,6 +64,10 @@ def parse_cli(argv: Sequence[str]) -> CliOptions:
     except ValidationError as error:
         parser.error(str(error))
     return CliOptions(config=config, output_dir=args.output_dir, dry_run=args.dry_run)
+
+
+def exit_code_for_state(state: str) -> int:
+    return 0 if state in {"win", "loss", "draw"} else 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -91,5 +97,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     assert result.outcome is not None
     print(f"{result.outcome.state}: {result.paths.report_markdown_path}")
-    return 0 if result.outcome.state in {"win", "loss", "draw", "sim-timeout"} else 1
-
+    return exit_code_for_state(result.outcome.state)

@@ -18,26 +18,35 @@ NewAIBrain = Class(StandardBrain) {
 
     OnBeginSession = function(self)
         StandardBrain.OnBeginSession(self)
-        Telemetry.EmitLifecycleOnce(self, 'begin_session')
+        Telemetry.EmitLifecycleOnce(self, 'begin_session', { army = self.Army })
     end,
 
     OnVictory = function(self)
         StandardBrain.OnVictory(self)
-        Telemetry.EmitLifecycleOnce(self, 'terminal', { result = 'victory' })
+        Telemetry.EmitLifecycleOnce(self, 'terminal', {
+            army = self.Army,
+            result = 'victory',
+        })
     end,
 
     OnDefeat = function(self)
         StandardBrain.OnDefeat(self)
-        Telemetry.EmitLifecycleOnce(self, 'terminal', { result = 'defeat' })
+        Telemetry.EmitLifecycleOnce(self, 'terminal', {
+            army = self.Army,
+            result = 'defeat',
+        })
     end,
 
     OnDraw = function(self)
         StandardBrain.OnDraw(self)
-        Telemetry.EmitLifecycleOnce(self, 'terminal', { result = 'draw' })
+        Telemetry.EmitLifecycleOnce(self, 'terminal', {
+            army = self.Army,
+            result = 'draw',
+        })
     end,
 
     OnDestroy = function(self)
         StandardBrain.OnDestroy(self)
-        Telemetry.EmitLifecycleOnce(self, 'destroyed')
+        Telemetry.EmitLifecycleOnce(self, 'destroyed', { army = self.Army })
     end,
 }

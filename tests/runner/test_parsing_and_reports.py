@@ -20,6 +20,21 @@ def _result_line(result: str, *, army: int = 1, sim: int = 123) -> str:
     )
 
 
+def _valid_lifecycle_prefix(*, army: int = 1) -> str:
+    return (
+        "OM4HARNESS|v=1|kind=start|run=run-1|map=SCMP_007\n"
+        f"OM4|v=1|kind=lifecycle|army={army}|event=created|plan=none\n"
+        f"OM4|v=1|kind=lifecycle|army={army}|event=begin_session\n"
+        "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+    )
+
+
+def _valid_match(result: str, *, army: int = 1, sim: int = 123) -> str:
+    return _valid_lifecycle_prefix(army=army) + _result_line(
+        result, army=army, sim=sim
+    )
+
+
 def test_json_stats_parser_handles_braces_inside_quoted_strings() -> None:
     text = 'debug: JsonStats {"stats":[{"name":"AI } { quoted","score":7}]} tail\n'
 
@@ -73,7 +88,7 @@ def test_log_parser_ignores_markers_for_another_run() -> None:
     [("victory 10", "win"), ("defeat 10", "loss"), ("draw", "draw")],
 )
 def test_official_result_maps_to_explicit_outcome(result: str, expected: str) -> None:
-    telemetry = parse_log(_result_line(result), "run-1", our_slot=1)
+    telemetry = parse_log(_valid_match(result), "run-1", our_slot=1)
 
     outcome = classify_outcome(
         telemetry,
@@ -86,6 +101,8 @@ def test_official_result_maps_to_explicit_outcome(result: str, expected: str) ->
 
 def test_sim_timeout_has_priority_over_later_ui_result() -> None:
     text = (
+        _valid_lifecycle_prefix()
+        +
         "OM4HARNESS|v=1|kind=timeout|run=run-1|sim=1800\n"
         + _result_line("draw", sim=1800)
     )
@@ -95,6 +112,87 @@ def test_sim_timeout_has_priority_over_later_ui_result() -> None:
 
     assert outcome.state == "sim-timeout"
     assert outcome.is_win is False
+
+
+def test_result_parser_ignores_score_and_keeps_first_valid_terminal_result() -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + _result_line("score 99")
+        + _result_line("victory 10")
+        + _result_line("defeat 10")
+    )
+
+    telemetry = parse_log(text, "run-1", our_slot=1)
+
+    assert telemetry.official_result == "victory 10"
+
+
+def test_valid_match_records_required_lifecycle_presence_order_and_terminal_diagnostic() -> None:
+    text = (
+        _valid_match("victory 10")
+        + "OM4|v=1|kind=lifecycle|army=1|event=terminal|result=victory\n"
+    )
+
+    telemetry = parse_log(text, "run-1", our_slot=1)
+
+    assert telemetry.lifecycle.valid is True
+    assert telemetry.lifecycle.reason is None
+    assert telemetry.lifecycle.events == (
+        "harness_start",
+        "brain_created",
+        "brain_begin_session",
+        "harness_speed",
+        "official_result",
+        "brain_terminal:victory",
+    )
+    assert telemetry.lifecycle.brain_terminal_result == "victory"
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        (
+            "OM4|v=1|kind=lifecycle|army=1|event=created\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            + _result_line("victory"),
+            "missing-harness-start",
+        ),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            + _result_line("victory"),
+            "fallback-brain",
+        ),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=created\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            + _result_line("victory"),
+            "lifecycle-out-of-order",
+        ),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1\n"
+            "OM4|v=1|kind=lifecycle|army=2|event=created\n"
+            "OM4|v=1|kind=lifecycle|army=2|event=begin_session\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            + _result_line("victory"),
+            "fallback-brain",
+        ),
+    ],
+)
+def test_result_is_rejected_when_required_lifecycle_is_missing_or_out_of_order(
+    text: str, reason: str
+) -> None:
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=0, wall_seconds=4),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.is_win is False
+    assert outcome.failure_reason == reason
 
 
 def test_wall_timeout_is_an_operational_failure_and_non_win() -> None:
@@ -113,11 +211,12 @@ def test_wall_timeout_is_an_operational_failure_and_non_win() -> None:
     ("text", "exit_code", "expected"),
     [
         ("warning: LUA ERROR: import failed\n", 1, "load-error"),
-        ("info: DESYNC detected\n", 0, "load-error"),
+        ("info: DESYNC detected\n", 0, "desync"),
         ("OM4HARNESS|v=1|kind=failure|run=run-1|reason=mod_missing\n", 1, "load-error"),
+        ("EXCEPTION_ACCESS_VIOLATION\n", 1, "crash"),
         ("", -1, "crash"),
-        ('JsonStats {"stats":[', 0, "malformed"),
-        ("", 0, "missing-result"),
+        (_valid_lifecycle_prefix() + 'JsonStats {"stats":[', 0, "malformed"),
+        (_valid_lifecycle_prefix(), 0, "missing-result"),
     ],
 )
 def test_operational_failures_have_distinct_states(text: str, exit_code: int, expected: str) -> None:
@@ -146,12 +245,7 @@ def test_missing_telemetry_uses_null_not_numeric_zero() -> None:
 
 
 def test_reports_are_deterministic_and_concise() -> None:
-    telemetry = parse_log(
-        "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
-        + _result_line("victory", sim=100),
-        "run-1",
-        our_slot=1,
-    )
+    telemetry = parse_log(_valid_match("victory", sim=100), "run-1", our_slot=1)
     outcome = classify_outcome(telemetry, ProcessObservation(exit_code=0, wall_seconds=4))
 
     assert render_json(outcome, run_id="run-1") == render_json(outcome, run_id="run-1")
@@ -161,3 +255,28 @@ def test_reports_are_deterministic_and_concise() -> None:
     assert "25.00x" in markdown
     assert len(markdown.splitlines()) < 20
 
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("lua-error", "load-error"),
+        ("import-error", "load-error"),
+        ("map-load-error", "load-error"),
+        ("mod_unavailable", "load-error"),
+        ("harness-failure", "load-error"),
+        ("engine-crash", "crash"),
+        ("process-launch-error:OSError", "crash"),
+        ("termination-failure", "crash"),
+        ("desync", "desync"),
+    ],
+)
+def test_fail_fast_reasons_map_to_their_explicit_operational_state(
+    reason: str, expected: str
+) -> None:
+    outcome = classify_outcome(
+        parse_log(_valid_lifecycle_prefix(), "run-1", our_slot=1),
+        ProcessObservation(exit_code=None, wall_seconds=2, fail_fast_reason=reason),
+    )
+
+    assert outcome.state == expected
+    assert outcome.failure_reason == reason

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.overmind4_runner.cli import parse_cli
+from tools.overmind4_runner.cli import exit_code_for_state, parse_cli
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +29,7 @@ def test_cli_accepts_all_supported_match_controls() -> None:
             "--speed", "30",
             "--sim-time", "900",
             "--wall-time", "120",
+            "--unit-cap", "750",
             "--our-ai", "overmind4_test",
             "--opponent-ai", "rush",
             "--our-faction", "2",
@@ -47,6 +48,7 @@ def test_cli_accepts_all_supported_match_controls() -> None:
     assert options.config.speed == 30
     assert options.config.sim_time_limit == 900
     assert options.config.wall_time_limit == 120
+    assert options.config.unit_cap == 750
     assert options.config.ai_specs[0].wire == "2:overmind4_test:2:4"
     assert options.config.ai_specs[1].wire == "1:rush:3:5"
     assert options.output_dir == Path("C:/out with spaces")
@@ -56,6 +58,26 @@ def test_cli_accepts_all_supported_match_controls() -> None:
 def test_cli_reports_invalid_values_without_constructing_a_run() -> None:
     with pytest.raises(SystemExit):
         parse_cli(["--our-ai", "../../unsafe"])
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("win", 0),
+        ("loss", 0),
+        ("draw", 0),
+        ("sim-timeout", 1),
+        ("wall-timeout", 1),
+        ("crash", 1),
+        ("load-error", 1),
+        ("desync", 1),
+        ("missing-result", 1),
+    ],
+)
+def test_cli_is_nonzero_for_timeouts_and_operational_non_results(
+    state: str, expected: int
+) -> None:
+    assert exit_code_for_state(state) == expected
 
 
 def test_powershell_entry_point_forwards_each_control_without_expression_evaluation() -> None:
@@ -68,6 +90,7 @@ def test_powershell_entry_point_forwards_each_control_without_expression_evaluat
     assert "--speed" in source
     assert "--sim-time" in source
     assert "--wall-time" in source
+    assert "--unit-cap" in source
     assert "--our-ai" in source
     assert "--opponent-ai" in source
     assert "--our-faction" in source

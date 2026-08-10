@@ -6,20 +6,42 @@ import json
 from .parsing import Outcome
 
 
-def report_document(outcome: Outcome, run_id: str) -> dict[str, object]:
+def report_document(
+    outcome: Outcome,
+    run_id: str,
+    *,
+    completed_at: str | None = None,
+    artifacts_present: dict[str, bool] | None = None,
+) -> dict[str, object]:
     document = asdict(outcome)
     document.pop("json_stats", None)
-    return {
+    report = {
         "schema_version": 1,
         "run_id": run_id,
         **document,
         "json_stats": outcome.json_stats,
     }
+    if completed_at is not None:
+        report["completed_at"] = completed_at
+    if artifacts_present is not None:
+        report["artifacts_present"] = artifacts_present
+    return report
 
 
-def render_json(outcome: Outcome, run_id: str) -> str:
+def render_json(
+    outcome: Outcome,
+    run_id: str,
+    *,
+    completed_at: str | None = None,
+    artifacts_present: dict[str, bool] | None = None,
+) -> str:
     return json.dumps(
-        report_document(outcome, run_id),
+        report_document(
+            outcome,
+            run_id,
+            completed_at=completed_at,
+            artifacts_present=artifacts_present,
+        ),
         indent=2,
         sort_keys=True,
         ensure_ascii=True,
@@ -50,4 +72,3 @@ def render_markdown(outcome: Outcome, run_id: str) -> str:
             "",
         )
     )
-

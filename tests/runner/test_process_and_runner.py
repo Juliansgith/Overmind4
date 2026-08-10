@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,17 @@ class FakeProcess:
         return self.last
 
 
+class StuckProcess(FakeProcess):
+    def wait(self, timeout: float | None = None) -> int | None:
+        self.waited = True
+        raise subprocess.TimeoutExpired("ForgedAlliance.exe", timeout)
+
+
+class BrokenCleanupProcess(FakeProcess):
+    def wait(self, timeout: float | None = None) -> int | None:
+        raise RuntimeError("cleanup adapter failed")
+
+
 class FakeTail:
     def __init__(self, chunks: list[str]) -> None:
         self.chunks = iter(chunks)
@@ -68,6 +80,41 @@ def test_monitor_terminates_only_the_spawned_pid_tree_on_wall_timeout(tmp_path: 
     assert observation.wall_timeout is True
     assert terminated == [4242]
     assert process.waited is True
+
+
+def test_monitor_contains_timeout_expired_after_owned_tree_termination(tmp_path: Path) -> None:
+    clock = FakeClock()
+    process = StuckProcess([None] * 10, pid=6262)
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail([]),
+        terminate_tree=lambda _: None,
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(process, tmp_path / "owned.log", wall_timeout=2)
+
+    assert observation.fail_fast_reason == "termination-failure"
+    assert observation.wall_timeout is True
+
+
+def test_monitor_contains_any_cleanup_adapter_failure_and_still_returns_observation(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = BrokenCleanupProcess([None] * 10, pid=6363)
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail([]),
+        terminate_tree=lambda _: (_ for _ in ()).throw(OSError("taskkill failed")),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(process, tmp_path / "owned.log", wall_timeout=2)
+
+    assert observation.fail_fast_reason == "termination-failure"
 
 
 def test_monitor_fails_fast_on_harness_or_lua_failure_without_touching_other_pids(tmp_path: Path) -> None:
@@ -229,6 +276,10 @@ def test_real_runner_writes_one_immutable_manifest_and_deterministic_reports(tmp
     assert manifest["argv"] == argv
     assert result.paths.report_json_path.is_file()
     assert result.paths.report_markdown_path.is_file()
+    report = json.loads(result.paths.report_json_path.read_text(encoding="utf-8"))
+    assert report["completed_at"] == "2026-08-10T12:00:00Z"
+    assert report["artifacts_present"] == {"log": False, "replay": False}
+    assert "achieved_sim_speed" in report
 
 
 def test_manifest_creation_refuses_run_id_collision_instead_of_overwriting(tmp_path: Path) -> None:

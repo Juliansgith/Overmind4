@@ -159,6 +159,13 @@ function StartCommandLineSession(mapName, isPerfTest)
         'maxtime',
         runId
     )
+    local unitCap = IntegerInRange(
+        RequiredArg('/unitcap', runId),
+        1,
+        10000,
+        'unitcap',
+        runId
+    )
     local aiText = RequiredArg('/aitest', runId)
     local specs = ParseAiSpecs(aiText, runId)
 
@@ -205,8 +212,13 @@ function StartCommandLineSession(mapName, isPerfTest)
     local nextIndex = armyCount + 1
     local extras = MapUtils.GetExtraArmies(scenario)
     if extras then
-        for index = 1, table.getn(extras) do
-            AddCivilian(sessionInfo.teamInfo, nextIndex, extras[index])
+        local extraNames = {}
+        for _, armyName in pairs(extras) do
+            table.insert(extraNames, armyName)
+        end
+        table.sort(extraNames)
+        for index = 1, table.getn(extraNames) do
+            AddCivilian(sessionInfo.teamInfo, nextIndex, extraNames[index])
             nextIndex = nextIndex + 1
         end
     end
@@ -222,7 +234,7 @@ function StartCommandLineSession(mapName, isPerfTest)
         DoNotShareUnitCap = true,
         Timeouts = -1,
         GameSpeed = 'normal',
-        UnitCap = '1000',
+        UnitCap = tostring(unitCap),
         Victory = 'demoralization',
         CheatsEnabled = 'false',
         CivilianAlliance = 'enemy',
@@ -243,4 +255,3 @@ function StartCommandLineSession(mapName, isPerfTest)
     StartSpeedAndTimeoutThread(runId, speed, maxGameTime)
     LaunchSinglePlayerSession(sessionInfo)
 end
-

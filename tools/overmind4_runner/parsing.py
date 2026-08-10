@@ -7,6 +7,8 @@ from typing import Any
 
 
 HARNESS_PREFIX = "OM4HARNESS|"
+OVERMIND_PREFIX = "OM4|"
+TERMINAL_RESULTS = {"victory", "defeat", "draw"}
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,18 @@ class ProcessObservation:
 
 
 @dataclass(frozen=True)
+class LifecycleStatus:
+    valid: bool
+    reason: str | None
+    harness_start_seen: bool
+    harness_speed_seen: bool
+    brain_created_seen: bool
+    brain_begin_session_seen: bool
+    brain_terminal_result: str | None
+    events: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class LogTelemetry:
     official_result: str | None
     sim_seconds: float | None
@@ -34,6 +48,7 @@ class LogTelemetry:
     json_stats: dict[str, Any] | None
     json_stats_seen: bool
     json_stats_malformed: bool
+    lifecycle: LifecycleStatus
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,7 @@ class Outcome:
     official_result: str | None
     failure_reason: str | None
     json_stats: dict[str, Any] | None
+    lifecycle: LifecycleStatus
 
 
 def _balanced_json_object(text: str, start: int) -> tuple[str | None, int]:
@@ -100,8 +116,8 @@ def extract_json_stats(text: str) -> JsonStatsResult:
     return JsonStatsResult(value=valid, seen=True, malformed=valid is None)
 
 
-def _marker_fields(line: str) -> dict[str, str] | None:
-    marker_at = line.find(HARNESS_PREFIX)
+def _fields_at_prefix(line: str, prefix: str) -> dict[str, str] | None:
+    marker_at = line.find(prefix)
     if marker_at < 0:
         return None
     fields: dict[str, str] = {}
@@ -110,6 +126,14 @@ def _marker_fields(line: str) -> dict[str, str] | None:
             name, value = token.split("=", 1)
             fields[name] = value
     return fields
+
+
+def _marker_fields(line: str) -> dict[str, str] | None:
+    return _fields_at_prefix(line, HARNESS_PREFIX)
+
+
+def _overmind_fields(line: str) -> dict[str, str] | None:
+    return _fields_at_prefix(line, OVERMIND_PREFIX)
 
 
 def _number(value: str | None) -> float | None:
@@ -143,8 +167,36 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
     requested_speed: float | None = None
     sim_timeout = False
     failure_reason = _generic_failure(text)
+    positions: dict[str, int] = {}
+    events: list[str] = []
+    brain_terminal_result: str | None = None
 
-    for line in text.splitlines():
+    for line_number, line in enumerate(text.splitlines()):
+        brain_fields = _overmind_fields(line)
+        if (
+            brain_fields
+            and brain_fields.get("v") == "1"
+            and brain_fields.get("kind") == "lifecycle"
+        ):
+            try:
+                brain_army = int(brain_fields.get("army", ""))
+            except ValueError:
+                brain_army = -1
+            if brain_army == our_slot:
+                event = brain_fields.get("event")
+                event_name = {
+                    "created": "brain_created",
+                    "begin_session": "brain_begin_session",
+                }.get(event or "")
+                if event_name and event_name not in positions:
+                    positions[event_name] = line_number
+                    events.append(event_name)
+                elif event == "terminal" and brain_terminal_result is None:
+                    terminal = (brain_fields.get("result") or "").lower()
+                    if terminal in TERMINAL_RESULTS:
+                        brain_terminal_result = terminal
+                        events.append(f"brain_terminal:{terminal}")
+
         fields = _marker_fields(line)
         if not fields or fields.get("run") != run_id or fields.get("v") != "1":
             continue
@@ -152,8 +204,15 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         marker_sim = _number(fields.get("sim"))
         if marker_sim is not None:
             sim_seconds = marker_sim
-        if kind == "speed":
-            requested_speed = _number(fields.get("requested"))
+        if kind == "start" and "harness_start" not in positions:
+            positions["harness_start"] = line_number
+            events.append("harness_start")
+        elif kind == "speed":
+            marker_speed = _number(fields.get("requested"))
+            if marker_speed is not None and "harness_speed" not in positions:
+                requested_speed = marker_speed
+                positions["harness_speed"] = line_number
+                events.append("harness_speed")
         elif kind == "timeout":
             sim_timeout = True
         elif kind == "failure":
@@ -162,10 +221,48 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
             try:
                 army = int(fields.get("army", ""))
             except ValueError:
-                failure_reason = "malformed-result-marker"
                 continue
-            if army == our_slot:
-                official_result = fields.get("result")
+            result = fields.get("result")
+            result_kind = (result or "").split(" ", 1)[0].lower()
+            if army == our_slot and result_kind in TERMINAL_RESULTS and official_result is None:
+                official_result = result
+                positions["official_result"] = line_number
+                events.append("official_result")
+
+    required = (
+        "harness_start",
+        "brain_created",
+        "brain_begin_session",
+        "harness_speed",
+    )
+    if "harness_start" not in positions:
+        lifecycle_reason = "missing-harness-start"
+    elif "brain_created" not in positions:
+        lifecycle_reason = "fallback-brain"
+    elif "brain_begin_session" not in positions:
+        lifecycle_reason = "missing-brain-begin-session"
+    elif "harness_speed" not in positions:
+        lifecycle_reason = "missing-harness-speed"
+    elif [positions[name] for name in required] != sorted(positions[name] for name in required):
+        lifecycle_reason = "lifecycle-out-of-order"
+    elif (
+        "official_result" in positions
+        and positions["official_result"] < positions["harness_speed"]
+    ):
+        lifecycle_reason = "lifecycle-out-of-order"
+    else:
+        lifecycle_reason = None
+
+    lifecycle = LifecycleStatus(
+        valid=lifecycle_reason is None,
+        reason=lifecycle_reason,
+        harness_start_seen="harness_start" in positions,
+        harness_speed_seen="harness_speed" in positions,
+        brain_created_seen="brain_created" in positions,
+        brain_begin_session_seen="brain_begin_session" in positions,
+        brain_terminal_result=brain_terminal_result,
+        events=tuple(events),
+    )
 
     stats = extract_json_stats(text)
     return LogTelemetry(
@@ -177,33 +274,50 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         json_stats=stats.value,
         json_stats_seen=stats.seen,
         json_stats_malformed=stats.malformed,
+        lifecycle=lifecycle,
     )
+
+
+def _state_for_failure(reason: str) -> str:
+    lowered = reason.lower()
+    if lowered == "desync":
+        return "desync"
+    if (
+        lowered == "engine-crash"
+        or lowered == "termination-failure"
+        or lowered.startswith("process-launch-error")
+    ):
+        return "crash"
+    return "load-error"
 
 
 def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Outcome:
     failure_reason = telemetry.failure_reason or process.fail_fast_reason
-    if process.wall_timeout:
+    if failure_reason:
+        state = _state_for_failure(failure_reason)
+    elif process.wall_timeout:
         state = "wall-timeout"
-    elif failure_reason:
+    elif process.exit_code not in (0, None):
+        state = "crash"
+    elif process.exit_code is None and not telemetry.sim_timeout:
+        state = "crash"
+    elif not telemetry.lifecycle.valid:
+        failure_reason = telemetry.lifecycle.reason
         state = "load-error"
     elif telemetry.sim_timeout:
         state = "sim-timeout"
     elif telemetry.json_stats_malformed:
         state = "malformed"
-    elif process.exit_code not in (0, None):
-        state = "crash"
     elif telemetry.official_result:
-        normalized = telemetry.official_result.lower()
-        if "victory" in normalized:
+        normalized = telemetry.official_result.lower().split(" ", 1)[0]
+        if normalized == "victory":
             state = "win"
-        elif "defeat" in normalized:
+        elif normalized == "defeat":
             state = "loss"
-        elif "draw" in normalized:
+        elif normalized == "draw":
             state = "draw"
         else:
             state = "malformed"
-    elif process.exit_code is None:
-        state = "crash"
     else:
         state = "missing-result"
 
@@ -221,5 +335,5 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
         official_result=telemetry.official_result,
         failure_reason=failure_reason,
         json_stats=telemetry.json_stats,
+        lifecycle=telemetry.lifecycle,
     )
-

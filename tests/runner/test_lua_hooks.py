@@ -125,6 +125,7 @@ def _valid_args(**overrides: str) -> dict[str, str]:
         "/seed": "7777",
         "/speed": "25",
         "/maxtime": "1800",
+        "/unitcap": "1000",
     }
     values.update(overrides)
     return values
@@ -202,6 +203,7 @@ def test_speed_is_set_only_by_world_thread_and_sim_timeout_ends_session() -> Non
         ("/speed", "0"),
         ("/speed", "101"),
         ("/maxtime", "0"),
+        ("/unitcap", "0"),
     ],
 )
 def test_hook_rejects_malformed_or_out_of_range_arguments(name: str, value: str) -> None:
@@ -256,3 +258,57 @@ def test_result_hook_logs_official_result_and_preserves_original_call() -> None:
         "OM4HARNESS|v=1|kind=result|run=run-1|army=1|result=victory 10|sim=321"
     ]
 
+
+def test_result_hook_ignores_score_and_suppresses_duplicate_terminal_markers() -> None:
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    logs: list[str] = []
+    calls: list[tuple[int, str]] = []
+    lua.globals().LOG = lambda line: logs.append(str(line))
+    lua.globals().DoGameResult = lambda army, result: calls.append((army, result))
+    lua.globals().GetGameTimeSeconds = lambda: 400
+    lua.globals().GetCommandLineArg = lambda *_: lua.table_from(["run-1"])
+    lua.execute(RESULT_HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().DoGameResult(1, "score 100")
+    lua.globals().DoGameResult(1, "victory 10")
+    lua.globals().DoGameResult(1, "defeat 10")
+    lua.globals().DoGameResult(2, "draw")
+
+    assert calls == [
+        (1, "score 100"),
+        (1, "victory 10"),
+        (1, "defeat 10"),
+        (2, "draw"),
+    ]
+    assert ["|result=" + line.split("|result=", 1)[1].split("|", 1)[0] for line in logs] == [
+        "|result=victory 10",
+        "|result=draw",
+    ]
+
+
+def test_unit_cap_argument_controls_the_explicit_session_unit_cap() -> None:
+    lua, _, launched = _runtime(_valid_args(**{"/unitcap": "750"}))
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    assert launched[0].scenarioInfo.Options.UnitCap == "750"
+
+
+def test_hash_extra_armies_are_sorted_deterministically_before_current_civilians() -> None:
+    lua, _, launched = _runtime(_valid_args())
+    map_utils = lua.globals().import_("/lua/ui/maputil.lua")
+    map_utils.GetExtraArmies = lambda _: lua.table_from(
+        {"z-last": "Z_CIV", "a-first": "A_CIV"}
+    )
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    team_info = launched[0].teamInfo
+    assert [team_info[index].ArmyName for index in range(5, 9)] == [
+        "A_CIV",
+        "Z_CIV",
+        "ARMY_17",
+        "NEUTRAL_CIVILIAN",
+    ]

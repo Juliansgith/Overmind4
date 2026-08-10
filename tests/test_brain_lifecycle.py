@@ -209,7 +209,7 @@ def test_begin_session_delegates_and_emits_only_once() -> None:
 
     assert brain.ParentBeginCalls == 2
     begin_lines = [line for line in harness.logs if "event=begin_session" in line]
-    assert begin_lines == ["OM4|v=1|kind=lifecycle|event=begin_session"]
+    assert begin_lines == ["OM4|v=1|kind=lifecycle|army=7|event=begin_session"]
 
 
 def test_create_lifecycle_telemetry_is_idempotent() -> None:
@@ -241,7 +241,7 @@ def test_terminal_callbacks_delegate_but_emit_only_one_terminal_record() -> None
     assert brain.ParentDrawCalls == 1
     terminal_lines = [line for line in harness.logs if "event=terminal" in line]
     assert terminal_lines == [
-        "OM4|v=1|kind=lifecycle|event=terminal|result=victory"
+        "OM4|v=1|kind=lifecycle|army=7|event=terminal|result=victory"
     ]
 
 
@@ -260,7 +260,7 @@ def test_each_terminal_result_is_reported_when_it_is_the_first_result() -> None:
         getattr(brain, callback)(brain)
 
         assert harness.logs[-1] == (
-            f"OM4|v=1|kind=lifecycle|event=terminal|result={result}"
+            f"OM4|v=1|kind=lifecycle|army=7|event=terminal|result={result}"
         )
 
 
@@ -275,7 +275,7 @@ def test_destroy_delegates_and_emits_once() -> None:
     assert brain.ParentDestroyCalls == 2
     assert brain.Destroyed is True
     destroy_lines = [line for line in harness.logs if "event=destroyed" in line]
-    assert destroy_lines == ["OM4|v=1|kind=lifecycle|event=destroyed"]
+    assert destroy_lines == ["OM4|v=1|kind=lifecycle|army=7|event=destroyed"]
 
 
 def test_lifecycle_never_issues_orders_queries_world_or_initializes_managers() -> None:

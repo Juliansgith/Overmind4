@@ -69,28 +69,82 @@ def _content_hash(repository: Path) -> str:
     return _hash_files(files, repository)
 
 
-def _map_fingerprint(map_id: str) -> dict[str, object]:
-    roots = (
-        Path(
-            "C:/Program Files (x86)/Steam/steamapps/common/"
-            "Supreme Commander Forged Alliance/maps"
-        ),
-        Path(
-            "C:/Users/DEV - PCOM/Documents/My Games/Gas Powered Games/"
-            "Supreme Commander Forged Alliance/maps"
-        ),
-    )
+class MapDiscoveryError(RuntimeError):
+    """The pinned FAF path data or requested map cannot be resolved safely."""
+
+
+_FA_PATH_ASSIGNMENT = re.compile(
+    r'^\s*(fa_path|custom_vault_path|GameVersion)\s*=\s*"([^"\r\n]*)"\s*$'
+)
+
+
+def parse_fa_path_assignments(source: str) -> dict[str, str]:
+    required = {"fa_path", "custom_vault_path", "GameVersion"}
+    values: dict[str, str] = {}
+    for line in source.splitlines():
+        match = _FA_PATH_ASSIGNMENT.fullmatch(line)
+        if not match:
+            continue
+        name, value = match.groups()
+        if name in values:
+            raise MapDiscoveryError(f"duplicate {name} assignment in fa_path.lua")
+        values[name] = value
+    missing = sorted(required - values.keys())
+    if missing:
+        raise MapDiscoveryError(
+            "fa_path.lua is missing required simple assignments: " + ", ".join(missing)
+        )
+    if values["GameVersion"] != str(FAF_BUILD):
+        raise MapDiscoveryError(
+            f"fa_path.lua reports game build {values['GameVersion']}; expected {FAF_BUILD}"
+        )
+    return values
+
+
+def discover_map_roots(repository: Path, fa_path_file: Path) -> tuple[Path, ...]:
+    if not fa_path_file.is_file():
+        raise MapDiscoveryError(f"missing pinned FAF path file: {fa_path_file}")
+    values = parse_fa_path_assignments(fa_path_file.read_text(encoding="utf-8"))
+    candidates = [
+        Path(values["fa_path"]) / "maps",
+        Path(values["custom_vault_path"]) / "maps",
+    ]
+    if repository.parent.name.lower() == "mods":
+        candidates.append(repository.parent.parent / "maps")
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        identifier = str(candidate).replace("\\", "/").lower()
+        if identifier not in seen:
+            seen.add(identifier)
+            roots.append(candidate)
+    return tuple(roots)
+
+
+def fingerprint_map(map_id: str, roots: tuple[Path, ...]) -> dict[str, object]:
     map_directory = next((root / map_id for root in roots if (root / map_id).is_dir()), None)
     if map_directory is None:
-        raise FileNotFoundError(
-            f"map folder for {map_id} was not found in the pinned Steam or user vault"
+        locations = ", ".join(str(root) for root in roots)
+        raise MapDiscoveryError(
+            f"map folder for {map_id} was not found in discovered roots: {locations}"
         )
     files = [item for item in map_directory.rglob("*") if item.is_file()]
-    scenario = map_directory / f"{map_id}_scenario.lua"
-    version: int | None = None
-    if scenario.is_file():
-        match = re.search(r"(?m)^\s*version\s*=\s*(\d+)\s*$", scenario.read_text("utf-8"))
-        version = int(match.group(1)) if match else None
+    scenarios = sorted(
+        (item for item in files if item.name.lower().endswith("_scenario.lua")),
+        key=lambda item: item.name.lower(),
+    )
+    if len(scenarios) != 1:
+        raise MapDiscoveryError(
+            f"map folder {map_directory} must contain exactly one scenario file; "
+            f"found {len(scenarios)}"
+        )
+    match = re.search(
+        r"(?m)^\s*version\s*=\s*(\d+)\s*$",
+        scenarios[0].read_text("utf-8"),
+    )
+    if not match:
+        raise MapDiscoveryError(f"map scenario does not declare a numeric version: {scenarios[0]}")
+    version = int(match.group(1))
     return {"version": version, "sha256": _hash_files(files, map_directory)}
 
 
@@ -108,14 +162,17 @@ class RunnerDependencies:
 
     @classmethod
     def default(cls, repository: Path) -> "RunnerDependencies":
+        layout = RuntimeLayout.default(repository)
+        assert layout.fa_path_file is not None
+        map_roots = discover_map_roots(repository, layout.fa_path_file)
         return cls(
-            layout=RuntimeLayout.default(repository),
+            layout=layout,
             expected_hashes=PINNED_HASHES,
             run_id_factory=_default_run_id,
             utc_now=_utc_now,
             git_commit=_git_commit,
             content_hash=_content_hash,
-            map_fingerprint=_map_fingerprint,
+            map_fingerprint=lambda map_id: fingerprint_map(map_id, map_roots),
             spawn=spawn_owned,
             monitor=Monitor(),
         )
@@ -240,8 +297,20 @@ class Runner:
         )
         telemetry = parse_log(log_text, run_id, config.our_slot)
         outcome = classify_outcome(telemetry, observation)
+        completed_at = deps.utc_now()
+        artifacts_present = {
+            "log": paths.log_path.is_file(),
+            "replay": paths.replay_path.is_file(),
+        }
         paths.report_json_path.write_text(
-            render_json(outcome, run_id), encoding="utf-8", newline=""
+            render_json(
+                outcome,
+                run_id,
+                completed_at=completed_at,
+                artifacts_present=artifacts_present,
+            ),
+            encoding="utf-8",
+            newline="",
         )
         paths.report_markdown_path.write_text(
             render_markdown(outcome, run_id), encoding="utf-8", newline=""

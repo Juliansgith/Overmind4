@@ -93,6 +93,21 @@ class Monitor:
         self._terminate_tree = terminate_tree
         self._poll_interval = poll_interval
 
+    def _stop_owned(self, process: ProcessHandle) -> tuple[int | None, bool]:
+        cleanup_failed = False
+        try:
+            self._terminate_tree(process.pid)
+        except Exception:
+            cleanup_failed = True
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            cleanup_failed = True
+        try:
+            return process.poll(), cleanup_failed
+        except Exception:
+            return None, True
+
     def wait(
         self,
         process: ProcessHandle,
@@ -108,9 +123,9 @@ class Monitor:
         while True:
             fail_fast_reason = detect_fail_fast(tail.read_new())
             if fail_fast_reason:
-                self._terminate_tree(process.pid)
-                process.wait(timeout=5)
-                exit_code = process.poll()
+                exit_code, cleanup_failed = self._stop_owned(process)
+                if cleanup_failed:
+                    fail_fast_reason = "termination-failure"
                 break
 
             exit_code = process.poll()
@@ -119,9 +134,9 @@ class Monitor:
 
             if self._now() - started >= wall_timeout:
                 timeout = True
-                self._terminate_tree(process.pid)
-                process.wait(timeout=5)
-                exit_code = process.poll()
+                exit_code, cleanup_failed = self._stop_owned(process)
+                if cleanup_failed:
+                    fail_fast_reason = "termination-failure"
                 break
             self._sleep(self._poll_interval)
 
@@ -131,4 +146,3 @@ class Monitor:
             wall_timeout=timeout,
             fail_fast_reason=fail_fast_reason,
         )
-
