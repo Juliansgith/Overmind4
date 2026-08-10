@@ -17,6 +17,7 @@ local REORDER_COOLDOWN_TICKS = 100
 local WAVE_STUCK_TICKS = 300
 local WAVE_STUCK_DISTANCE = 4
 local SNAPSHOT_INTERVAL_TICKS = 300
+local SITE_BACKOFF_TICKS = 300
 local TableGetn = table.getn
 local TableInsert = table.insert
 
@@ -103,6 +104,25 @@ local function Emit(controller, event, fields)
     fields.event = event
     fields.tick = CurrentTick(controller)
     Telemetry.Emit('controller', fields)
+end
+
+local function BlockSite(controller, siteKey, reason)
+    if not siteKey then return end
+    controller.blockedSites[siteKey] = CurrentTick(controller) + SITE_BACKOFF_TICKS
+    Emit(controller, 'site_blocked', {
+        reason = reason or 'unknown',
+        site = siteKey,
+    })
+end
+
+local function SiteIsBlocked(controller, siteKey)
+    local blockedUntil = controller.blockedSites[siteKey]
+    if not blockedUntil then return false end
+    if CurrentTick(controller) >= blockedUntil then
+        controller.blockedSites[siteKey] = nil
+        return false
+    end
+    return true
 end
 
 local function MarkerArray(kind)
@@ -394,13 +414,7 @@ local function SiteSnapshot(controller, markers, ownRecords)
             distance = marker.distance,
             localSite = marker.localSite,
             reachable = marker.reachable,
-            buildable = SafeCall(
-                false,
-                controller.brain.CanBuildStructureAt,
-                controller.brain,
-                Catalog.IdFor(expectedRole),
-                marker.position
-            ) == true,
+            buildable = not SiteIsBlocked(controller, marker.key),
             occupied = occupied,
             reserved = controller.reservations[marker.key] ~= nil,
         })
@@ -456,6 +470,9 @@ local function ReleaseOperation(controller, token, reason)
     if not operation then return end
     if operation.siteKey and controller.reservations[operation.siteKey] then
         controller.reservations[operation.siteKey] = nil
+    end
+    if reason == 'rejected' or reason == 'timeout' or reason == 'command_error' then
+        BlockSite(controller, operation.siteKey, reason)
     end
     controller.pending[token] = nil
     if reason then
@@ -524,6 +541,7 @@ local function ExecuteStructure(controller, intent, observation, record)
     local position = TerrainPosition(intent.position)
     if not blueprintId or not position then return false end
     if SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, position) ~= true then
+        BlockSite(controller, intent.siteKey, 'preflight')
         return false
     end
     local actor = controller.unitRefs[intent.actorToken]
@@ -729,6 +747,7 @@ Controller.Create = function(brain)
         unitRefs = {},
         pending = {},
         reservations = {},
+        blockedSites = {},
         rallied = {},
         waveAssignments = {},
         safetyCleared = {},

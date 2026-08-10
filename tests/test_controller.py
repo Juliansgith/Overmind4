@@ -376,7 +376,7 @@ def test_same_name_resource_markers_get_coordinate_identity_and_stable_sort() ->
     assert reserved_by_key[first_keys[1]] is False
 
 
-def test_resource_site_snapshot_marks_blocked_nearest_without_enemy_intel() -> None:
+def test_resource_buildability_probes_only_chosen_site_then_advances() -> None:
     harness = make_harness()
     harness.marker_sources.Mass = lua_value(
         harness.lua,
@@ -390,13 +390,96 @@ def test_resource_site_snapshot_marks_blocked_nearest_without_enemy_intel() -> N
         "brain.canBuildAt = function(blueprintId, position) return position[1] ~= 12 end"
     )
     controller = harness.lua.globals().Controller.Create(harness.brain)
+    harness.controller = controller
+    engineer = harness.unit(
+        entityId=1,
+        blueprintId="uel0105",
+        idleState=True,
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
 
+    observation = harness.lua.globals().Controller.Observe(controller)
+    mex_probes_before = [
+        call for call in plain(harness.calls.canBuild)
+        if call[0] == "ueb1103"
+    ]
+    near = controller.markers.mass[1]
+    execute_intents(
+        harness,
+        [{"kind": "build_structure", "actorToken": "1:1", "buildRole": "mass_extractor", "siteKey": near.key, "position": plain(near.position)}],
+        observation,
+    )
     sites = plain(harness.lua.globals().Controller.Observe(controller).sites.mass)
+    mex_probes_after = [
+        call for call in plain(harness.calls.canBuild)
+        if call[0] == "ueb1103"
+    ]
+
+    assert mex_probes_before == []
+    assert len(mex_probes_after) == 1
+    assert mex_probes_after[0][1][0] == 12
+    assert [(site["name"], site["buildable"]) for site in sites] == [
+        ("Near", False),
+        ("Far", True),
+    ]
+
+
+def test_silently_rejected_resource_site_backs_off_then_expires() -> None:
+    harness = make_harness()
+    harness.marker_sources.Mass = lua_value(
+        harness.lua,
+        [
+            {"Name": "Near", "Position": [12, 3, 20]},
+            {"Name": "Far", "Position": [40, 3, 40]},
+        ],
+    )
+    harness.marker_sources.Hydrocarbon = lua_value(harness.lua, [])
+    harness.lua.execute(
+        """
+        function brain:GetEconomyTrend(resource) return 1 end
+        function brain:GetEconomyStoredRatio(resource) return 0.8 end
+        """
+    )
+    controller = harness.lua.globals().Controller.Create(harness.brain)
+    harness.controller = controller
+    engineer = harness.unit(
+        entityId=1,
+        blueprintId="uel0105",
+        idleState=True,
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    near_key = controller.markers.mass[1].key
+    first = controller.markers.mass[1].position
+    observation = harness.lua.globals().Controller.Observe(controller)
+    assert not any(call[0] == "ueb1103" for call in plain(harness.calls.canBuild))
+    execute_intents(
+        harness,
+        [{"kind": "build_structure", "actorToken": "1:1", "buildRole": "mass_extractor", "siteKey": near_key, "position": plain(first)}],
+        observation,
+    )
+
+    harness.brain.tick = 13
+    rejected = harness.lua.globals().Controller.Observe(controller)
+    harness.lua.globals().Controller.Reconcile(controller, rejected)
+    after_rejection = harness.lua.globals().Controller.Observe(controller)
+    sites = plain(after_rejection.sites.mass)
+    next_intents = plain(harness.lua.globals().Policy.Decide(after_rejection))
 
     assert [(site["name"], site["buildable"]) for site in sites] == [
         ("Near", False),
         ("Far", True),
     ]
+    next_mass = next(
+        intent for intent in next_intents
+        if intent.get("kind") == "build_structure" and intent.get("buildRole") == "mass_extractor"
+    )
+    assert next_mass["siteKey"] == controller.markers.mass[2].key
+
+    harness.brain.tick = 314
+    expired = plain(harness.lua.globals().Controller.Observe(controller).sites.mass)
+    assert expired[0]["buildable"] is True
 
 
 def test_build_mobile_uses_exact_four_arguments_terrain_height_and_empty_alternatives() -> None:
