@@ -392,7 +392,11 @@ class Runner:
                 exit_code=observation.exit_code,
                 wall_seconds=observation.wall_seconds,
                 wall_timeout=observation.wall_timeout,
-                fail_fast_reason=preferences_failure,
+                fail_fast_reason=(
+                    observation.fail_fast_reason
+                    if observation.fail_fast_reason == "termination-failure"
+                    else preferences_failure
+                ),
                 sim_timeout=observation.sim_timeout,
             )
 

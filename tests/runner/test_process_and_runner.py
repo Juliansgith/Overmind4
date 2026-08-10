@@ -414,6 +414,58 @@ def test_runner_contains_cleanup_failures_after_post_spawn_exception_and_reports
     assert result.paths.report_json_path.is_file()
 
 
+@pytest.mark.parametrize("preferences_failure", ["snapshot", "cleanup"])
+def test_failed_process_tree_termination_outranks_later_preferences_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preferences_failure: str,
+) -> None:
+    deps, _, _, _ = _deps(tmp_path)
+    process = BrokenCleanupProcess([None] * 10, pid=6767)
+    spawn = SpawnRecorder(process, [])
+    monitor = Monitor(
+        now=lambda: 10.0,
+        sleep=lambda _: None,
+        tail_factory=lambda _: RaisingTail(PermissionError("owned log denied")),
+        terminate_tree=lambda _: (_ for _ in ()).throw(OSError("taskkill failed")),
+    )
+    deps = replace(deps, spawn=spawn, monitor=monitor)
+    runtime_prefs = (
+        deps.preferences_directory / "Overmind4-run-fixed.prefs"
+    ).resolve()
+    artifact_prefs = (
+        tmp_path / "artifacts" / "run-fixed" / "overmind4.prefs"
+    ).resolve()
+
+    if preferences_failure == "snapshot":
+        original_write_bytes = Path.write_bytes
+
+        def fail_snapshot(path: Path, data: bytes) -> int:
+            if path.resolve() == artifact_prefs:
+                raise PermissionError("prefs artifact is locked")
+            return original_write_bytes(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", fail_snapshot)
+    else:
+        original_unlink = Path.unlink
+
+        def fail_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+            if path.resolve() == runtime_prefs:
+                raise PermissionError("runtime prefs is locked")
+            original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_cleanup)
+
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(), tmp_path / "artifacts", dry_run=False
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.state == "crash"
+    assert result.outcome.failure_reason == "termination-failure"
+    assert result.paths.report_json_path.is_file()
+
+
 def test_relative_output_directory_becomes_absolute_before_it_reaches_faf(tmp_path: Path) -> None:
     deps, _, _, _ = _deps(tmp_path)
     repository = tmp_path / "repo"
