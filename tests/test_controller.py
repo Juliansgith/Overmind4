@@ -243,6 +243,28 @@ def test_public_target_is_farthest_other_spawn_and_staging_is_quarter_vector() -
     assert 42 <= staging[2] <= 45
 
 
+def test_created_telemetry_names_occupied_target_and_emits_exact_objective_geometry() -> None:
+    harness = make_harness()
+
+    created = next(line for line in harness.logs if "event=created" in line)
+    expected = {
+        "target_name=ARMY_2",
+        "base_x=10",
+        "base_z=20",
+        "target_x=110",
+        "target_z=120",
+        "staging_x=33",
+        "staging_z=43",
+        "occupied_spawns=2",
+    }
+
+    assert harness.controller.targetName == "ARMY_2"
+    assert plain(harness.controller.targetPosition) == [110, 3, 120]
+    assert all(field in created for field in expected)
+    assert len(harness.calls.own) == 0
+    assert len(harness.calls.enemy) == 0
+
+
 def test_observe_uses_exact_bounded_own_and_current_intel_enemy_queries() -> None:
     harness = make_harness()
     harness.brain.units = lua_value(harness.lua, [])
@@ -1042,6 +1064,101 @@ def test_snapshot_telemetry_exposes_opening_gate_inputs_and_policy_output() -> N
         "first_build_role=land_factory",
     }
     assert all(field in snapshot for field in expected)
+
+
+def test_snapshot_telemetry_counts_complete_combat_geometry_and_acu_state() -> None:
+    harness = make_harness()
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        position=[12, 2, 22],
+        health=75,
+        maxHealth=100,
+    )
+    assigned_near = harness.unit(entityId=2, blueprintId="uel0201", position=[110, 2, 110])
+    assigned_far = harness.unit(entityId=3, blueprintId="uel0103", position=[80, 2, 80])
+    available = harness.unit(entityId=4, blueprintId="uel0104", position=[33, 2, 43])
+    incomplete = harness.unit(
+        entityId=5,
+        blueprintId="uel0201",
+        position=[33, 2, 43],
+        fraction=0.5,
+    )
+    harness.brain.units = harness.lua.table_from(
+        [acu, assigned_near, assigned_far, available, incomplete]
+    )
+    harness.controller.waveAssignments["2:1"] = lua_value(
+        harness.lua, {"issuedTick": 0, "position": [110, 2, 110]}
+    )
+    harness.controller.waveAssignments["3:1"] = lua_value(
+        harness.lua, {"issuedTick": 0, "position": [80, 2, 80]}
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    snapshot = next(line for line in harness.logs if "event=snapshot" in line)
+    expected = {
+        "combat_total=3",
+        "combat_assigned=2",
+        "combat_available=1",
+        "combat_near_staging=1",
+        "assigned_min_target_distance=10",
+        "assigned_max_target_distance=50",
+        "acu_x=12",
+        "acu_z=22",
+        "acu_health_ratio=0.75",
+        "enemy_contact=false",
+    }
+    order_names = (
+        "buildMobile",
+        "buildFactory",
+        "rally",
+        "aggressive",
+        "move",
+        "clear",
+    )
+
+    assert all(field in snapshot for field in expected)
+    assert len(harness.calls.own) == 1
+    assert len(harness.calls.enemy) == 1
+    assert all(len(harness.calls[name]) == 0 for name in order_names)
+
+
+def test_snapshot_combat_geometry_is_safe_without_assigned_units_acu_or_target() -> None:
+    harness = make_harness()
+    harness.controller.targetPosition = lua_value(harness.lua, ["malformed"])
+    harness.brain.units = harness.lua.table_from([])
+    enemy = harness.unit(entityId=90, blueprintId="url0201", position=[16, 2, 26])
+    harness.brain.enemies = harness.lua.table_from([enemy])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    snapshot = next(line for line in harness.logs if "event=snapshot" in line)
+    expected = {
+        "combat_total=0",
+        "combat_assigned=0",
+        "combat_available=0",
+        "combat_near_staging=0",
+        "assigned_min_target_distance=-1",
+        "assigned_max_target_distance=-1",
+        "acu_x=-1",
+        "acu_z=-1",
+        "acu_health_ratio=-1",
+        "enemy_contact=true",
+    }
+    order_names = (
+        "buildMobile",
+        "buildFactory",
+        "rally",
+        "aggressive",
+        "move",
+        "clear",
+    )
+
+    assert all(field in snapshot for field in expected)
+    assert len(harness.calls.own) == 1
+    assert len(harness.calls.enemy) == 1
+    assert all(len(harness.calls[name]) == 0 for name in order_names)
 
 
 def test_observation_is_single_pass_for_one_thousand_units() -> None:

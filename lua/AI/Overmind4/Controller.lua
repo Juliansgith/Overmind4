@@ -223,7 +223,9 @@ local function ChooseTarget(spawns, basePosition)
         end
         return a.distance > b.distance
     end)
-    return candidates[1] and CopyPosition(candidates[1].position) or nil
+    local candidate = candidates[1]
+    if not candidate then return 'none', nil end
+    return candidate.name, CopyPosition(candidate.position)
 end
 
 local function StagingPosition(basePosition, targetPosition)
@@ -795,7 +797,16 @@ Controller.InitializeMap = function(controller)
     for _, marker in ipairs(controller.markers.mass) do marker.kind = 'mass' end
     for _, marker in ipairs(controller.markers.hydro) do marker.kind = 'hydro' end
     SortMarkers(controller.markers.spawn, controller.basePosition)
-    controller.targetPosition = ChooseTarget(controller.markers.spawn, controller.basePosition)
+    controller.occupiedSpawns = 0
+    for _, marker in ipairs(controller.markers.spawn) do
+        if marker.occupiedSpawn then
+            controller.occupiedSpawns = controller.occupiedSpawns + 1
+        end
+    end
+    controller.targetName, controller.targetPosition = ChooseTarget(
+        controller.markers.spawn,
+        controller.basePosition
+    )
     controller.targetPath = controller.targetPosition ~= nil
         and Reachable(controller.basePosition, controller.targetPosition)
     controller.stagingPosition = StagingPosition(controller.basePosition, controller.targetPosition)
@@ -827,8 +838,19 @@ Controller.Create = function(brain)
         lastErrorTick = -REORDER_COOLDOWN_TICKS,
     }
     Controller.InitializeMap(controller)
+    local base = controller.basePosition or {}
+    local target = controller.targetPosition or {}
+    local staging = controller.stagingPosition or {}
     Emit(controller, controller.unsupported and 'unsupported_faction' or 'created', {
         faction = brain:GetFactionIndex(),
+        target_name = controller.targetName or 'none',
+        base_x = tonumber(base[1]) or -1,
+        base_z = tonumber(base[3]) or -1,
+        target_x = tonumber(target[1]) or -1,
+        target_z = tonumber(target[3]) or -1,
+        staging_x = tonumber(staging[1]) or -1,
+        staging_z = tonumber(staging[3]) or -1,
+        occupied_spawns = tonumber(controller.occupiedSpawns) or 0,
     })
     return controller
 end
@@ -970,15 +992,41 @@ Controller.Step = function(controller)
     if tick - controller.lastSnapshotTick >= SNAPSHOT_INTERVAL_TICKS then
         controller.lastSnapshotTick = tick
         local acu = nil
+        local combatTotal = 0
+        local combatAssigned = 0
+        local combatAvailable = 0
+        local combatNearStaging = 0
+        local assignedMinTargetDistance = -1
+        local assignedMaxTargetDistance = -1
         for _, unit in ipairs(observation.units) do
             if unit.role == 'acu' then
                 acu = unit
-                break
+            elseif COMBAT_ROLES[unit.role] and unit.complete == true then
+                combatTotal = combatTotal + 1
+                if unit.availableForWave == true then
+                    combatAvailable = combatAvailable + 1
+                end
+                if unit.nearStaging == true then
+                    combatNearStaging = combatNearStaging + 1
+                end
+                if unit.assignedToWave == true then
+                    combatAssigned = combatAssigned + 1
+                    if observation.targetPosition then
+                        local distance = Distance(unit.position, observation.targetPosition)
+                        if assignedMinTargetDistance < 0 or distance < assignedMinTargetDistance then
+                            assignedMinTargetDistance = distance
+                        end
+                        if assignedMaxTargetDistance < 0 or distance > assignedMaxTargetDistance then
+                            assignedMaxTargetDistance = distance
+                        end
+                    end
+                end
             end
         end
         local firstIntent = intents[1] or {}
         local placements = observation.placements or {}
         local sites = observation.sites or {}
+        local acuPosition = acu and acu.position or {}
         Emit(controller, 'snapshot', {
             phase = phase,
             units = TableGetn(observation.units),
@@ -997,6 +1045,16 @@ Controller.Step = function(controller)
             policy_intents = TableGetn(intents),
             first_intent = tostring(firstIntent.kind or 'none'),
             first_build_role = tostring(firstIntent.buildRole or 'none'),
+            combat_total = combatTotal,
+            combat_assigned = combatAssigned,
+            combat_available = combatAvailable,
+            combat_near_staging = combatNearStaging,
+            assigned_min_target_distance = assignedMinTargetDistance,
+            assigned_max_target_distance = assignedMaxTargetDistance,
+            acu_x = tonumber(acuPosition[1]) or -1,
+            acu_z = tonumber(acuPosition[3]) or -1,
+            acu_health_ratio = acu and tonumber(acu.healthRatio) or -1,
+            enemy_contact = observation.enemyContact ~= nil,
         })
     end
 end
