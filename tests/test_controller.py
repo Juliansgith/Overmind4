@@ -541,6 +541,170 @@ def test_pending_is_not_accepted_or_released_before_three_ticks_then_releases_re
     assert harness.controller.reservations.p1 is None
 
 
+def test_free_placement_key_survives_controller_pending_snapshot() -> None:
+    harness = make_harness()
+    acu = harness.unit(entityId=1, blueprintId="uel0001", canBuild={"ueb1101": True})
+    harness.brain.units = harness.lua.table_from([acu])
+    intent = {
+        "kind": "build_structure",
+        "actorToken": "1:1",
+        "buildRole": "power_generator",
+        "placementKey": "Placement:30000:40000",
+        "position": [30, 0, 40],
+    }
+
+    execute_intents(harness, [intent])
+    pending = plain(harness.observe().pending)
+
+    assert harness.controller.pending["1:1"].placementKey == intent["placementKey"]
+    assert pending[0]["placementKey"] == intent["placementKey"]
+    assert pending[0].get("siteKey") is None
+
+
+def test_one_completed_mex_releases_only_its_distinct_site_reservation() -> None:
+    harness = make_harness()
+    first_engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1103": True})
+    second_engineer = harness.unit(entityId=2, blueprintId="uel0105", canBuild={"ueb1103": True})
+    harness.brain.units = harness.lua.table_from([first_engineer, second_engineer])
+    near = harness.controller.markers.mass[1]
+    far = harness.controller.markers.mass[2]
+    execute_intents(
+        harness,
+        [
+            {"kind": "build_structure", "actorToken": "1:1", "buildRole": "mass_extractor", "siteKey": near.key, "position": plain(near.position)},
+            {"kind": "build_structure", "actorToken": "2:1", "buildRole": "mass_extractor", "siteKey": far.key, "position": plain(far.position)},
+        ],
+    )
+    near_mex = harness.unit(
+        entityId=3,
+        blueprintId="ueb1103",
+        position=plain(near.position),
+        fraction=0.1,
+    )
+    harness.brain.units = harness.lua.table_from([first_engineer, second_engineer, near_mex])
+    harness.brain.tick = 4
+
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.reservations[near.key] is None
+    assert harness.controller.pending["2:1"] is not None
+    assert harness.controller.reservations[far.key] is not None
+
+
+def test_one_completed_free_placement_releases_only_matching_coordinate() -> None:
+    harness = make_harness()
+    first_engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1101": True})
+    second_engineer = harness.unit(entityId=2, blueprintId="uel0105", canBuild={"ueb1101": True})
+    harness.brain.units = harness.lua.table_from([first_engineer, second_engineer])
+    execute_intents(
+        harness,
+        [
+            {"kind": "build_structure", "actorToken": "1:1", "buildRole": "power_generator", "placementKey": "Placement:30000:40000", "position": [30, 0, 40]},
+            {"kind": "build_structure", "actorToken": "2:1", "buildRole": "power_generator", "placementKey": "Placement:60000:70000", "position": [60, 0, 70]},
+        ],
+    )
+    first_pgen = harness.unit(
+        entityId=3,
+        blueprintId="ueb1101",
+        position=[30.5, 0, 40.5],
+        fraction=0.1,
+    )
+    harness.brain.units = harness.lua.table_from([first_engineer, second_engineer, first_pgen])
+    harness.brain.tick = 4
+
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.pending["2:1"] is not None
+
+
+def test_same_role_factory_completion_releases_only_idle_accepted_factory() -> None:
+    harness = make_harness()
+    first_factory = harness.unit(entityId=1, blueprintId="ueb0101", canBuild={"uel0201": True})
+    second_factory = harness.unit(entityId=2, blueprintId="ueb0101", canBuild={"uel0201": True})
+    harness.brain.units = harness.lua.table_from([first_factory, second_factory])
+    execute_intents(
+        harness,
+        [
+            {"kind": "factory_build", "actorToken": "1:1", "buildRole": "tank"},
+            {"kind": "factory_build", "actorToken": "2:1", "buildRole": "tank"},
+        ],
+    )
+    harness.brain.tick = 3
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+    assert harness.controller.pending["1:1"].accepted is True
+    assert harness.controller.pending["2:1"].accepted is True
+
+    first_factory.options.idleState = True
+    first_factory.options.states.Building = False
+    first_factory.options.queue = harness.lua.table_from([])
+    tank = harness.unit(entityId=3, blueprintId="uel0201")
+    harness.brain.units = harness.lua.table_from([first_factory, second_factory, tank])
+    harness.brain.tick = 4
+
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.pending["2:1"] is not None
+
+
+def test_accepted_site_build_returning_idle_without_foundation_is_rejected_and_backed_off() -> None:
+    harness = make_harness()
+    engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1103": True})
+    harness.brain.units = harness.lua.table_from([engineer])
+    site = harness.controller.markers.mass[1]
+    execute_intents(
+        harness,
+        [{"kind": "build_structure", "actorToken": "1:1", "buildRole": "mass_extractor", "siteKey": site.key, "position": plain(site.position)}],
+    )
+    engineer.options.idleState = False
+    engineer.options.states = lua_value(harness.lua, {"Moving": True})
+    harness.brain.tick = 3
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+    assert harness.controller.pending["1:1"].accepted is True
+
+    engineer.options.idleState = True
+    engineer.options.states.Moving = False
+    harness.brain.tick = 4
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+    sites = plain(harness.observe().sites.mass)
+
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.reservations[site.key] is None
+    assert sites[0]["buildable"] is False
+
+
+def test_accepted_free_placement_returning_idle_is_temporarily_removed() -> None:
+    harness = make_harness()
+    engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1101": True})
+    harness.brain.units = harness.lua.table_from([engineer])
+    position = plain(harness.controller.placementSeeds[1])
+    placement_key = f"Placement:{round(position[0] * 1000)}:{round(position[2] * 1000)}"
+    execute_intents(
+        harness,
+        [{"kind": "build_structure", "actorToken": "1:1", "buildRole": "power_generator", "placementKey": placement_key, "position": position}],
+    )
+    engineer.options.idleState = False
+    engineer.options.states = lua_value(harness.lua, {"Moving": True})
+    harness.brain.tick = 3
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+    assert harness.controller.pending["1:1"].accepted is True
+
+    engineer.options.idleState = True
+    engineer.options.states.Moving = False
+    harness.brain.tick = 4
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+    blocked = plain(harness.observe().placements.power_generator)
+
+    assert harness.controller.pending["1:1"] is None
+    assert position not in blocked
+
+    harness.brain.tick = 305
+    expired = plain(harness.observe().placements.power_generator)
+    assert position in expired
+
+
 def test_site_reservation_deduplicates_and_releases_on_death_capture_and_occupation() -> None:
     harness = make_harness()
     first = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1103": True})

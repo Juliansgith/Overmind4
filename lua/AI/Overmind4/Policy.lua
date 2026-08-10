@@ -95,9 +95,19 @@ local function AddIntent(intents, intent)
     TableInsert(intents, intent)
 end
 
+local function QuantizedCoordinate(value)
+    value = value * 1000
+    if value >= 0 then
+        return math.floor(value + 0.5)
+    end
+    return math.ceil(value - 0.5)
+end
+
 local function PlacementKey(position)
     if not IsUsablePosition(position) then return nil end
-    return tostring(position[1]) .. ':' .. tostring(position[3])
+    return 'Placement:'
+        .. tostring(QuantizedCoordinate(position[1])) .. ':'
+        .. tostring(QuantizedCoordinate(position[3]))
 end
 
 local function ReservePlacement(snapshot, role, index, virtualPlacements)
@@ -186,6 +196,7 @@ local function BuildAtPlacement(actor, role, position, priority, reason)
         kind = 'build_structure',
         actorToken = actor.token,
         buildRole = role,
+        placementKey = PlacementKey(position),
         position = position,
         priority = priority,
         reason = reason,
@@ -569,6 +580,9 @@ Policy.Decide = function(snapshot)
     for _, operation in ipairs(pending) do
         if operation.siteKey then
             virtualReserved[operation.siteKey] = true
+        end
+        if type(operation.placementKey) == 'string' then
+            virtualPlacements[operation.placementKey] = true
         end
     end
 

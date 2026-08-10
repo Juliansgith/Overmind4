@@ -8,6 +8,7 @@ local STEP_TICKS = 10
 local DEFENSE_RADIUS = 65
 local IMMEDIATE_DANGER_DISTANCE = 20
 local LOCAL_MASS_DISTANCE = 45
+local PLACEMENT_MATCH_DISTANCE = 2
 local STAGING_FRACTION = 0.23
 local STAGING_RADIUS = 48
 local VERIFY_TICKS = 3
@@ -176,6 +177,12 @@ local function ResourceKey(kind, position)
         .. tostring(QuantizedCoordinate(position[3]))
 end
 
+local function PlacementKey(position)
+    return 'Placement:'
+        .. tostring(QuantizedCoordinate(position[1])) .. ':'
+        .. tostring(QuantizedCoordinate(position[3]))
+end
+
 local function Reachable(basePosition, position)
     local ok, result = pcall(NavUtils.CanPathTo, 'Land', basePosition, position)
     return ok and result == true
@@ -280,6 +287,8 @@ local function PendingArray(controller)
             kind = operation.kind,
             buildRole = operation.buildRole,
             siteKey = operation.siteKey,
+            placementKey = operation.placementKey,
+            position = CopyPosition(operation.position),
             issuedTick = operation.issuedTick,
         })
     end
@@ -426,7 +435,9 @@ local function PlacementSnapshot(controller)
     for _, role in ipairs({ 'land_factory', 'power_generator' }) do
         local blueprintId = Catalog.IdFor(role)
         for _, seed in ipairs(controller.placementSeeds) do
-            if SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, seed) == true then
+            if not SiteIsBlocked(controller, PlacementKey(seed))
+                and SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, seed) == true
+            then
                 TableInsert(placements[role], CopyPosition(seed))
             end
         end
@@ -471,7 +482,7 @@ local function ReleaseOperation(controller, token, reason)
         controller.reservations[operation.siteKey] = nil
     end
     if reason == 'rejected' or reason == 'timeout' or reason == 'command_error' then
-        BlockSite(controller, operation.siteKey, reason)
+        BlockSite(controller, operation.siteKey or operation.placementKey, reason)
     end
     controller.pending[token] = nil
     if reason then
@@ -493,6 +504,31 @@ local function SiteOccupied(observation, siteKey)
         end
     end
     return false
+end
+
+local function PlacementOccupied(observation, operation)
+    if not operation.placementKey or not operation.position then return false end
+    local maximumDistance = PLACEMENT_MATCH_DISTANCE * PLACEMENT_MATCH_DISTANCE
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == operation.buildRole
+            and DistanceSquared(unit.position, operation.position) <= maximumDistance
+        then
+            return true
+        end
+    end
+    return false
+end
+
+local function OperationCompleted(operation, observation, record)
+    if operation.kind == 'build_structure' then
+        if operation.siteKey then
+            return SiteOccupied(observation, operation.siteKey)
+        end
+        return PlacementOccupied(observation, operation)
+    end
+    return operation.kind == 'factory_build'
+        and operation.accepted == true
+        and record.idle == true
 end
 
 local function OrderAllowed(controller, signature)
@@ -526,14 +562,20 @@ local function UpdateSafetyEpisodes(controller, intents)
     end
 end
 
-local function RecordPending(controller, intent, observation)
+local function RecordPending(controller, intent)
+    local position = CopyPosition(intent.position)
+    local placementKey = nil
+    if not intent.siteKey and position then
+        placementKey = PlacementKey(position)
+    end
     local operation = {
         actorToken = intent.actorToken,
         kind = intent.kind,
         buildRole = intent.buildRole,
         siteKey = intent.siteKey,
+        placementKey = placementKey,
+        position = position,
         issuedTick = CurrentTick(controller),
-        baselineCount = CountRole(observation.units, intent.buildRole),
         accepted = false,
     }
     controller.pending[intent.actorToken] = operation
@@ -545,7 +587,7 @@ local function RecordPending(controller, intent, observation)
     end
 end
 
-local function ExecuteStructure(controller, intent, observation, record)
+local function ExecuteStructure(controller, intent, record)
     if controller.pending[intent.actorToken]
         or record.complete ~= true
         or record.idle ~= true
@@ -561,13 +603,13 @@ local function ExecuteStructure(controller, intent, observation, record)
     local position = TerrainPosition(intent.position)
     if not blueprintId or not position then return false end
     if SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, position) ~= true then
-        BlockSite(controller, intent.siteKey, 'preflight')
+        BlockSite(controller, intent.siteKey or PlacementKey(position), 'preflight')
         return false
     end
     local actor = controller.unitRefs[intent.actorToken]
     if not actor or not CanUnitBuild(actor, blueprintId) then return false end
 
-    RecordPending(controller, intent, observation)
+    RecordPending(controller, intent)
     local ok = pcall(function() IssueBuildMobile({ actor }, position, blueprintId, {}) end)
     if not ok then
         ReleaseOperation(controller, intent.actorToken, 'command_error')
@@ -582,7 +624,7 @@ local function ExecuteStructure(controller, intent, observation, record)
     return true
 end
 
-local function ExecuteFactoryProduction(controller, intent, observation, record)
+local function ExecuteFactoryProduction(controller, intent, record)
     if controller.pending[intent.actorToken]
         or record.role ~= 'land_factory'
         or record.complete ~= true
@@ -595,7 +637,7 @@ local function ExecuteFactoryProduction(controller, intent, observation, record)
     local blueprintId = Catalog.IdFor(intent.buildRole)
     local actor = controller.unitRefs[intent.actorToken]
     if not actor or not blueprintId or not CanUnitBuild(actor, blueprintId) then return false end
-    RecordPending(controller, intent, observation)
+    RecordPending(controller, intent)
     local ok = pcall(function() IssueBuildFactory({ actor }, blueprintId, 1) end)
     if not ok then
         ReleaseOperation(controller, intent.actorToken, 'command_error')
@@ -843,10 +885,13 @@ Controller.Reconcile = function(controller, observation)
         local elapsed = tick - operation.issuedTick
         if not record then
             ReleaseOperation(controller, token, 'actor_missing')
-        elseif SiteOccupied(observation, operation.siteKey)
-            or CountRole(observation.units, operation.buildRole) > operation.baselineCount
-        then
+        elseif OperationCompleted(operation, observation, record) then
             ReleaseOperation(controller, token, nil)
+        elseif operation.kind == 'build_structure'
+            and operation.accepted == true
+            and record.idle == true
+        then
+            ReleaseOperation(controller, token, 'rejected')
         elseif elapsed >= VERIFY_TICKS then
             if record.busy then operation.accepted = true end
             if not operation.accepted and elapsed > REJECT_TICKS then
@@ -896,9 +941,9 @@ Controller.Execute = function(controller, intents, observation)
             if record then
                 local issued = false
                 if intent.kind == 'build_structure' then
-                    issued = ExecuteStructure(controller, intent, observation, record)
+                    issued = ExecuteStructure(controller, intent, record)
                 elseif intent.kind == 'factory_build' then
-                    issued = ExecuteFactoryProduction(controller, intent, observation, record)
+                    issued = ExecuteFactoryProduction(controller, intent, record)
                 elseif intent.kind == 'rally' then
                     issued = ExecuteRally(controller, intent, record)
                 elseif intent.kind == 'retreat' then

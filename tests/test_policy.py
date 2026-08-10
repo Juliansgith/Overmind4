@@ -333,6 +333,61 @@ def test_engineer_power_and_factory_plans_reserve_distinct_shared_placements() -
     assert len(coordinates) == len(set(coordinates))
 
 
+def test_pending_power_placement_reserves_same_coordinate_for_next_policy_step() -> None:
+    shared = [[30, 2, 30], [34, 2, 30], [38, 2, 30], [42, 2, 30]]
+    first_snapshot = post_opening_snapshot(
+        "engineer",
+        "mass_extractor",
+        "mass_extractor",
+    )
+    first_snapshot["placements"] = {
+        "land_factory": copy.deepcopy(shared),
+        "power_generator": copy.deepcopy(shared),
+    }
+    first_snapshot["economy"] = {
+        "energyTrend": -2,
+        "energyStoredRatio": 0.1,
+        "massTrend": 1,
+        "massStoredRatio": 0.5,
+    }
+    first = next(
+        intent
+        for intent in intents_of(decide(first_snapshot), "build_structure")
+        if intent["actorToken"] != "1:1"
+    )
+
+    assert first["buildRole"] == "power_generator"
+    assert first.get("placementKey") == "Placement:38000:30000"
+
+    second_snapshot = post_opening_snapshot(
+        "engineer",
+        "engineer",
+        "mass_extractor",
+        "mass_extractor",
+    )
+    second_snapshot["placements"] = {
+        "land_factory": copy.deepcopy(shared),
+        "power_generator": copy.deepcopy(shared),
+    }
+    second_snapshot["pending"] = [
+        {
+            "actorToken": first["actorToken"],
+            "kind": first["kind"],
+            "buildRole": first["buildRole"],
+            "placementKey": first["placementKey"],
+        }
+    ]
+    second = next(
+        intent
+        for intent in intents_of(decide(second_snapshot), "build_structure")
+        if intent["actorToken"] != "1:1"
+    )
+
+    assert second["buildRole"] == "land_factory"
+    assert second["placementKey"] == "Placement:42000:30000"
+    assert second["placementKey"] != first["placementKey"]
+
+
 def test_factory_counts_completed_incomplete_and_pending_engineers() -> None:
     snapshot = post_opening_snapshot("engineer")
     snapshot["units"] += [dict(role_counts("engineer")[0], token="98:1", complete=False, idle=False)]
