@@ -334,6 +334,23 @@ local function SafetyDecision(snapshot, units, state, mobilizingCombat)
         for _, unit in ipairs(mobilizingCombat) do
             excluded[unit.token] = true
         end
+    elseif state
+        and state.commanderPushActive == true
+        and acu
+        and health
+        and health >= COMMANDER_PUSH_HEALTH_RATIO
+        and not (contact and contact.immediate == true)
+    then
+        excluded = {}
+        for _, unit in ipairs(units) do
+            if COMBAT_ROLES[unit.role]
+                and unit.complete == true
+                and unit.assignedToWave ~= true
+                and unit.nearStaging == true
+            then
+                excluded[unit.token] = true
+            end
+        end
     end
     local combat = DefensiveCombatUnits(units, excluded)
 
@@ -607,12 +624,34 @@ local function AttackDecision(snapshot, units, pendingActors, state, intents)
         return true
     end
 
-    local combat, artillery = CombatUnits(units)
-    if TableGetn(combat) < ATTACK_COMBAT or artillery < ATTACK_ARTILLERY then
+    if not state then
         return false
     end
 
-    if not state then
+    local combat, artillery = CombatUnits(units)
+
+    if state.commanderPushActive == true then
+        local acu = FindAcu(units)
+        if acu then
+            local health = tonumber(acu.healthRatio)
+            if not health or health < COMMANDER_PUSH_HEALTH_RATIO then
+                return false
+            end
+            if TableGetn(combat) > 0 then
+                AddIntent(intents, {
+                    kind = 'reinforce_commander',
+                    acuToken = acu.token,
+                    actorTokens = ActorTokens(combat),
+                    position = snapshot.targetPosition,
+                    priority = 40,
+                    reason = 'reinforce_commander',
+                })
+            end
+            return true
+        end
+    end
+
+    if TableGetn(combat) < ATTACK_COMBAT or artillery < ATTACK_ARTILLERY then
         return false
     end
 
@@ -652,25 +691,6 @@ local function AttackDecision(snapshot, units, pendingActors, state, intents)
             reason = 'acu_led_concentration',
         })
         return true
-    end
-
-    if state.commanderPushActive == true then
-        local acu = FindAcu(units)
-        if acu then
-            local health = tonumber(acu.healthRatio)
-            if not health or health < COMMANDER_PUSH_HEALTH_RATIO then
-                return false
-            end
-            AddIntent(intents, {
-                kind = 'reinforce_commander',
-                acuToken = acu.token,
-                actorTokens = ActorTokens(combat),
-                position = snapshot.targetPosition,
-                priority = 40,
-                reason = 'reinforce_commander',
-            })
-            return true
-        end
     end
 
     if state.commanderRetreating ~= true then
@@ -780,6 +800,12 @@ Policy.Decide = function(snapshot)
             not underContact
             or mobilizingAcu ~= nil
             or commanderMobilizing
+            or (
+                state
+                and state.commanderPushActive == true
+                and snapshot.enemyContact
+                and snapshot.enemyContact.immediate ~= true
+            )
         )
     then
         commanderClaimsAcu = AttackDecision(

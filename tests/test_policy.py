@@ -482,6 +482,36 @@ def add_reserve_combat(snapshot: dict[str, Any], roles: tuple[str, ...]) -> list
     return sorted(tokens)
 
 
+def streaming_reinforcement_snapshot(roles: tuple[str, ...]) -> tuple[dict[str, Any], list[str]]:
+    snapshot = commander_snapshot(
+        initial_wave_sent=True,
+        commander_push_active=True,
+        idle=False,
+    )
+    snapshot["units"] = [
+        unit
+        for unit in snapshot["units"]
+        if unit["role"] not in {"tank", "artillery", "anti_air", "lab"}
+    ]
+    return snapshot, add_reserve_combat(snapshot, roles)
+
+
+def add_offstage_combat(snapshot: dict[str, Any], roles: tuple[str, ...]) -> list[str]:
+    first = 500
+    tokens: list[str] = []
+    for offset, role in enumerate(roles, first):
+        unit = dict(
+            role_counts(role)[0],
+            token=f"{offset}:1",
+            availableForWave=False,
+            nearStaging=False,
+            position=[80 + offset, 2, 80],
+        )
+        snapshot["units"].append(unit)
+        tokens.append(unit["token"])
+    return sorted(tokens)
+
+
 def tactical_intents(result: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         intent
@@ -803,6 +833,182 @@ def test_post_initial_reinforces_active_commander_or_falls_back_to_combat_wave()
     assert not intents_of(decide(missing), "reinforce_commander")
 
 
+def test_active_push_streams_one_zero_artillery_reinforcement() -> None:
+    snapshot, tokens = streaming_reinforcement_snapshot(("tank",))
+
+    reinforcement = intents_of(decide(snapshot), "reinforce_commander")
+
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["actorTokens"] == tokens
+
+
+def test_active_push_streams_twenty_three_zero_artillery_reinforcements() -> None:
+    snapshot, tokens = streaming_reinforcement_snapshot(("tank",) * 23)
+
+    reinforcement = intents_of(decide(snapshot), "reinforce_commander")
+
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["actorTokens"] == tokens
+
+
+def test_active_push_streams_twenty_four_zero_artillery_reinforcements() -> None:
+    snapshot, tokens = streaming_reinforcement_snapshot(("tank",) * 24)
+
+    reinforcement = intents_of(decide(snapshot), "reinforce_commander")
+
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["actorTokens"] == tokens
+
+
+def test_active_push_streams_every_member_of_oversized_cohort() -> None:
+    snapshot, tokens = streaming_reinforcement_snapshot(
+        ("tank",) * 31 + ("anti_air",) * 3 + ("artillery",) * 2
+    )
+
+    reinforcement = intents_of(decide(snapshot), "reinforce_commander")
+
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["actorTokens"] == tokens
+    assert len(reinforcement[0]["actorTokens"]) == 36
+
+
+def test_initial_offstage_launch_still_requires_twenty_four_total_and_four_artillery() -> None:
+    for roles in (("tank",) * 19 + ("artillery",) * 4, ("tank",) * 21 + ("artillery",) * 3):
+        snapshot = commander_snapshot(near_staging=False)
+        snapshot["units"] = [
+            unit
+            for unit in snapshot["units"]
+            if unit["role"] not in {"tank", "artillery", "anti_air", "lab"}
+        ]
+        add_reserve_combat(snapshot, roles)
+
+        result = decide(snapshot)
+
+        assert not intents_of(result, "mobilize_commander")
+        assert not intents_of(result, "commander_push")
+
+
+def test_ordinary_contact_partitions_staged_reinforcements_from_offstage_defenders() -> None:
+    snapshot, staged_tokens = streaming_reinforcement_snapshot(
+        ("tank", "artillery", "anti_air")
+    )
+    offstage_tokens = add_offstage_combat(snapshot, ("tank", "artillery"))
+    snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
+
+    result = decide(snapshot)
+    reinforcement = intents_of(result, "reinforce_commander")
+    defense = intents_of(result, "defend_wave")
+
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["actorTokens"] == staged_tokens
+    assert len(defense) == 1
+    assert defense[0]["actorTokens"] == offstage_tokens
+    assert set(reinforcement[0]["actorTokens"]).isdisjoint(defense[0]["actorTokens"])
+    assert set(reinforcement[0]["actorTokens"]) | set(defense[0]["actorTokens"]) == set(
+        staged_tokens + offstage_tokens
+    )
+
+
+def test_ordinary_contact_never_reclassifies_ineligible_staged_unit_as_defender() -> None:
+    snapshot, staged_tokens = streaming_reinforcement_snapshot(("tank",))
+    ineligible = dict(
+        role_counts("artillery")[0],
+        token="450:1",
+        availableForWave=False,
+        assignedToWave=False,
+        nearStaging=True,
+    )
+    snapshot["units"].append(ineligible)
+    offstage_tokens = add_offstage_combat(snapshot, ("anti_air",))
+    snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
+
+    result = decide(snapshot)
+    reinforcement = intents_of(result, "reinforce_commander")
+    defense = intents_of(result, "defend_wave")
+
+    assert reinforcement[0]["actorTokens"] == staged_tokens
+    assert defense[0]["actorTokens"] == offstage_tokens
+    assert all("450:1" not in intent.get("actorTokens", []) for intent in result)
+
+
+def test_immediate_contact_preempts_streaming_and_defends_with_all_unassigned_combat() -> None:
+    snapshot, staged_tokens = streaming_reinforcement_snapshot(("tank", "artillery"))
+    offstage_tokens = add_offstage_combat(snapshot, ("tank", "anti_air"))
+    snapshot["enemyContact"] = {"position": [34, 2, 35], "immediate": True}
+
+    result = decide(snapshot)
+
+    assert intents_of(result, "retreat")
+    assert not intents_of(result, "reinforce_commander")
+    assert intents_of(result, "defend_wave")[0]["actorTokens"] == sorted(
+        staged_tokens + offstage_tokens
+    )
+
+
+def test_streaming_reinforcement_never_overlaps_other_combat_intents() -> None:
+    snapshot, staged_tokens = streaming_reinforcement_snapshot(("tank", "artillery", "lab"))
+    offstage_tokens = add_offstage_combat(snapshot, ("tank", "anti_air"))
+
+    result = decide(snapshot)
+    reinforcement = intents_of(result, "reinforce_commander")
+    regroup = intents_of(result, "regroup_wave")
+
+    assert len(reinforcement) == 1
+    assert len(regroup) == 1
+    assert reinforcement[0]["actorTokens"] == staged_tokens
+    assert regroup[0]["actorTokens"] == offstage_tokens
+    assert not intents_of(result, "attack_wave")
+    assert not intents_of(result, "defend_wave")
+    assert set(reinforcement[0]["actorTokens"]).isdisjoint(regroup[0]["actorTokens"])
+
+
+def test_streaming_reinforcement_leaves_existing_commander_escorts_owned() -> None:
+    snapshot, fresh_tokens = streaming_reinforcement_snapshot(("tank", "artillery"))
+    escort = dict(
+        role_counts("tank")[0],
+        token="900:1",
+        assignedToWave=True,
+        availableForWave=False,
+        commanderEscort=True,
+    )
+    snapshot["units"].append(escort)
+
+    result = decide(snapshot)
+    combat_intents = [
+        intent
+        for intent in result
+        if intent["kind"] in {"reinforce_commander", "attack_wave", "defend_wave", "regroup_wave"}
+    ]
+
+    reinforcement = intents_of(result, "reinforce_commander")
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["actorTokens"] == fresh_tokens
+    assert all("900:1" not in intent.get("actorTokens", []) for intent in combat_intents)
+
+
+def test_streaming_fails_closed_without_one_complete_healthy_commander() -> None:
+    snapshots: list[dict[str, Any]] = []
+    missing, _ = streaming_reinforcement_snapshot(("tank",))
+    missing["units"] = [unit for unit in missing["units"] if unit["role"] != "acu"]
+    snapshots.append(missing)
+
+    incomplete, _ = streaming_reinforcement_snapshot(("tank",))
+    incomplete["units"][0]["complete"] = False
+    snapshots.append(incomplete)
+
+    unhealthy, _ = streaming_reinforcement_snapshot(("tank",))
+    unhealthy["units"][0]["healthRatio"] = 0.749
+    snapshots.append(unhealthy)
+
+    for value in (None, "malformed"):
+        malformed, _ = streaming_reinforcement_snapshot(("tank",))
+        malformed["units"][0]["healthRatio"] = value
+        snapshots.append(malformed)
+
+    for snapshot in snapshots:
+        assert not intents_of(decide(snapshot), "reinforce_commander")
+
+
 def test_push_uses_point_seventy_five_retreat_threshold_without_changing_normal_threshold() -> None:
     active = commander_snapshot(
         health=0.749,
@@ -937,8 +1143,11 @@ def test_current_intel_defense_preempts_expansion_and_attack() -> None:
     )
     active["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
     active_result = decide(active)
-    assert intents_of(active_result, "defend_wave")
-    assert tactical_intents(active_result) == []
+    reinforcement = intents_of(active_result, "reinforce_commander")
+    assert len(reinforcement) == 1
+    assert len(reinforcement[0]["actorTokens"]) == 24
+    assert not intents_of(active_result, "defend_wave")
+    assert not intents_of(active_result, "attack_wave")
 
 
 def test_contact_without_defenders_keeps_energy_recovery_and_factory_production_running() -> None:

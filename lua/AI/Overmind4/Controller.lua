@@ -712,6 +712,55 @@ local function HealthyCommander(record)
         and health >= COMMANDER_PUSH_HEALTH_RATIO
 end
 
+local function LiveOwnedActor(controller, token, record, expectedRole)
+    if type(token) ~= 'string'
+        or not record
+        or record.token ~= token
+        or record.role ~= expectedRole
+        or record.complete ~= true
+    then
+        return nil, nil
+    end
+    local actor = controller.unitRefs[token]
+    if not actor
+        or actor.Dead == true
+        or SafeCall(true, actor.BeenDestroyed, actor) == true
+        or SafeCall(-1, actor.GetArmy, actor) ~= controller.brain.Army
+        or (tonumber(SafeCall(0, actor.GetFractionComplete, actor)) or 0) < 1
+    then
+        return nil, nil
+    end
+    local entityId = SafeCall(nil, actor.GetEntityId, actor)
+    local generation = entityId and controller.entityGenerations[entityId] or nil
+    if not generation
+        or generation.reference ~= actor
+        or token ~= tostring(entityId) .. ':' .. tostring(generation.generation)
+    then
+        return nil, nil
+    end
+    local blueprint = SafeCall(nil, actor.GetBlueprint, actor)
+    if not blueprint or Catalog.RoleFor(blueprint.BlueprintId) ~= expectedRole then
+        return nil, nil
+    end
+    return actor, CopyPosition(SafeCall(nil, actor.GetPosition, actor))
+end
+
+local function LiveHealthyCommander(controller, token, record)
+    if not HealthyCommander(record) or controller.pending[token] then return nil end
+    local actor = LiveOwnedActor(controller, token, record, 'acu')
+    if not actor then return nil end
+    local health = tonumber(SafeCall(nil, actor.GetHealth, actor))
+    local maximum = tonumber(SafeCall(nil, actor.GetMaxHealth, actor))
+    if not health
+        or not maximum
+        or maximum <= 0
+        or health / maximum < COMMANDER_PUSH_HEALTH_RATIO
+    then
+        return nil
+    end
+    return actor
+end
+
 local function GroupRecords(controller, tokens, recordByToken, usedActors)
     local selected = {}
     local sorted = {}
@@ -762,6 +811,48 @@ local function CommanderCohort(controller, tokens, recordByToken, usedActors)
         return nil, nil
     end
     return eligible, actors
+end
+
+local function StreamingCommanderCohort(controller, tokens, recordByToken, usedActors)
+    local unique = {}
+    local sorted = {}
+    for _, token in ipairs(tokens or {}) do
+        if type(token) ~= 'string' then return nil, nil end
+        if not unique[token] then
+            unique[token] = true
+            TableInsert(sorted, token)
+        end
+    end
+    table.sort(sorted)
+    if TableGetn(sorted) == 0 then return nil, nil end
+
+    local records = {}
+    local actors = {}
+    for _, token in ipairs(sorted) do
+        local record = recordByToken[token]
+        if not record
+            or not COMBAT_ROLES[record.role]
+            or record.complete ~= true
+            or record.availableForWave ~= true
+            or record.nearStaging ~= true
+            or record.assignedToWave == true
+            or usedActors[token]
+            or controller.pending[token]
+            or controller.waveAssignments[token]
+        then
+            return nil, nil
+        end
+        local actor, position = LiveOwnedActor(controller, token, record, record.role)
+        if not actor
+            or not position
+            or DistanceSquared(position, controller.stagingPosition) > STAGING_RADIUS * STAGING_RADIUS
+        then
+            return nil, nil
+        end
+        TableInsert(records, record)
+        TableInsert(actors, actor)
+    end
+    return records, actors
 end
 
 local function AssignCommanderCohort(controller, records, usedActors)
@@ -943,9 +1034,9 @@ local function ExecuteCommanderReinforcement(controller, intent, recordByToken, 
         return false
     end
     local acuRecord = recordByToken[intent.acuToken]
-    local acuActor = controller.unitRefs[intent.acuToken]
-    if not HealthyCommander(acuRecord) or not acuActor then return false end
-    local records, actors = CommanderCohort(
+    local acuActor = LiveHealthyCommander(controller, intent.acuToken, acuRecord)
+    if not acuActor then return false end
+    local records, actors = StreamingCommanderCohort(
         controller,
         intent.actorTokens,
         recordByToken,

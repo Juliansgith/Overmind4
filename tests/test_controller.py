@@ -302,6 +302,28 @@ def commander_mobilize_intent(observation: Any, tokens: list[str] | None = None)
     return intent
 
 
+def activate_commander_push(harness: ControllerHarness, commander_token: str = "1:1") -> None:
+    harness.controller.initialWaveSent = True
+    harness.controller.commanderPushActive = True
+    harness.controller.commanderMobilizing = False
+    harness.controller.commanderRetreating = False
+    harness.controller.commanderToken = commander_token
+
+
+def commander_reinforcement_intent(
+    observation: Any,
+    tokens: list[str] | None = None,
+) -> dict[str, Any]:
+    intent = commander_push_intent(observation, tokens)
+    intent.update(
+        {
+            "kind": "reinforce_commander",
+            "reason": "reinforce_commander",
+        }
+    )
+    return intent
+
+
 def test_create_converts_two_value_start_position_and_generates_navigation_once() -> None:
     harness = make_harness()
     assert plain(harness.controller.basePosition) == [10, 10.2, 20]
@@ -1504,6 +1526,198 @@ def test_commander_push_commits_atomically_across_both_engine_orders() -> None:
     assert plain(clear_failure.controller.waveAssignments) == {}
 
 
+def test_initial_offstage_mobilization_still_rejects_twenty_three_total_with_four_artillery() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(
+        harness,
+        combat_count=23,
+        artillery_count=4,
+        acu_near_staging=False,
+    )
+
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert harness.controller.commanderMobilizing is False
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_initial_offstage_mobilization_still_rejects_twenty_four_total_with_three_artillery() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(
+        harness,
+        combat_count=24,
+        artillery_count=3,
+        acu_near_staging=False,
+    )
+
+    execute_intents(harness, [commander_mobilize_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert harness.controller.commanderMobilizing is False
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_accepts_one_zero_artillery_actor() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=1, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.guard[1].units) == 1
+    assert set(plain(harness.controller.waveAssignments)) == set(intent["actorTokens"])
+
+
+def test_streaming_reinforcement_accepts_twenty_three_zero_artillery_actors() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=23, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.guard[1].units) == 23
+    assert set(plain(harness.controller.waveAssignments)) == set(intent["actorTokens"])
+
+
+def test_streaming_reinforcement_accepts_twenty_four_zero_artillery_actors() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=24, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.guard[1].units) == 24
+    assert set(plain(harness.controller.waveAssignments)) == set(intent["actorTokens"])
+
+
+def test_streaming_reinforcement_accepts_every_actor_in_oversized_cohort() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=41, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.guard[1].units) == 41
+    assert set(plain(harness.controller.waveAssignments)) == set(intent["actorTokens"])
+
+
+def test_streaming_reinforcement_deduplicates_tokens_without_dropping_actor() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=1, artillery_count=0)
+    activate_commander_push(harness)
+    token = commander_reinforcement_intent(observation)["actorTokens"][0]
+    intent = commander_reinforcement_intent(observation, [token, token, token])
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.clear[1].units) == 1
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.guard[1].units) == 1
+    assert set(plain(harness.controller.waveAssignments)) == {token}
+
+
+def test_streaming_reinforcement_success_is_exact_clear_then_guard_transaction() -> None:
+    harness = make_harness()
+    harness.brain.tick = 321
+    acu, combat, observation = commander_force(harness, combat_count=3, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "guard"]
+    assert len(harness.calls.clear[1].units) == 3
+    assert len(harness.calls.guard[1].units) == 3
+    assert harness.lua.eval("function(a, b) return rawequal(a, b) end")(
+        harness.calls.guard[1].target,
+        acu,
+    )
+    assert all(
+        harness.lua.eval("function(a, b) return rawequal(a, b) end")(
+            harness.calls.clear[1].units[index],
+            combat[index - 1],
+        )
+        for index in range(1, 4)
+    )
+    assert harness.controller.initialWaveSent is True
+    assert harness.controller.commanderPushActive is True
+    assert harness.controller.commanderToken == "1:1"
+    assert harness.controller.lastReinforcementTick == 321
+    assignments = plain(harness.controller.waveAssignments)
+    assert set(assignments) == set(intent["actorTokens"])
+    assert all(assignment["commanderEscort"] is True for assignment in assignments.values())
+    assert any(
+        "event=order" in line
+        and "command=reinforce_commander" in line
+        and "units=3" in line
+        for line in harness.logs
+    )
+
+
+def test_streaming_reinforcement_clear_failure_is_pristine_and_immediately_retryable() -> None:
+    harness = make_harness()
+    harness.brain.tick = 77
+    _, _, observation = commander_force(harness, combat_count=1, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+    before_tick = harness.controller.lastReinforcementTick
+    harness.calls.failClear = True
+
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear"]
+    assert plain(harness.controller.waveAssignments) == {}
+    assert harness.controller.lastReinforcementTick == before_tick
+    assert harness.controller.commanderPushActive is True
+    assert harness.controller.commanderToken == "1:1"
+    assert not any("command=reinforce_commander" in line for line in harness.logs)
+
+    harness.calls.failClear = False
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "clear", "guard"]
+    assert set(plain(harness.controller.waveAssignments)) == set(intent["actorTokens"])
+    assert harness.controller.lastReinforcementTick == 77
+
+
+def test_streaming_reinforcement_guard_failure_is_pristine_and_immediately_retryable() -> None:
+    harness = make_harness()
+    harness.brain.tick = 88
+    _, _, observation = commander_force(harness, combat_count=1, artillery_count=0)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+    before_tick = harness.controller.lastReinforcementTick
+    harness.calls.failGuard = True
+
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "guard"]
+    assert plain(harness.controller.waveAssignments) == {}
+    assert harness.controller.lastReinforcementTick == before_tick
+    assert harness.controller.commanderPushActive is True
+    assert harness.controller.commanderToken == "1:1"
+    assert not any("command=reinforce_commander" in line for line in harness.logs)
+
+    harness.calls.failGuard = False
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "guard", "clear", "guard"]
+    assert set(plain(harness.controller.waveAssignments)) == set(intent["actorTokens"])
+    assert harness.controller.lastReinforcementTick == 88
+
+
 def test_reinforcement_guards_live_commander_and_assigns_only_after_success() -> None:
     harness = make_harness()
     acu, _, observation = commander_force(harness, acu_idle=False)
@@ -1554,26 +1768,252 @@ def test_reinforcement_guards_live_commander_and_assigns_only_after_success() ->
     assert plain(clear_failed.controller.waveAssignments) == {}
 
 
-def test_reinforcement_revalidates_full_concentration_gate() -> None:
-    too_small = make_harness()
-    _, _, observation = commander_force(too_small, combat_count=23, artillery_count=4)
-    too_small.controller.initialWaveSent = True
-    too_small.controller.commanderPushActive = True
-    too_small.controller.commanderToken = "1:1"
-    intent = commander_push_intent(observation)
-    intent["kind"] = "reinforce_commander"
-    execute_intents(too_small, [intent], observation)
-    assert len(too_small.calls.guard) == 0
+def test_streaming_reinforcement_rejects_empty_cohort() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=0, artillery_count=0)
+    activate_commander_push(harness)
 
-    artillery_short = make_harness()
-    _, _, observation = commander_force(artillery_short, combat_count=24, artillery_count=3)
-    artillery_short.controller.initialWaveSent = True
-    artillery_short.controller.commanderPushActive = True
-    artillery_short.controller.commanderToken = "1:1"
-    intent = commander_push_intent(observation)
-    intent["kind"] = "reinforce_commander"
-    execute_intents(artillery_short, [intent], observation)
-    assert len(artillery_short.calls.guard) == 0
+    execute_intents(harness, [commander_reinforcement_intent(observation, [])], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_stale_token_without_partial_assignment() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+    intent["actorTokens"].append("999:1")
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_dead_actor_changed_after_observation() -> None:
+    harness = make_harness()
+    _, combat, observation = commander_force(harness)
+    activate_commander_push(harness)
+    combat[0].options.destroyed = True
+
+    execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_captured_actor_changed_after_observation() -> None:
+    harness = make_harness()
+    _, combat, observation = commander_force(harness)
+    activate_commander_push(harness)
+    combat[0].options.army = 2
+
+    execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_recycled_actor_token_without_touching_replacement() -> None:
+    harness = make_harness()
+    acu, combat, stale_observation = commander_force(harness)
+    activate_commander_push(harness)
+    replacement = harness.unit(
+        entityId=2,
+        blueprintId="uel0201",
+        position=plain(harness.controller.stagingPosition),
+    )
+    harness.brain.units = harness.lua.table_from([acu, replacement, *combat[1:]])
+    fresh_observation = harness.observe()
+    assert any(record["token"] == "2:2" for record in plain(fresh_observation.units))
+
+    execute_intents(
+        harness,
+        [commander_reinforcement_intent(stale_observation)],
+        stale_observation,
+    )
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_actor_that_became_incomplete_or_offstage() -> None:
+    for change in ("incomplete", "offstage"):
+        harness = make_harness()
+        _, combat, observation = commander_force(harness)
+        activate_commander_push(harness)
+        if change == "incomplete":
+            combat[0].options.fraction = 0.5
+        else:
+            combat[0].options.position = lua_value(harness.lua, [110, 2, 120])
+
+        execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+        assert len(harness.calls.clear) == 0
+        assert len(harness.calls.guard) == 0
+        assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_pending_actor_without_partial_assignment() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=25, artillery_count=5)
+    activate_commander_push(harness)
+    token = commander_reinforcement_intent(observation)["actorTokens"][0]
+    harness.controller.pending[token] = lua_value(
+        harness.lua,
+        {"actorToken": token, "kind": "factory_build", "issuedTick": 0},
+    )
+
+    execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_already_assigned_actor_without_reassigning_anyone() -> None:
+    harness = make_harness()
+    _, _, _ = commander_force(harness, combat_count=25, artillery_count=5)
+    activate_commander_push(harness)
+    token = "2:1"
+    existing = {
+        "issuedTick": 0,
+        "position": plain(harness.controller.stagingPosition),
+        "commanderEscort": True,
+    }
+    harness.controller.waveAssignments[token] = lua_value(harness.lua, existing)
+    observation = harness.observe()
+
+    execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {token: existing}
+
+
+def test_streaming_reinforcement_rejects_malformed_actor_token_without_partial_assignment() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness)
+    activate_commander_push(harness)
+    intent = commander_reinforcement_intent(observation)
+    intent["actorTokens"].append(12345)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_revalidates_live_complete_healthy_exact_commander() -> None:
+    missing = make_harness()
+    _, combat, _ = commander_force(missing)
+    activate_commander_push(missing)
+    missing.brain.units = missing.lua.table_from(combat)
+    observation = missing.observe()
+    execute_intents(missing, [commander_reinforcement_intent(observation)], observation)
+    assert len(missing.calls.guard) == 0
+
+    incomplete = make_harness()
+    acu, _, _ = commander_force(incomplete)
+    activate_commander_push(incomplete)
+    acu.options.fraction = 0.5
+    observation = incomplete.observe()
+    execute_intents(incomplete, [commander_reinforcement_intent(observation)], observation)
+    assert len(incomplete.calls.guard) == 0
+
+    unhealthy = make_harness()
+    _, _, observation = commander_force(unhealthy, health_ratio=0.749)
+    activate_commander_push(unhealthy)
+    execute_intents(unhealthy, [commander_reinforcement_intent(observation)], observation)
+    assert len(unhealthy.calls.guard) == 0
+
+    malformed = make_harness()
+    _, _, observation = commander_force(malformed)
+    activate_commander_push(malformed)
+    acu_record = next(record for record in observation.units.values() if record.role == "acu")
+    acu_record.healthRatio = "malformed"
+    execute_intents(malformed, [commander_reinforcement_intent(observation)], observation)
+    assert len(malformed.calls.guard) == 0
+
+
+def test_streaming_reinforcement_rejects_commander_captured_after_observation() -> None:
+    harness = make_harness()
+    acu, _, observation = commander_force(harness)
+    activate_commander_push(harness)
+    acu.options.army = 2
+
+    execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_recycled_commander_token() -> None:
+    harness = make_harness()
+    _, combat, stale_observation = commander_force(harness)
+    activate_commander_push(harness)
+    replacement = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        position=plain(harness.controller.stagingPosition),
+    )
+    harness.brain.units = harness.lua.table_from([replacement, *combat])
+    fresh_observation = harness.observe()
+    assert any(record["token"] == "1:2" for record in plain(fresh_observation.units))
+
+    execute_intents(
+        harness,
+        [commander_reinforcement_intent(stale_observation)],
+        stale_observation,
+    )
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_streaming_reinforcement_rejects_pending_commander() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness)
+    activate_commander_push(harness)
+    harness.controller.pending["1:1"] = lua_value(
+        harness.lua,
+        {"actorToken": "1:1", "kind": "build_structure", "issuedTick": 0},
+    )
+
+    execute_intents(harness, [commander_reinforcement_intent(observation)], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.guard) == 0
+    assert plain(harness.controller.waveAssignments) == {}
+
+
+def test_successful_streaming_actor_cannot_execute_another_combat_intent_same_decision() -> None:
+    harness = make_harness()
+    _, _, observation = commander_force(harness, combat_count=1, artillery_count=0)
+    activate_commander_push(harness)
+    reinforcement = commander_reinforcement_intent(observation)
+    attack = {
+        "kind": "attack_wave",
+        "actorTokens": reinforcement["actorTokens"],
+        "position": plain(observation.targetPosition),
+        "priority": 50,
+    }
+
+    execute_intents(harness, [reinforcement, attack], observation)
+
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.aggressive) == 0
+    assert set(plain(harness.controller.waveAssignments)) == set(reinforcement["actorTokens"])
 
 
 def test_failed_commander_push_consumes_doctrine_actors_for_the_step() -> None:
