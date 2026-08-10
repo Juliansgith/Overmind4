@@ -79,6 +79,7 @@ def make_harness() -> ControllerHarness:
             end
             function unit:IsPaused() return self.options.paused or false end
             function unit:IsIntelEnabled(kind)
+                if self.options.failVisionEnabled then error('vision state failed') end
                 return kind == 'Vision' and self.options.visionEnabled ~= false
             end
             function unit:GetIntelRadius(kind)
@@ -104,6 +105,7 @@ def make_harness() -> ControllerHarness:
                 CachePosition = options.cachePosition,
             }
             function prop:BeenDestroyed()
+                if self.options.failDestroyed then error('destroyed state failed') end
                 if self.options.isUnit then
                     calls.unitReclaimInspections = calls.unitReclaimInspections + 1
                 end
@@ -114,7 +116,10 @@ def make_harness() -> ControllerHarness:
             return prop
         end
 
-        function IsProp(entity) return entity and entity.options and entity.options.isUnit ~= true end
+        function IsProp(entity)
+            if calls.failIsProp then error('prop identity failed') end
+            return entity and entity.options and entity.options.isUnit ~= true
+        end
 
         brain = {
             Army = 1,
@@ -202,6 +207,11 @@ def make_harness() -> ControllerHarness:
         function Rect(x0, z0, x1, z1) return { x0, z0, x1, z1 } end
         function GetReclaimablesInRect(rect)
             table.insert(calls.reclaimQuery, { rect[1], rect[2], rect[3], rect[4] })
+            if calls.failReclaimQuery
+                or tonumber(calls.failReclaimQueryAt) == table.getn(calls.reclaimQuery)
+            then
+                error('reclaim query failed')
+            end
             local found = {}
             for _, prop in pairs(brain.reclaimables or {}) do
                 local position = prop.CachePosition or prop:GetPosition()
@@ -2469,6 +2479,38 @@ def test_retreat_releases_preempted_build_pending_and_reservation_immediately() 
         observation,
     )
 
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.reservations[build["siteKey"]] is None
+
+
+def test_retreat_clear_exception_retains_preempted_build_and_reservation_until_retry() -> None:
+    harness = make_harness()
+    acu = harness.unit(entityId=1, blueprintId="uel0001", canBuild={"ueb1103": True})
+    harness.brain.units = harness.lua.table_from([acu])
+    observation = harness.observe()
+    build = {
+        "kind": "build_structure",
+        "actorToken": "1:1",
+        "buildRole": "mass_extractor",
+        "siteKey": "Mass:12000:20000",
+        "position": [12, 0, 20],
+    }
+    execute_intents(harness, [build], observation)
+    harness.calls.failClear = True
+    retreat = {"kind": "retreat", "actorToken": "1:1", "position": [10, 0, 20]}
+
+    execute_intents(harness, [retreat], observation)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.move) == 0
+    assert harness.controller.pending["1:1"] is not None
+    assert harness.controller.reservations[build["siteKey"]].actorToken == "1:1"
+    harness.calls.failClear = False
+
+    execute_intents(harness, [retreat], observation)
+
+    assert len(harness.calls.clear) == 2
+    assert len(harness.calls.move) == 1
     assert harness.controller.pending["1:1"] is None
     assert harness.controller.reservations[build["siteKey"]] is None
 

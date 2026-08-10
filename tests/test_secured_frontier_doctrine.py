@@ -426,6 +426,14 @@ def test_true_no_progress_travel_is_bounded_by_derived_deadline_and_releases_for
     current = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, current)
 
+    assert harness.controller.pending["1:1"].phase == "cancelling"
+    assert harness.controller.reservations["far"] is not None
+    assert len(harness.calls.clear) == 1
+    engineer.options.idleState = True
+    engineer.options.states = lua_value(harness.lua, {})
+    harness.brain.tick = deadline + 2
+    current = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, current)
     assert harness.controller.pending["1:1"] is None
     assert harness.controller.reservations["far"] is None
     assert any("reason=timeout" in line for line in harness.logs)
@@ -1742,6 +1750,11 @@ def test_reclaim_executes_exact_prop_target_and_reconciles_destroyed_completion(
     assert harness.controller.reclaimReservations["prop:101"] == "1:1"
     prop.Dead = True
     harness.brain.tick = 10
+    current = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, current)
+    assert harness.controller.pending["1:1"] is not None
+    assert harness.controller.reclaimReservations["prop:101"] == "1:1"
+    harness.brain.tick = 300
     current = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, current)
     assert harness.controller.pending["1:1"] is None

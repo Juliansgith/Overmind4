@@ -38,6 +38,7 @@ local RECLAIM_QUERY_INTERVAL_TICKS = 300
 local RECLAIM_QUERY_RADIUS = 10
 local RECLAIM_CONTROL_RADIUS = 45
 local MAX_RECLAIM_QUERY_ENGINEERS = 4
+local MAX_ACTIVE_RECLAIM_JOBS = MAX_RECLAIM_QUERY_ENGINEERS
 local MAX_RECLAIM_CANDIDATES = 64
 local MIN_RECLAIM_MASS = 1
 local TableGetn = table.getn
@@ -339,6 +340,8 @@ local function PendingArray(controller)
             position = CopyPosition(operation.position),
             issuedTick = operation.issuedTick,
             deadlineTick = operation.deadlineTick,
+            cancelReason = operation.cancelReason,
+            cancelRequestedTick = operation.cancelRequestedTick,
             lastProgressTick = operation.lastProgressTick,
             lastDistance = operation.lastDistance,
             lastFraction = operation.lastFraction,
@@ -430,7 +433,7 @@ local function NormalizeOwnUnit(controller, unit)
     local visionRadius = tonumber(intel.VisionRadius) or RECLAIM_QUERY_RADIUS
     local liveVisionRadius = tonumber(SafeCall(nil, unit.GetIntelRadius, unit, 'Vision'))
     if liveVisionRadius and liveVisionRadius >= 0 then visionRadius = liveVisionRadius end
-    local visionEnabled = SafeCall(true, unit.IsIntelEnabled, unit, 'Vision') ~= false
+    local visionEnabled = SafeCall(false, unit.IsIntelEnabled, unit, 'Vision') == true
 
     controller.unitRefs[token] = unit
     return {
@@ -815,18 +818,52 @@ local function PropAlive(prop)
         and SafeCall(true, prop.BeenDestroyed, prop) ~= true
 end
 
-local function NormalizeReclaimProp(prop, center, radius, observerToken, observedTick)
-    if SafeCall(false, IsProp, prop) ~= true or not PropAlive(prop) then return nil end
-    local position = CopyPosition(prop.CachePosition or SafeCall(nil, prop.GetPosition, prop))
-    if not position or Distance(position, center) > radius then return nil end
-    local left = tonumber(prop.ReclaimLeft)
-    if left == nil then left = 1 end
-    local mass = (tonumber(prop.MaxMassReclaim) or 0) * left
-    if mass < MIN_RECLAIM_MASS then return nil end
+local function ReclaimPropLiveness(prop)
+    if not prop or prop.Dead == true then return 'dead' end
+    if type(prop.BeenDestroyed) ~= 'function' then return 'unknown' end
+    local ok, destroyed = pcall(prop.BeenDestroyed, prop)
+    if not ok or type(destroyed) ~= 'boolean' then return 'unknown' end
+    if destroyed == true then return 'dead' end
+    return 'alive'
+end
+
+local function ReclaimPropKey(prop)
+    if SafeCall(false, IsProp, prop) ~= true then return nil end
     local entityId = SafeCall(nil, prop.GetEntityId, prop) or prop.EntityId
     if entityId == nil then return nil end
+    return 'prop:' .. tostring(entityId)
+end
+
+local function ReclaimQueryRadiusForRecord(record)
+    if not record
+        or record.role ~= 'engineer'
+        or record.complete ~= true
+        or record.visionEnabled == false
+        or not CopyPosition(record.position)
+    then
+        return nil
+    end
+    local radius = math.min(
+        RECLAIM_QUERY_RADIUS,
+        tonumber(record.visionRadius) or RECLAIM_QUERY_RADIUS
+    )
+    if radius <= 0 then return nil end
+    return radius
+end
+
+local function NormalizeReclaimProp(prop, center, radius, observerToken, observedTick)
+    local key = ReclaimPropKey(prop)
+    if not key or not PropAlive(prop) then return nil end
+    local position = CopyPosition(prop.CachePosition or SafeCall(nil, prop.GetPosition, prop))
+    if not position or Distance(position, center) > radius then return nil end
+    local maximumMass = tonumber(prop.MaxMassReclaim)
+    local left = tonumber(prop.ReclaimLeft)
+    if prop.ReclaimLeft == nil then left = 1 end
+    if not maximumMass or maximumMass < 0 or not left or left < 0 then return nil end
+    local mass = maximumMass * left
+    if mass < MIN_RECLAIM_MASS then return nil end
     return {
-        key = 'prop:' .. tostring(entityId),
+        key = key,
         position = position,
         mass = mass,
         reference = prop,
@@ -863,56 +900,159 @@ local function RefreshReclaim(controller, ownRecords, massSites)
     controller.lastReclaimQueryTick = tick
     local byKey = {}
     local refs = {}
-    local engineerCount = 0
+    local recordsByToken = {}
+    local sortedRecords = {}
     for _, record in ipairs(ownRecords or {}) do
-        if engineerCount < MAX_RECLAIM_QUERY_ENGINEERS
-            and record.role == 'engineer'
-            and record.complete == true
-            and record.visionEnabled ~= false
-            and PositionControlled(controller, record.position, massSites)
+        recordsByToken[record.token] = record
+        TableInsert(sortedRecords, record)
+    end
+    table.sort(sortedRecords, function(a, b)
+        return tostring(a.token or '') < tostring(b.token or '')
+    end)
+
+    local activeByActor = {}
+    local freshness = {}
+    for _, actorToken in ipairs(SortedKeys(controller.pending)) do
+        local operation = controller.pending[actorToken]
+        if operation.kind == 'reclaim' and type(operation.targetKey) == 'string' then
+            activeByActor[actorToken] = operation
+            freshness[actorToken] = {
+                actorToken = actorToken,
+                targetKey = operation.targetKey,
+                observedTick = tick,
+                queried = false,
+                covered = false,
+                state = 'unknown',
+            }
+        end
+    end
+
+    local queryRecords = {}
+    local selectedActors = {}
+    local function AddQueryRecord(record)
+        if TableGetn(queryRecords) >= MAX_RECLAIM_QUERY_ENGINEERS then return end
+        local radius = ReclaimQueryRadiusForRecord(record)
+        if not radius
+            or selectedActors[record.token]
+            or not PositionControlled(controller, record.position, massSites)
         then
-            engineerCount = engineerCount + 1
-            local radius = math.min(RECLAIM_QUERY_RADIUS, tonumber(record.visionRadius) or RECLAIM_QUERY_RADIUS)
-            if radius > 0 then
-                local rectangle = nil
-                if Rect then
-                    rectangle = SafeCall(nil, Rect,
-                        record.position[1] - radius,
-                        record.position[3] - radius,
-                        record.position[1] + radius,
-                        record.position[3] + radius
-                    )
-                end
-                if not rectangle then
-                    rectangle = {
-                        record.position[1] - radius,
-                        record.position[3] - radius,
-                        record.position[1] + radius,
-                        record.position[3] + radius,
-                    }
-                end
-                local raw = SafeCall({}, function() return GetReclaimablesInRect(rectangle) end)
-                for _, prop in pairs(raw or {}) do
-                    local candidate = NormalizeReclaimProp(
-                        prop,
-                        record.position,
-                        radius,
-                        record.token,
-                        tick
-                    )
-                    if candidate
-                        and PositionControlled(controller, candidate.position, massSites)
+            return
+        end
+        selectedActors[record.token] = true
+        TableInsert(queryRecords, { record = record, radius = radius })
+    end
+    for _, actorToken in ipairs(SortedKeys(activeByActor)) do
+        AddQueryRecord(recordsByToken[actorToken])
+    end
+    for _, record in ipairs(sortedRecords) do
+        AddQueryRecord(record)
+    end
+
+    local activeRefs = {}
+    for _, query in ipairs(queryRecords) do
+        local record = query.record
+        local radius = query.radius
+        local rectangle = nil
+        if Rect then
+            rectangle = SafeCall(nil, Rect,
+                record.position[1] - radius,
+                record.position[3] - radius,
+                record.position[1] + radius,
+                record.position[3] + radius
+            )
+        end
+        if not rectangle then
+            rectangle = {
+                record.position[1] - radius,
+                record.position[3] - radius,
+                record.position[1] + radius,
+                record.position[3] + radius,
+            }
+        end
+        local queryOk, raw = pcall(function()
+            return GetReclaimablesInRect(rectangle)
+        end)
+        local validResult = queryOk and type(raw) == 'table'
+        if not validResult then raw = {} end
+
+        local operation = activeByActor[record.token]
+        local activeState = freshness[record.token]
+        if activeState and operation then
+            local targetPosition = CopyPosition(operation.position)
+            if validResult
+                and targetPosition
+                and Distance(record.position, targetPosition) <= radius
+                and PositionControlled(controller, targetPosition, massSites)
+            then
+                activeState.queried = true
+                activeState.covered = true
+                activeState.state = 'absent'
+            end
+        end
+
+        for _, prop in pairs(raw or {}) do
+            local propKey = ReclaimPropKey(prop)
+            local exactReference = operation
+                and operation.targetReference
+                and operation.targetReference == prop
+            local validIdentity = activeState
+                and operation
+                and propKey == activeState.targetKey
+                and (not operation.targetReference or exactReference)
+                or false
+            if activeState
+                and activeState.covered == true
+                and (exactReference or validIdentity)
+            then
+                activeState.state = 'unknown'
+                activeState.value = nil
+                if validIdentity then
+                    local maximumMass = tonumber(prop.MaxMassReclaim)
+                    local reclaimLeft = tonumber(prop.ReclaimLeft)
+                    local liveness = ReclaimPropLiveness(prop)
+                    if prop.ReclaimLeft == nil then reclaimLeft = 1 end
+                    if liveness == 'unknown'
+                        or not maximumMass
+                        or maximumMass < 0
+                        or not reclaimLeft
+                        or reclaimLeft < 0
                     then
-                        local previous = byKey[candidate.key]
-                        if not previous
-                            or candidate.mass > previous.mass
-                            or (candidate.mass == previous.mass
-                                and candidate.observerToken < previous.observerToken)
-                        then
-                            byKey[candidate.key] = candidate
-                            refs[candidate.key] = candidate.reference
+                        activeState.state = 'unknown'
+                        activeState.value = nil
+                    else
+                        local remaining = liveness == 'alive'
+                            and maximumMass * reclaimLeft
+                            or 0
+                        if remaining >= MIN_RECLAIM_MASS then
+                            activeState.state = 'present'
+                            activeState.value = remaining
+                            activeRefs[activeState.targetKey] = prop
+                        else
+                            activeState.state = 'depleted'
+                            activeState.value = 0
                         end
                     end
+                end
+            end
+
+            local candidate = NormalizeReclaimProp(
+                prop,
+                record.position,
+                radius,
+                record.token,
+                tick
+            )
+            if candidate
+                and PositionControlled(controller, candidate.position, massSites)
+            then
+                local previous = byKey[candidate.key]
+                if not previous
+                    or candidate.mass > previous.mass
+                    or (candidate.mass == previous.mass
+                        and candidate.observerToken < previous.observerToken)
+                then
+                    byKey[candidate.key] = candidate
+                    refs[candidate.key] = candidate.reference
                 end
             end
         end
@@ -934,16 +1074,12 @@ local function RefreshReclaim(controller, ownRecords, massSites)
         TableInsert(selected, candidate)
         selectedRefs[candidate.key] = refs[candidate.key]
     end
-    for _, operation in pairs(controller.pending or {}) do
-        if operation.kind == 'reclaim'
-            and operation.targetKey
-            and refs[operation.targetKey]
-        then
-            selectedRefs[operation.targetKey] = refs[operation.targetKey]
-        end
+    for targetKey, reference in pairs(activeRefs) do
+        selectedRefs[targetKey] = reference
     end
     controller.reclaimCandidates = selected
     controller.reclaimRefs = selectedRefs
+    controller.reclaimFreshness = freshness
     return ReclaimSnapshot(controller)
 end
 
@@ -1141,7 +1277,10 @@ end
 local function ReleaseOperation(controller, token, reason)
     local operation = controller.pending[token]
     if not operation then return end
-    if operation.siteKey and controller.reservations[operation.siteKey] then
+    local siteReservation = operation.siteKey
+        and controller.reservations[operation.siteKey]
+        or nil
+    if type(siteReservation) == 'table' and siteReservation.actorToken == token then
         controller.reservations[operation.siteKey] = nil
     end
     if operation.targetKey
@@ -1210,14 +1349,18 @@ local function OperationCompleted(controller, operation, observation, record)
         return state and state.complete == true or false
     end
     if operation.kind == 'reclaim' then
-        local reference = operation.targetKey
-            and controller.reclaimRefs[operation.targetKey]
-            or nil
-        return not PropAlive(reference)
-            or ((tonumber(reference.ReclaimLeft) or 0)
-                * (tonumber(reference.MaxMassReclaim) or 0) < MIN_RECLAIM_MASS)
+        local freshness = controller.reclaimFreshness[operation.actorToken]
+        return freshness
+            and freshness.actorToken == operation.actorToken
+            and freshness.targetKey == operation.targetKey
+            and freshness.observedTick == tonumber(observation.tick)
+            and freshness.queried == true
+            and freshness.covered == true
+            and (freshness.state == 'absent' or freshness.state == 'depleted')
+            or false
     end
     return operation.kind == 'factory_build'
+        and record
         and operation.accepted == true
         and record.idle == true
 end
@@ -1271,15 +1414,21 @@ local function OperationProgress(controller, operation, observation, record)
             progressed = true
         end
     elseif operation.kind == 'reclaim' then
-        local reference = operation.targetKey and controller.reclaimRefs[operation.targetKey] or nil
-        local remaining = reference
-            and (tonumber(reference.MaxMassReclaim) or 0)
-                * (tonumber(reference.ReclaimLeft) or 0)
-            or 0
+        local freshness = operation.actorToken
+            and controller.reclaimFreshness[operation.actorToken]
+            or nil
+        local remaining = freshness
+            and freshness.state == 'present'
+            and freshness.observedTick == tonumber(observation.tick)
+            and tonumber(freshness.value)
+            or nil
         if record and record.busy == true then
             SetOperationPhase(controller, operation, 'reclaiming')
         end
-        if remaining + 0.001 < (tonumber(operation.lastTargetValue) or 1000000000000) then
+        if remaining
+            and remaining + 0.001
+                < (tonumber(operation.lastTargetValue) or 1000000000000)
+        then
             operation.lastTargetValue = remaining
             progressed = true
         end
@@ -1288,6 +1437,35 @@ local function OperationProgress(controller, operation, observation, record)
         operation.lastProgressTick = tonumber(observation.tick) or operation.lastProgressTick
     end
     return progressed
+end
+
+local function RequestOperationCancellation(controller, operation, record, reason)
+    local actor = LiveOwnedActor(
+        controller,
+        operation.actorToken,
+        record,
+        record and record.role or nil
+    )
+    if not actor then return false end
+    local tick = CurrentTick(controller)
+    if operation.phase ~= 'cancelling' then
+        operation.cancelReason = reason or 'timeout'
+        operation.cancelRequestedTick = tick
+        operation.cancelAttempts = 0
+        operation.cancelClearSucceeded = false
+        operation.cancelClearTick = nil
+        SetOperationPhase(controller, operation, 'cancelling')
+    end
+    if operation.cancelClearSucceeded == true
+        and operation.cancelClearTick == tick
+    then
+        return true
+    end
+    local ok = pcall(function() IssueClearCommands({ actor }) end)
+    operation.cancelAttempts = (tonumber(operation.cancelAttempts) or 0) + 1
+    operation.cancelClearTick = tick
+    operation.cancelClearSucceeded = ok
+    return ok
 end
 
 local function OrderAllowed(controller, signature)
@@ -1386,6 +1564,10 @@ local function RecordPending(controller, intent, record)
         clusterKey = intent.clusterKey,
         targetToken = intent.targetToken,
         targetKey = intent.targetKey,
+        targetReference = intent.kind == 'reclaim'
+            and intent.targetKey
+            and controller.reclaimRefs[intent.targetKey]
+            or nil,
         targetValue = intent.targetValue,
         lastTargetValue = intent.targetValue,
         observerToken = intent.observerToken,
@@ -1604,7 +1786,7 @@ local function LiveOwnedReference(controller, token, expectedRole)
 end
 
 local function LiveVisionRadius(actor)
-    if not actor or SafeCall(true, actor.IsIntelEnabled, actor, 'Vision') == false then
+    if not actor or SafeCall(false, actor.IsIntelEnabled, actor, 'Vision') ~= true then
         return nil
     end
     local radius = tonumber(SafeCall(nil, actor.GetIntelRadius, actor, 'Vision'))
@@ -1711,6 +1893,13 @@ local function ExecuteReclaim(controller, intent, record)
     then
         return false
     end
+    local activeReclaimJobs = 0
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.kind == 'reclaim' then
+            activeReclaimJobs = activeReclaimJobs + 1
+        end
+    end
+    if activeReclaimJobs >= MAX_ACTIVE_RECLAIM_JOBS then return false end
     local actor, actorPosition = LiveOwnedActor(controller, intent.actorToken, record, 'engineer')
     local candidate = ReclaimCandidate(controller, intent.targetKey)
     local target = controller.reclaimRefs[intent.targetKey]
@@ -2360,19 +2549,22 @@ end
 
 local function ExecuteRetreat(controller, intent, record)
     if record.role ~= 'acu' or record.complete ~= true then return false end
-    local actor = controller.unitRefs[intent.actorToken]
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'acu')
     local position = TerrainPosition(intent.position)
     if not actor or not position then return false end
-    ReleaseOperation(controller, intent.actorToken, 'retreat_preempted')
     local signature = Signature(intent)
         .. ':safety:' .. tostring(controller.safetyEpisodes.retreat)
     if OrderCoolingDown(controller, signature) then return false end
     local clearKey = 'retreat:' .. tostring(controller.safetyEpisodes.retreat)
         .. ':' .. intent.actorToken
-    if not controller.safetyCleared[clearKey] then
+    local preemptingOperation = controller.pending[intent.actorToken] ~= nil
+    if preemptingOperation or not controller.safetyCleared[clearKey] then
         local clearOk = pcall(function() IssueClearCommands({ actor }) end)
         if not clearOk then return false end
         controller.safetyCleared[clearKey] = true
+    end
+    if preemptingOperation then
+        ReleaseOperation(controller, intent.actorToken, 'retreat_preempted')
     end
     local ok = pcall(function() IssueMove({ actor }, position) end)
     if not ok then return false end
@@ -2440,6 +2632,7 @@ Controller.Create = function(brain)
         foundationReservations = {},
         reclaimCandidates = {},
         reclaimRefs = {},
+        reclaimFreshness = {},
         blockedSites = {},
         rallied = {},
         waveAssignments = {},
@@ -2614,10 +2807,26 @@ Controller.Reconcile = function(controller, observation)
         local operation = controller.pending[token]
         local record = records[token]
         local elapsed = tick - operation.issuedTick
-        if not record then
-            ReleaseOperation(controller, token, 'actor_missing')
-        elseif OperationCompleted(controller, operation, observation, record) then
+        if OperationCompleted(controller, operation, observation, record) then
             ReleaseOperation(controller, token, nil)
+        elseif not record then
+            ReleaseOperation(controller, token, 'actor_missing')
+        elseif operation.phase == 'cancelling' then
+            local actor = LiveOwnedActor(controller, token, record, record.role)
+            if not actor then
+                ReleaseOperation(controller, token, 'actor_missing')
+            elseif record.idle == true
+                and tick > (tonumber(operation.cancelRequestedTick) or tick)
+            then
+                ReleaseOperation(controller, token, operation.cancelReason or 'timeout')
+            else
+                RequestOperationCancellation(
+                    controller,
+                    operation,
+                    record,
+                    operation.cancelReason or 'timeout'
+                )
+            end
         elseif operation.kind == 'assist_structure'
             and (not operation.targetToken or not records[operation.targetToken])
         then
@@ -2636,7 +2845,23 @@ Controller.Reconcile = function(controller, observation)
             then
                 ReleaseOperation(controller, token, 'rejected')
             elseif tick >= (tonumber(operation.deadlineTick) or (operation.issuedTick + OPERATION_TIMEOUT_TICKS)) then
-                ReleaseOperation(controller, token, 'timeout')
+                if StructureOperation(operation) or operation.kind == 'reclaim' then
+                    if record.idle == true then
+                        ReleaseOperation(controller, token, 'timeout')
+                    elseif not RequestOperationCancellation(
+                        controller,
+                        operation,
+                        record,
+                        'timeout'
+                    ) then
+                        local actor = LiveOwnedActor(controller, token, record, record.role)
+                        if not actor then
+                            ReleaseOperation(controller, token, 'actor_missing')
+                        end
+                    end
+                else
+                    ReleaseOperation(controller, token, 'timeout')
+                end
             elseif elapsed >= VERIFY_TICKS then
                 if record.busy then operation.accepted = true end
                 if not operation.accepted and elapsed > REJECT_TICKS then
@@ -2646,7 +2871,19 @@ Controller.Reconcile = function(controller, observation)
                     and tick - (tonumber(operation.lastProgressTick) or operation.issuedTick)
                         > BUILD_STALL_TICKS
                 then
-                    ReleaseOperation(controller, token, 'stalled')
+                    if record.idle == true then
+                        ReleaseOperation(controller, token, 'stalled')
+                    elseif not RequestOperationCancellation(
+                        controller,
+                        operation,
+                        record,
+                        'stalled'
+                    ) then
+                        local actor = LiveOwnedActor(controller, token, record, record.role)
+                        if not actor then
+                            ReleaseOperation(controller, token, 'actor_missing')
+                        end
+                    end
                 elseif not StructureOperation(operation)
                     and elapsed > OPERATION_TIMEOUT_TICKS
                 then

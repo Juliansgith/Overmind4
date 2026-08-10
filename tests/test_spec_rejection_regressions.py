@@ -254,7 +254,16 @@ def test_tiny_periodic_travel_progress_cannot_extend_job_past_derived_deadline_f
     observation = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, observation)
 
+    assert harness.controller.pending["1:1"].phase == "cancelling"
+    assert harness.controller.reservations["far"] is not None
+    assert len(harness.calls.clear) == 1
+    engineer.options.idleState = True
+    engineer.options.states = lua_value(harness.lua, {})
+    harness.brain.tick = deadline + 2
+    observation = harness.observe()
+    harness.lua.globals().Controller.Reconcile(harness.controller, observation)
     assert harness.controller.pending["1:1"] is None
+    assert harness.controller.reservations["far"] is None
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ local COMMANDER_PUSH_HEALTH_RATIO = 0.75
 local LOW_ENERGY_STORED_RATIO = 0.35
 local MIN_RECOVERY_ENGINEERS = 1
 local CONTROLLED_RECLAIM_RADIUS = 10
+local MAX_ACTIVE_RECLAIM_JOBS = 4
 local TableGetn = table.getn
 local TableInsert = table.insert
 
@@ -621,9 +622,19 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     end)
     local virtualReclaim = {}
     local virtualFoundations = {}
+    local activeReclaimJobs = 0
     for _, operation in ipairs(snapshot.pending or {}) do
         if operation.targetKey then virtualReclaim[operation.targetKey] = true end
         if operation.targetToken then virtualFoundations[operation.targetToken] = true end
+        if operation.kind == 'reclaim' then
+            activeReclaimJobs = activeReclaimJobs + 1
+        end
+    end
+    if macro then
+        activeReclaimJobs = math.max(
+            activeReclaimJobs,
+            tonumber(macro.activeReclaimJobs) or 0
+        )
     end
     local placementIndex = {
         power_generator = (counts.power_generator or 0) + 1,
@@ -747,6 +758,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and not underContact
             and not plannedReclaim
             and not constructionPlanned
+            and activeReclaimJobs < MAX_ACTIVE_RECLAIM_JOBS
             and (tonumber(macro.constructionBacklog) or 0) <= 0
         then
             for _, candidate in ipairs(reclaimCandidates) do
@@ -758,6 +770,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     and ReclaimVisibleToEngineer(candidate, engineer)
                 then
                     plannedReclaim = true
+                    activeReclaimJobs = activeReclaimJobs + 1
                     virtualReclaim[candidate.key] = true
                     intent = {
                         kind = 'reclaim',
