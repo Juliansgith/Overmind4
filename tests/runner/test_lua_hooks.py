@@ -312,3 +312,20 @@ def test_hash_extra_armies_are_sorted_deterministically_before_current_civilians
         "ARMY_17",
         "NEUTRAL_CIVILIAN",
     ]
+
+
+def test_ordered_extra_army_array_preserves_faf_token_order() -> None:
+    lua, _, launched = _runtime(_valid_args())
+    map_utils = lua.globals().import_("/lua/ui/maputil.lua")
+    map_utils.GetExtraArmies = lambda _: lua.table_from(["ARMY_9", "ARMY_10"])
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    team_info = launched[0].teamInfo
+    assert [team_info[index].ArmyName for index in range(5, 9)] == [
+        "ARMY_9",
+        "ARMY_10",
+        "ARMY_17",
+        "NEUTRAL_CIVILIAN",
+    ]

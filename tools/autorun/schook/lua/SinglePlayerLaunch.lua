@@ -212,13 +212,27 @@ function StartCommandLineSession(mapName, isPerfTest)
     local nextIndex = armyCount + 1
     local extras = MapUtils.GetExtraArmies(scenario)
     if extras then
-        local extraNames = {}
-        for _, armyName in pairs(extras) do
-            table.insert(extraNames, armyName)
+        local orderedCount = table.getn(extras)
+        for index = 1, orderedCount do
+            AddCivilian(sessionInfo.teamInfo, nextIndex, extras[index])
+            nextIndex = nextIndex + 1
         end
-        table.sort(extraNames)
-        for index = 1, table.getn(extraNames) do
-            AddCivilian(sessionInfo.teamInfo, nextIndex, extraNames[index])
+
+        -- FAF returns an ordered token array. Preserve that order while retaining
+        -- a deterministic fallback for non-array entries supplied by custom maps.
+        local unorderedNames = {}
+        for key, armyName in pairs(extras) do
+            local isOrderedIndex = type(key) == 'number'
+                and key >= 1
+                and key <= orderedCount
+                and key == math.floor(key)
+            if not isOrderedIndex then
+                table.insert(unorderedNames, armyName)
+            end
+        end
+        table.sort(unorderedNames)
+        for index = 1, table.getn(unorderedNames) do
+            AddCivilian(sessionInfo.teamInfo, nextIndex, unorderedNames[index])
             nextIndex = nextIndex + 1
         end
     end
