@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import re
+import secrets
+import subprocess
+from typing import Callable, Mapping
+
+from .installation import (
+    PINNED_HASHES,
+    RuntimeLayout,
+    install_generated_init,
+    read_init_source,
+    transform_init,
+    verify_installation,
+)
+from .model import FAF_BUILD, FAF_COMMIT, MOD_UID, RunConfig
+from .parsing import Outcome, ProcessObservation, classify_outcome, parse_log
+from .plan import ArtifactPaths, build_argv
+from .process import Monitor, ProcessHandle, spawn_owned
+from .reporting import render_json, render_markdown
+
+
+Spawn = Callable[[list[str], Path], ProcessHandle]
+
+
+def _default_run_id() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"om4-{timestamp}-{secrets.token_hex(4)}"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _git_commit(repository: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _hash_files(files: list[Path], base: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(base).as_posix().lower()):
+        relative = path.relative_to(base).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(path.read_bytes())
+    return digest.hexdigest().upper()
+
+
+def _content_hash(repository: Path) -> str:
+    files: list[Path] = []
+    for relative in ("mod_info.lua", "hook", "lua", "tools/autorun"):
+        path = repository / relative
+        if path.is_file():
+            files.append(path)
+        elif path.is_dir():
+            files.extend(item for item in path.rglob("*") if item.is_file())
+    return _hash_files(files, repository)
+
+
+def _map_fingerprint(map_id: str) -> dict[str, object]:
+    roots = (
+        Path(
+            "C:/Program Files (x86)/Steam/steamapps/common/"
+            "Supreme Commander Forged Alliance/maps"
+        ),
+        Path(
+            "C:/Users/DEV - PCOM/Documents/My Games/Gas Powered Games/"
+            "Supreme Commander Forged Alliance/maps"
+        ),
+    )
+    map_directory = next((root / map_id for root in roots if (root / map_id).is_dir()), None)
+    if map_directory is None:
+        raise FileNotFoundError(
+            f"map folder for {map_id} was not found in the pinned Steam or user vault"
+        )
+    files = [item for item in map_directory.rglob("*") if item.is_file()]
+    scenario = map_directory / f"{map_id}_scenario.lua"
+    version: int | None = None
+    if scenario.is_file():
+        match = re.search(r"(?m)^\s*version\s*=\s*(\d+)\s*$", scenario.read_text("utf-8"))
+        version = int(match.group(1)) if match else None
+    return {"version": version, "sha256": _hash_files(files, map_directory)}
+
+
+@dataclass(frozen=True)
+class RunnerDependencies:
+    layout: RuntimeLayout
+    expected_hashes: Mapping[str, str]
+    run_id_factory: Callable[[], str]
+    utc_now: Callable[[], str]
+    git_commit: Callable[[Path], str | None]
+    content_hash: Callable[[Path], str]
+    map_fingerprint: Callable[[str], dict[str, object]]
+    spawn: Spawn
+    monitor: Monitor
+
+    @classmethod
+    def default(cls, repository: Path) -> "RunnerDependencies":
+        return cls(
+            layout=RuntimeLayout.default(repository),
+            expected_hashes=PINNED_HASHES,
+            run_id_factory=_default_run_id,
+            utc_now=_utc_now,
+            git_commit=_git_commit,
+            content_hash=_content_hash,
+            map_fingerprint=_map_fingerprint,
+            spawn=spawn_owned,
+            monitor=Monitor(),
+        )
+
+
+@dataclass(frozen=True)
+class RunnerResult:
+    run_id: str
+    dry_run: bool
+    paths: ArtifactPaths
+    argv: list[str]
+    outcome: Outcome | None
+
+
+def _canonical_json(document: object) -> str:
+    return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+
+
+def _config_hash(config: RunConfig) -> str:
+    encoded = json.dumps(
+        config.document(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest().upper()
+
+
+class Runner:
+    def __init__(self, repository: Path, dependencies: RunnerDependencies | None = None) -> None:
+        self.repository = repository.resolve()
+        self.dependencies = dependencies or RunnerDependencies.default(self.repository)
+
+    def run(
+        self,
+        config: RunConfig,
+        output_directory: Path,
+        *,
+        dry_run: bool,
+    ) -> RunnerResult:
+        deps = self.dependencies
+        hashes = verify_installation(deps.layout, deps.expected_hashes)
+        # Validate the exact init transformation even in dry-run, but write nothing.
+        transform_init(
+            read_init_source(deps.layout.source_init),
+            deps.layout.schook_directory,
+            hashes["source_init"],
+        )
+        run_id = deps.run_id_factory()
+        if not output_directory.is_absolute():
+            output_directory = self.repository / output_directory
+        output_directory = output_directory.resolve()
+        paths = ArtifactPaths.for_run(output_directory, run_id)
+        argv = build_argv(
+            deps.layout.executable,
+            deps.layout.generated_init,
+            config,
+            paths,
+            run_id,
+        )
+        if dry_run:
+            return RunnerResult(run_id, True, paths, argv, None)
+
+        if paths.run_dir.exists():
+            raise FileExistsError(f"run directory already exists: {paths.run_dir}")
+        install_generated_init(deps.layout, deps.expected_hashes)
+        paths.run_dir.mkdir(parents=True, exist_ok=False)
+        created_at = deps.utc_now()
+        map_data = deps.map_fingerprint(config.map_id)
+        manifest = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "created_at": created_at,
+            "faf": {
+                "build": FAF_BUILD,
+                "commit": FAF_COMMIT,
+                "executable": str(deps.layout.executable),
+                "source_init": str(deps.layout.source_init),
+                "generated_init": str(deps.layout.generated_init),
+                "lua_archive": str(deps.layout.lua_archive),
+                "hashes": hashes,
+            },
+            "overmind4": {
+                "uid": MOD_UID,
+                "git_commit": deps.git_commit(self.repository),
+                "content_sha256": deps.content_hash(self.repository),
+            },
+            "config": config.document(),
+            "config_sha256": _config_hash(config),
+            "map": {"id": config.map_id, **map_data},
+            "opponent": {
+                "source": "FAF stock",
+                "source_commit": FAF_COMMIT,
+                "personality": config.opponent_ai,
+                "cheats": False,
+            },
+            "active_sim_mod_uids": [MOD_UID],
+            "argv": argv,
+            "artifacts": {
+                "log": str(paths.log_path),
+                "replay": str(paths.replay_path),
+                "report_json": str(paths.report_json_path),
+                "report_markdown": str(paths.report_markdown_path),
+            },
+        }
+        with paths.manifest_path.open("x", encoding="utf-8", newline="") as handle:
+            handle.write(_canonical_json(manifest))
+
+        try:
+            process = deps.spawn(argv, deps.layout.executable.parent)
+            observation = deps.monitor.wait(
+                process, paths.log_path, config.wall_time_limit
+            )
+        except OSError as error:
+            observation = ProcessObservation(
+                exit_code=None,
+                wall_seconds=0.0,
+                fail_fast_reason=f"process-launch-error:{type(error).__name__}",
+            )
+
+        log_text = (
+            paths.log_path.read_text(encoding="utf-8", errors="replace")
+            if paths.log_path.is_file()
+            else ""
+        )
+        telemetry = parse_log(log_text, run_id, config.our_slot)
+        outcome = classify_outcome(telemetry, observation)
+        paths.report_json_path.write_text(
+            render_json(outcome, run_id), encoding="utf-8", newline=""
+        )
+        paths.report_markdown_path.write_text(
+            render_markdown(outcome, run_id), encoding="utf-8", newline=""
+        )
+        return RunnerResult(run_id, False, paths, argv, outcome)
