@@ -296,10 +296,9 @@ local function PendingArray(controller)
 end
 
 local function CanUnitBuild(unit, blueprintId)
-    if not unit or not blueprintId or type(unit.CanBuild) ~= 'function' then
-        return false
-    end
-    return SafeCall(false, unit.CanBuild, unit, blueprintId) == true
+    if not unit or not blueprintId then return false end
+    local ok, result = pcall(function() return unit:CanBuild(blueprintId) end)
+    return ok and result ~= nil and result ~= false
 end
 
 local function UnitToken(controller, unit, entityId)

@@ -294,6 +294,79 @@ def test_incomplete_paused_upgrading_busy_and_cannot_build_are_fail_closed() -> 
     assert observed[4]["canBuild"]["tank"] is False
 
 
+def test_can_build_invokes_engine_bound_callable_with_owner_and_accepts_truthy_result() -> None:
+    harness = make_harness()
+    acu = harness.unit(entityId=1, blueprintId="uel0001")
+    harness.lua.globals().probeUnit = acu
+    harness.lua.execute(
+        """
+        boundCanBuildCalls = {}
+        probeUnit.CanBuild = setmetatable({}, {
+            __call = function(callable, owner, blueprintId)
+                table.insert(boundCanBuildCalls, {
+                    ownerMatches = owner == probeUnit,
+                    blueprintId = blueprintId,
+                })
+                return 1
+            end,
+        })
+        """
+    )
+    harness.brain.units = harness.lua.table_from([acu])
+
+    record = plain(harness.observe().units)[0]
+    calls = plain(harness.lua.globals().boundCanBuildCalls)
+
+    assert record["canBuild"] == {
+        "land_factory": True,
+        "power_generator": True,
+        "mass_extractor": True,
+    }
+    assert calls == [
+        {"ownerMatches": True, "blueprintId": "ueb0101"},
+        {"ownerMatches": True, "blueprintId": "ueb1101"},
+        {"ownerMatches": True, "blueprintId": "ueb1103"},
+    ]
+
+
+def test_can_build_colon_method_accepts_non_boolean_truthy_result() -> None:
+    harness = make_harness()
+    acu = harness.unit(entityId=1, blueprintId="uel0001")
+    harness.lua.globals().probeUnit = acu
+    harness.lua.execute(
+        """
+        function probeUnit:CanBuild(blueprintId)
+            if self ~= probeUnit then error('missing method owner') end
+            return 'available'
+        end
+        """
+    )
+    harness.brain.units = harness.lua.table_from([acu])
+
+    record = plain(harness.observe().units)[0]
+
+    assert all(record["canBuild"].values())
+
+
+def test_can_build_missing_error_false_and_nil_results_fail_closed() -> None:
+    definitions = (
+        "probeUnit.CanBuild = nil",
+        "function probeUnit:CanBuild(blueprintId) error('engine failure') end",
+        "function probeUnit:CanBuild(blueprintId) return false end",
+        "function probeUnit:CanBuild(blueprintId) return nil end",
+    )
+    for definition in definitions:
+        harness = make_harness()
+        acu = harness.unit(entityId=1, blueprintId="uel0001")
+        harness.lua.globals().probeUnit = acu
+        harness.lua.execute(definition)
+        harness.brain.units = harness.lua.table_from([acu])
+
+        record = plain(harness.observe().units)[0]
+
+        assert not any(record["canBuild"].values()), definition
+
+
 def test_rally_only_queue_is_idle_but_active_build_and_moving_actor_are_busy() -> None:
     harness = make_harness()
     rally = {"commandType": 2, "type": "Move", "position": [35, 2, 45], "isRally": True}
