@@ -426,7 +426,7 @@ def combat_snapshot(combat: list[str], tick: int = 2000, arty: int | None = None
 
 
 def test_acu_emergency_preempts_all_build_and_attack_intents() -> None:
-    snapshot = combat_snapshot(["tank"] * 15 + ["artillery"] * 3)
+    snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 4)
     snapshot["units"][0]["healthRatio"] = 0.54
     result = decide(snapshot)
     assert result[0]["kind"] == "retreat"
@@ -436,7 +436,7 @@ def test_acu_emergency_preempts_all_build_and_attack_intents() -> None:
 
 
 def test_low_health_acu_retreat_allows_independent_factory_production() -> None:
-    snapshot = combat_snapshot(["tank"] * 15 + ["artillery"] * 3)
+    snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 4)
     snapshot["units"][0]["healthRatio"] = 0.54
     for factory in (unit for unit in snapshot["units"] if unit["role"] == "land_factory"):
         factory["idle"] = True
@@ -454,11 +454,11 @@ def test_low_health_acu_retreat_allows_independent_factory_production() -> None:
 
 
 def test_current_intel_defense_preempts_expansion_and_attack() -> None:
-    snapshot = combat_snapshot(["tank"] * 15 + ["artillery"] * 3)
+    snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 4)
     snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": False}
     result = decide(snapshot)
     defense = intents_of(result, "defend_wave")
-    assert defense and len(defense[0]["actorTokens"]) == 18
+    assert defense and len(defense[0]["actorTokens"]) == 24
     assert not intents_of(result, "build_structure")
     assert not intents_of(result, "attack_wave")
 
@@ -508,9 +508,21 @@ def test_off_staging_defenders_regroup_after_contact_clears() -> None:
     assert regroup[0]["position"] == snapshot["stagingPosition"]
 
 
-def test_twenty_three_with_only_three_artillery_never_launches_at_any_time_or_state() -> None:
+def test_twenty_four_with_only_three_artillery_never_launches_at_any_time_or_state() -> None:
     for initial_wave_sent in (False, True):
-        snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 3, tick=999999)
+        snapshot = combat_snapshot(["tank"] * 21 + ["artillery"] * 3, tick=999999)
+        snapshot["state"] = {
+            "initialWaveSent": initial_wave_sent,
+            "lastWaveTick": -999999,
+            "lastReinforcementTick": -999999,
+        }
+
+        assert not intents_of(decide(snapshot), "attack_wave")
+
+
+def test_twenty_three_with_four_artillery_never_launches_at_any_time_or_state() -> None:
+    for initial_wave_sent in (False, True):
+        snapshot = combat_snapshot(["tank"] * 19 + ["artillery"] * 4, tick=999999)
         snapshot["state"] = {
             "initialWaveSent": initial_wave_sent,
             "lastWaveTick": -999999,
@@ -530,6 +542,15 @@ def test_exactly_twenty_four_with_four_artillery_launches_every_available_unit()
         assert len(attack) == 1
         assert len(attack[0]["actorTokens"]) == 24
         assert attack[0]["reason"] == "concentration_gate"
+
+
+def test_oversized_concentrated_wave_launches_every_available_unit() -> None:
+    snapshot = combat_snapshot(["tank"] * 27 + ["artillery"] * 5)
+
+    attack = intents_of(decide(snapshot), "attack_wave")
+
+    assert len(attack) == 1
+    assert len(attack[0]["actorTokens"]) == 32
 
 
 def test_concentration_gate_has_no_time_escape_and_still_requires_target_path() -> None:
