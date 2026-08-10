@@ -312,7 +312,13 @@ def _state_for_failure(reason: str) -> str:
 
 
 def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Outcome:
-    failure_reason = telemetry.failure_reason or process.fail_fast_reason
+    process_reason = process.fail_fast_reason
+    if process_reason == "termination-failure" or (
+        process_reason and process_reason.startswith("preferences-cleanup-error")
+    ):
+        failure_reason = process_reason
+    else:
+        failure_reason = telemetry.failure_reason or process_reason
     if failure_reason:
         state = _state_for_failure(failure_reason)
     elif telemetry.sim_timeout or process.sim_timeout:

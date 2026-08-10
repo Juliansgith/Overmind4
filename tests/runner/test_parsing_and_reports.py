@@ -366,3 +366,66 @@ def test_fail_fast_reasons_map_to_their_explicit_operational_state(
 
     assert outcome.state == expected
     assert outcome.failure_reason == reason
+
+
+@pytest.mark.parametrize(
+    ("engine_line", "cleanup_reason"),
+    [
+        ("warning: LUA ERROR: import failed\n", "termination-failure"),
+        (
+            "info: DESYNC detected\n",
+            "preferences-cleanup-error:PermissionError",
+        ),
+    ],
+)
+def test_safety_cleanup_failure_takes_precedence_over_engine_telemetry(
+    engine_line: str,
+    cleanup_reason: str,
+) -> None:
+    outcome = classify_outcome(
+        parse_log(engine_line, "run-1", our_slot=1),
+        ProcessObservation(
+            exit_code=None,
+            wall_seconds=2,
+            fail_fast_reason=cleanup_reason,
+        ),
+    )
+
+    assert outcome.state == "crash"
+    assert outcome.failure_reason == cleanup_reason
+
+
+@pytest.mark.parametrize(
+    ("engine_line", "process_reason", "expected_reason", "expected_state"),
+    [
+        (
+            "warning: LUA ERROR: import failed\n",
+            "process-monitor-error:PermissionError",
+            "lua-error",
+            "load-error",
+        ),
+        (
+            "info: DESYNC detected\n",
+            "process-launch-error:OSError",
+            "desync",
+            "desync",
+        ),
+    ],
+)
+def test_genuine_engine_failure_precedes_non_cleanup_process_diagnostics(
+    engine_line: str,
+    process_reason: str,
+    expected_reason: str,
+    expected_state: str,
+) -> None:
+    outcome = classify_outcome(
+        parse_log(engine_line, "run-1", our_slot=1),
+        ProcessObservation(
+            exit_code=None,
+            wall_seconds=2,
+            fail_fast_reason=process_reason,
+        ),
+    )
+
+    assert outcome.state == expected_state
+    assert outcome.failure_reason == expected_reason
