@@ -8,9 +8,12 @@ standard Easy/Normal opponent reliably. The long-term target is a deliberately
 defined, version-pinned benchmark against M28 rather than the literally
 unbounded phrase "all situations".
 
-No AI implementation has been started yet. That is intentional: the next phase
-must begin with failing tests for the smallest registration and brain-lifecycle
-slice, then add only enough production code to pass them.
+Overmind4 now has a tested, fully custom first controller and a pinned live win
+against FAF Easy. The current implementation is intentionally narrow: UEF on
+Open Palms, a T1 land opening, concentrated forces, and a one-time
+commander-led attack. See the
+[v1 Easy canary report](13-v1-easy-canary.md) for the exact evidence and claim
+boundary.
 
 ## What we know now
 
@@ -29,6 +32,13 @@ slice, then add only enough production code to pass them.
 - In the deployed build, both lobby personality keys `easy` and `medium` select
   `lua/aibrains/medium-ai.lua`. They remain separate registration/benchmark
   cases, but they are not two distinct stock brain classes.
+- The v1 controller derives directly from the standard `AIBrain` only for
+  engine lifecycle/bookkeeping. Its economy, production, grouping, attack, and
+  commander decisions are Overmind4 code; it does not initialize the stock
+  builder/skirmish strategy systems.
+- The version-pinned graphical match runner launches one isolated match,
+  validates lifecycle and official results, retains logs/replays/preferences,
+  and kills only its owned process tree.
 - The strongest long-term design is a custom brain with a pure decision core,
   thin FAF adapters, event-fed state, one scheduler, one economy reservation
   ledger, and one order arbiter.
@@ -50,6 +60,7 @@ slice, then add only enough production code to pass them.
 10. [Recommended architecture and roadmap](10-architecture-and-roadmap.md)
 11. [API and source index](11-api-and-source-index.md)
 12. [Open questions and Discord checklist](12-open-questions-and-discord-checklist.md)
+13. [V1 Easy canary result](13-v1-easy-canary.md)
 
 ## Evidence labels
 
@@ -102,7 +113,8 @@ Not yet proven:
 
 - exact fog-of-war semantics of every threat and reclaim query;
 - stability of all FAF-only single-unit `IssueToUnit*` wrappers;
-- a current supported true-headless match runner;
+- a current supported true-headless match runner (the project runner is
+  automated but still launches the graphical executable);
 - replay binary parsing as a stable result API;
 - a canonical community definition of "beats M28 in all situations".
 

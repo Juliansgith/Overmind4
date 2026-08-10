@@ -3,11 +3,13 @@
 The project instruction is absolute: write extensive tests, including unhappy
 paths, **before** implementation code.
 
-## Research-phase status
+## Current implementation status
 
-This research phase adds documentation only. It deliberately does not scaffold
-`mod_info.lua`, a brain, or a harness because those are production artifacts.
-The next phase begins with a failing test for the smallest loading contract.
+The registration, minimal brain, isolated single-match runner, and narrow UEF
+land controller have now been implemented test-first. The first pinned live
+competitive canary is documented in
+[the v1 Easy result](13-v1-easy-canary.md). It is one reproducible scenario, not
+a win-rate or robustness claim.
 
 ## Red-green-refactor protocol
 
@@ -265,11 +267,18 @@ Validation requires:
 
 - matching start and terminal records;
 - expected build/config fingerprint;
-- no Lua error, desync, crash, invariant failure;
+- no unresolved Lua error, desync, crash, invariant failure;
 - result/reason and game tick;
 - replay/log present;
 - timeout policy applied;
 - process and temporary profile cleaned.
+
+A diagnostic can be retained as a warning only when a valid startup lifecycle,
+matching Overmind terminal result, matching official result, and completed
+result payload prove the match finished. This exception exists for the observed
+stock Easy platoon cleanup error after its own defeat. Startup errors,
+uncorroborated errors, result conflicts, malformed results, desyncs, and runner
+cleanup failures remain hard failures.
 
 Historical
 [FAF-AI-Autorun@7a948025](https://github.com/HardlySoftly/FAF-AI-Autorun/tree/7a9480250f8201980c89721c73b6e6ed3ffb52e2)
@@ -367,8 +376,11 @@ failures visible.
 
 Suggested policies:
 
-- crash, desync, Lua error, missing result, or harness timeout: automatic
-  operational failure and non-win;
+- crash, desync, uncorroborated Lua error, missing result, or harness timeout:
+  automatic operational failure and non-win;
+- a post-startup Lua diagnostic with a fully corroborated terminal result:
+  retain as an explicit warning and count the official result; never erase the
+  diagnostic or its log;
 - deliberate simulation time-limit draw: raw draw, included in score policy;
 - opponent crash proven unrelated to Overmind: retain and label; rerun the pair,
   do not silently delete;

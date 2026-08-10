@@ -452,9 +452,9 @@ Exit: success thresholds per declared corpus version.
 There is no permanent "all situations" finish line. There is an expanding,
 versioned set of situations with reproducible evidence.
 
-## First code change, precisely
+## Historical first code slice
 
-The next task should not be "implement the AI". It should be:
+The implementation began with this deliberately small sequence:
 
 1. add a pinned test runner;
 2. write failing contract tests for mod metadata, one fair AI-list entry, one
@@ -464,4 +464,7 @@ The next task should not be "implement the AI". It should be:
 5. add an engine smoke test proving FAF creates/destroys the brain;
 6. retain structured logs.
 
-Only after this green slice should economy or strategy code exist.
+Only after that green slice did economy or strategy code begin. The current
+narrow vertical controller and its first live Easy win are described in
+[the v1 canary report](13-v1-easy-canary.md); the larger module map above remains
+a boundary guide, not scaffolding that has been created up front.
