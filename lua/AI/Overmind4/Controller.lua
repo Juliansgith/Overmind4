@@ -1871,7 +1871,8 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
             end
             TableInsert(missionTokens, token)
         end
-        if TableGetn(missionTokens) ~= FRONTIER_SCREEN_MAX
+        if TableGetn(missionTokens) < 1
+            or TableGetn(missionTokens) > FRONTIER_SCREEN_MAX
             or screenHasAntiAir
             or not displacedActor
         then
@@ -1883,7 +1884,6 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
                 and COMBAT_ROLES[record.role]
                 and record.complete == true
                 and record.assignedToWave ~= true
-                and not usedActors[token]
                 and not controller.pending[token]
                 and not controller.waveAssignments[token]
                 and not controller.frontierAssignments[token]

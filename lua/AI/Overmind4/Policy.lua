@@ -1063,8 +1063,9 @@ local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
     local screenSize = screenTarget - currentScreen
     local displacedToken = nil
     if screenSize <= 0
-        and currentScreen >= 4
-        and TableGetn(frontierEscorts) >= 4
+        and currentScreen >= 1
+        and currentScreen <= 4
+        and TableGetn(frontierEscorts) == currentScreen
         and not screenHasAntiAir
         and TableGetn(antiAir) > 0
         and TableGetn(available) >= 4
