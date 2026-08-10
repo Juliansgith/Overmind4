@@ -8,6 +8,11 @@ Overmind4 defeated the stock non-cheating FAF Easy AI in the first pinned
 competitive setup. The reporting-fixed confirmation run received the official
 `victory 10`; Easy received `defeat -10` after losing its ACU.
 
+After one swapped-spawn holdout exposed a mobilization defect, commit
+`63948454d973d460e826352c1978b5289d8f2233` fixed that behavior and won both
+declared Open Palms orientations/seeds. This is 2/2 diagnostic matches for the
+final candidate, not a statistical win-rate claim.
+
 This is a narrow capability result, not a robust win-rate claim. It establishes
 that the fully custom controller can complete a legal UEF opening, sustain T1
 production, concentrate a force, merge reinforcements into a commander-led
@@ -96,6 +101,40 @@ target selection, or path availability. The ready cohort has no persistent
 ownership while the ACU stages, so local defense repeatedly steals the offense
 and resets release.
 
+## Transactional mobilization result
+
+The coarse replacement binds the attack-ready cohort before staging:
+
+1. clear the exact eligible cohort;
+2. order the cohort to guard the exact ACU;
+3. move the ACU to staging;
+4. commit mobilization/cohort ownership only if all three commands succeed;
+5. let only unassigned reserves answer contact;
+6. transition the owned survivors into the push, while retaining the 0.75 ACU
+   retreat boundary.
+
+The change was developed from 17 focused RED failures. After implementation,
+124 policy/controller tests and 369 full tests passed, including transaction
+failure, oversized cohort, exact boundary, recycled/dead actor, malformed
+position, all-escort-loss rearm, recovery, and LuaPlus/static contracts.
+
+| Final-candidate run | Orientation/seed | Mobilize | Push | Result |
+|---|---|---:|---:|---|
+| `om4-20260810T172553Z-8c7caf5d` | OM4 slot 2, seed 7778 | tick 3313, 24 | tick 3970, 24 | victory at 656.18s |
+| `om4-20260810T172703Z-2b89e778` | OM4 slot 1, seed 7777 | tick 3268, 24 | tick 3952, 24 | victory at 702.08s |
+
+In the formerly losing orientation, the old code did not push until tick 9901.
+The new code mobilized at the same original readiness point (tick 3313), kept
+the 24 escorts owned through contact, pushed at tick 3970, merged 30
+reinforcements at tick 4978, and killed Easy before its late-game tech advantage
+formed. This directly supports the causal hypothesis rather than merely showing
+a different terminal result.
+
+The final-candidate artifacts are retained at:
+
+- `artifacts/runs/om4-20260810T172553Z-8c7caf5d/`;
+- `artifacts/runs/om4-20260810T172703Z-2b89e778/`.
+
 ## Preserved stock warning
 
 After Easy's defeat result, stock FAF `lua/platoon.lua:1528` logged a
@@ -125,7 +164,8 @@ It validates pinned FAF hashes and the map fingerprint before launch.
 
 Proven:
 
-- fully custom Overmind decisions can beat FAF Easy in this exact setup;
+- fully custom Overmind decisions beat FAF Easy in both declared UEF/Open Palms
+  spawn orientations (seeds 7777 and 7778);
 - the opening, concentration, commander push, reinforcement, and retreat paths
   all executed in the live engine;
 - lifecycle, official result, log, replay, statistics, and cleanup were
@@ -133,14 +173,14 @@ Proven:
 
 Not yet proven:
 
-- unseen seeds, other factions, maps, reclaim layouts, or victory settings;
+- additional unseen seeds, other factions, maps, reclaim layouts, or victory
+  settings;
 - reliable win rate against Easy;
 - the `medium` personality configuration;
 - T2/T3, naval, transport, or general scouting/endgame competence;
 - any competitiveness against M28.
 
-The next one-match experiment is a transactional mobilization state: bind the
-ready 24+4 cohort to the ACU before staging, let only unassigned reserves answer
-base contact, keep the escorted full-health ACU committed, and retain the 0.75
-health hard retreat. The same failed holdout is the falsification target. Full
+The next promotion step is a tiny predeclared Easy holdout gate, then the stock
+`medium` personality if it stays positive. Long-game tech/economy remains the
+largest known fallback gap if an early commander push does not finish. Full
 batches remain a milestone tool, not the daily strategy-development loop.

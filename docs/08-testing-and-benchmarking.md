@@ -8,8 +8,9 @@ paths, **before** implementation code.
 The registration, minimal brain, isolated single-match runner, and narrow UEF
 land controller have now been implemented test-first. The first pinned live
 competitive canary is documented in
-[the v1 Easy result](13-v1-easy-canary.md). It is one reproducible scenario, not
-a win-rate or robustness claim.
+[the v1 Easy result](13-v1-easy-canary.md). The current candidate won the two
+declared Open Palms orientations/seeds, which is a narrow diagnostic gate rather
+than a win-rate or robustness claim.
 
 ## Red-green-refactor protocol
 
