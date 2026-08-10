@@ -970,11 +970,34 @@ Controller.Step = function(controller)
     local tick = CurrentTick(controller)
     if tick - controller.lastSnapshotTick >= SNAPSHOT_INTERVAL_TICKS then
         controller.lastSnapshotTick = tick
+        local acu = nil
+        for _, unit in ipairs(observation.units) do
+            if unit.role == 'acu' then
+                acu = unit
+                break
+            end
+        end
+        local firstIntent = intents[1] or {}
+        local placements = observation.placements or {}
+        local sites = observation.sites or {}
         Emit(controller, 'snapshot', {
             phase = phase,
             units = TableGetn(observation.units),
             pending = CountArray(controller.pending),
             reservations = CountArray(controller.reservations),
+            acu_present = acu ~= nil,
+            acu_complete = acu and acu.complete == true or false,
+            acu_idle = acu and acu.idle == true or false,
+            acu_can_land_factory = acu
+                and acu.canBuild
+                and acu.canBuild.land_factory == true
+                or false,
+            land_factory_placements = TableGetn(placements.land_factory or {}),
+            mass_markers = TableGetn(sites.mass or {}),
+            target_path = observation.targetPath == true,
+            policy_intents = TableGetn(intents),
+            first_intent = tostring(firstIntent.kind or 'none'),
+            first_build_role = tostring(firstIntent.buildRole or 'none'),
         })
     end
 end

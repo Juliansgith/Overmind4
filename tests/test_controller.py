@@ -942,6 +942,35 @@ def test_snapshot_telemetry_is_rate_limited_and_phase_changes_are_explicit() -> 
     assert len(phases) == 1
 
 
+def test_snapshot_telemetry_exposes_opening_gate_inputs_and_policy_output() -> None:
+    harness = make_harness()
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        fraction=1,
+        idleState=True,
+        canBuild={"ueb0101": True},
+    )
+    harness.brain.units = harness.lua.table_from([acu])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    snapshot = next(line for line in harness.logs if "event=snapshot" in line)
+    expected = {
+        "acu_present=true",
+        "acu_complete=true",
+        "acu_idle=true",
+        "acu_can_land_factory=true",
+        "land_factory_placements=13",
+        "mass_markers=3",
+        "target_path=true",
+        "policy_intents=1",
+        "first_intent=build_structure",
+        "first_build_role=land_factory",
+    }
+    assert all(field in snapshot for field in expected)
+
+
 def test_observation_is_single_pass_for_one_thousand_units() -> None:
     harness = make_harness()
     units = [harness.unit(entityId=index, blueprintId="uel0201", position=[index, 2, 20]) for index in range(1, 1001)]
