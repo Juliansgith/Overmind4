@@ -38,6 +38,10 @@ Telemetry.Format = function(kind, fields)
             error('telemetry field names must be strings')
         end
 
+        if not string.find(name, '^[A-Za-z_][A-Za-z0-9_]*$') then
+            error('telemetry field names must be safe identifiers')
+        end
+
         if not ReservedFields[name] then
             table.insert(names, name)
         end

@@ -64,6 +64,46 @@ def test_format_rejects_non_string_field_names() -> None:
         telemetry.Format("metric", fields)
 
 
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "line\nbreak",
+        "carriage\rreturn",
+        "tab\tfield",
+        "pipe|field",
+        "equals=field",
+        "space field",
+        "9starts_with_digit",
+        "",
+    ],
+)
+def test_format_rejects_field_names_outside_safe_identifier_grammar(
+    bad_name: str,
+) -> None:
+    lua, telemetry = load_telemetry()
+    fields = lua.table()
+    fields[bad_name] = "value"
+
+    with pytest.raises(LuaError, match="safe identifiers"):
+        telemetry.Format("metric", fields)
+
+
+def test_format_accepts_safe_identifier_field_names() -> None:
+    lua, telemetry = load_telemetry()
+    fields = lua.table_from(
+        {
+            "_private": "yes",
+            "a": 1,
+            "army_2": 2,
+            "Tick9": 9,
+        }
+    )
+
+    assert telemetry.Format("metric", fields) == (
+        "OM4|v=1|kind=metric|Tick9=9|_private=yes|a=1|army_2=2"
+    )
+
+
 def test_reserved_fields_cannot_override_prefix_or_kind() -> None:
     lua, telemetry = load_telemetry()
     fields = lua.table_from({"v": 999, "kind": "spoofed", "event": "created"})
