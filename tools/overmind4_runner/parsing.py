@@ -24,6 +24,7 @@ class ProcessObservation:
     wall_seconds: float
     wall_timeout: bool = False
     fail_fast_reason: str | None = None
+    sim_timeout: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,9 +117,27 @@ def extract_json_stats(text: str) -> JsonStatsResult:
     return JsonStatsResult(value=valid, seen=True, malformed=valid is None)
 
 
+_LOG_PREFIX = re.compile(r"^\s*(?:(?:debug|info|warning|error):\s*)?", re.IGNORECASE)
+_ENGINE_FAILURES = (
+    (re.compile(r"LUA ERROR(?=\s|:|$)", re.IGNORECASE), "lua-error"),
+    (
+        re.compile(r"ERROR RUNNING LUA SCRIPT(?=\s|:|$)", re.IGNORECASE),
+        "lua-error",
+    ),
+    (re.compile(r"ERROR IMPORTING(?=\s|:|$)", re.IGNORECASE), "import-error"),
+    (re.compile(r"UNABLE TO LOAD MAP(?=\s|:|$)", re.IGNORECASE), "map-load-error"),
+    (re.compile(r"DESYNC(?=\s|:|$)", re.IGNORECASE), "desync"),
+    (
+        re.compile(r"EXCEPTION_ACCESS_VIOLATION(?=\s|:|$)", re.IGNORECASE),
+        "engine-crash",
+    ),
+)
+
+
 def _fields_at_prefix(line: str, prefix: str) -> dict[str, str] | None:
-    marker_at = line.find(prefix)
-    if marker_at < 0:
+    log_prefix = _LOG_PREFIX.match(line)
+    marker_at = log_prefix.end() if log_prefix else 0
+    if not line.startswith(prefix, marker_at):
         return None
     fields: dict[str, str] = {}
     for token in line[marker_at:].strip().split("|")[1:]:
@@ -130,6 +149,10 @@ def _fields_at_prefix(line: str, prefix: str) -> dict[str, str] | None:
 
 def _marker_fields(line: str) -> dict[str, str] | None:
     return _fields_at_prefix(line, HARNESS_PREFIX)
+
+
+def harness_marker_fields(line: str) -> dict[str, str] | None:
+    return _marker_fields(line)
 
 
 def _overmind_fields(line: str) -> dict[str, str] | None:
@@ -146,18 +169,13 @@ def _number(value: str | None) -> float | None:
     return number
 
 
-def _generic_failure(text: str) -> str | None:
-    lowered = text.lower()
-    patterns = (
-        ("desync", "desync"),
-        ("lua error", "lua-error"),
-        ("error importing", "import-error"),
-        ("unable to load map", "map-load-error"),
-        ("exception_access_violation", "engine-crash"),
-    )
-    for needle, reason in patterns:
-        if needle in lowered:
-            return reason
+def detect_engine_failure(text: str) -> str | None:
+    for line in text.splitlines():
+        log_prefix = _LOG_PREFIX.match(line)
+        payload = line[log_prefix.end() :] if log_prefix else line
+        for pattern, reason in _ENGINE_FAILURES:
+            if pattern.match(payload):
+                return reason
     return None
 
 
@@ -166,7 +184,7 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
     sim_seconds: float | None = None
     requested_speed: float | None = None
     sim_timeout = False
-    failure_reason = _generic_failure(text)
+    failure_reason = detect_engine_failure(text)
     positions: dict[str, int] = {}
     events: list[str] = []
     brain_terminal_result: str | None = None
@@ -286,6 +304,8 @@ def _state_for_failure(reason: str) -> str:
         lowered == "engine-crash"
         or lowered == "termination-failure"
         or lowered.startswith("process-launch-error")
+        or lowered.startswith("process-monitor-error")
+        or lowered.startswith("preferences-")
     ):
         return "crash"
     return "load-error"
@@ -295,6 +315,8 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
     failure_reason = telemetry.failure_reason or process.fail_fast_reason
     if failure_reason:
         state = _state_for_failure(failure_reason)
+    elif telemetry.sim_timeout or process.sim_timeout:
+        state = "sim-timeout"
     elif process.wall_timeout:
         state = "wall-timeout"
     elif process.exit_code not in (0, None):
@@ -304,8 +326,6 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
     elif not telemetry.lifecycle.valid:
         failure_reason = telemetry.lifecycle.reason
         state = "load-error"
-    elif telemetry.sim_timeout:
-        state = "sim-timeout"
     elif telemetry.json_stats_malformed:
         state = "malformed"
     elif telemetry.official_result:

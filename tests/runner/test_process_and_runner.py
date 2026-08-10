@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +10,8 @@ import pytest
 
 from tools.overmind4_runner.installation import RuntimeLayout
 from tools.overmind4_runner.model import RunConfig
-from tools.overmind4_runner.process import Monitor, terminate_owned_tree
-from tools.overmind4_runner.runner import Runner, RunnerDependencies
+from tools.overmind4_runner.process import Monitor, detect_fail_fast, terminate_owned_tree
+from tools.overmind4_runner.runner import MapDiscoveryError, Runner, RunnerDependencies
 
 
 class FakeClock:
@@ -61,6 +61,45 @@ class FakeTail:
 
     def read_new(self) -> str:
         return next(self.chunks, "")
+
+
+class RaisingTail:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def read_new(self) -> str:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "info: unit description says desync resistant\n",
+        "debug: documentation example: LUA ERROR: example only\n",
+        "info: tooltip text says unable to load map when missing\n",
+        "warning: prior report mentioned EXCEPTION_ACCESS_VIOLATION but recovered\n",
+    ],
+)
+def test_fail_fast_ignores_benign_unanchored_diagnostic_words(line: str) -> None:
+    assert detect_fail_fast(line, run_id="run-1") is None
+
+
+def test_fail_fast_accepts_only_run_associated_structured_harness_failure() -> None:
+    unrelated = (
+        "OM4HARNESS|v=1|kind=failure|run=other-run|reason=mod_unavailable\n"
+    )
+    associated = (
+        "info: OM4HARNESS|v=1|kind=failure|run=run-1|reason=mod_unavailable\n"
+    )
+
+    assert detect_fail_fast(unrelated, run_id="run-1") is None
+    assert detect_fail_fast(associated, run_id="run-1") == "mod_unavailable"
+
+
+def test_fail_fast_recognizes_actual_anchored_faf_lua_error_format() -> None:
+    line = "warning: Error running lua script: /lua/example.lua(12): failure\n"
+
+    assert detect_fail_fast(line, run_id="run-1") == "lua-error"
 
 
 def test_monitor_terminates_only_the_spawned_pid_tree_on_wall_timeout(tmp_path: Path) -> None:
@@ -115,6 +154,69 @@ def test_monitor_contains_any_cleanup_adapter_failure_and_still_returns_observat
     observation = monitor.wait(process, tmp_path / "owned.log", wall_timeout=2)
 
     assert observation.fail_fast_reason == "termination-failure"
+
+
+def test_monitor_stops_on_matching_structured_sim_timeout_without_waiting_for_wall_cap(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None] * 10, pid=6464)
+    terminated: list[int] = []
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [
+                "OM4HARNESS|v=1|kind=timeout|run=unrelated|sim=1800\n",
+                "OM4HARNESS|v=1|kind=timeout|run=run-1|sim=1800\n",
+            ]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+    )
+
+    assert observation.sim_timeout is True
+    assert observation.wall_timeout is False
+    assert observation.fail_fast_reason is None
+    assert terminated == [6464]
+    assert observation.wall_seconds < 100
+
+
+def test_monitor_recognizes_a_structured_timeout_split_across_tail_reads(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None] * 10, pid=6474)
+    terminated: list[int] = []
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [
+                "info: OM4HARNESS|v=1|kind=time",
+                "out|run=run-1|sim=1800\n",
+            ]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+    )
+
+    assert observation.sim_timeout is True
+    assert terminated == [6474]
 
 
 def test_monitor_fails_fast_on_harness_or_lua_failure_without_touching_other_pids(tmp_path: Path) -> None:
@@ -207,6 +309,7 @@ def _deps(tmp_path: Path) -> tuple[RunnerDependencies, RuntimeLayout, dict[str, 
     spawn = SpawnRecorder(FakeProcess([0]), [])
     deps = RunnerDependencies(
         layout=layout,
+        preferences_directory=tmp_path / "local prefs",
         expected_hashes=expected,
         run_id_factory=lambda: "run-fixed",
         utc_now=lambda: "2026-08-10T12:00:00Z",
@@ -234,8 +337,81 @@ def test_dry_run_performs_zero_writes_and_zero_process_launches(tmp_path: Path) 
     assert result.dry_run is True
     assert not output.exists()
     assert not layout.generated_init.exists()
+    assert not deps.preferences_directory.exists()
     assert layout.source_init.read_bytes() == source_before
     assert spawn.calls == []
+
+
+def test_dry_run_validates_the_requested_map_before_returning_without_writes(
+    tmp_path: Path,
+) -> None:
+    deps, layout, _, spawn = _deps(tmp_path)
+    output = tmp_path / "artifacts"
+
+    def missing_map(_: str) -> dict[str, object]:
+        raise MapDiscoveryError("requested map is missing")
+
+    deps = replace(deps, map_fingerprint=missing_map)
+
+    with pytest.raises(MapDiscoveryError, match="requested map is missing"):
+        Runner(tmp_path / "repo", deps).run(RunConfig(), output, dry_run=True)
+
+    assert not output.exists()
+    assert not layout.generated_init.exists()
+    assert spawn.calls == []
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, OSError, RuntimeError])
+def test_runner_cleans_exact_spawned_tree_and_reports_every_post_spawn_monitor_error(
+    tmp_path: Path,
+    error_type: type[Exception],
+) -> None:
+    deps, layout, _, _ = _deps(tmp_path)
+    process = FakeProcess([None] * 10, pid=6565)
+    spawn = SpawnRecorder(process, [])
+    terminated: list[int] = []
+    monitor = Monitor(
+        now=lambda: 10.0,
+        sleep=lambda _: None,
+        tail_factory=lambda _: RaisingTail(error_type("owned log read failed")),
+        terminate_tree=lambda pid: terminated.append(pid),
+    )
+    deps = replace(deps, spawn=spawn, monitor=monitor)
+
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(), tmp_path / "artifacts", dry_run=False
+    )
+
+    assert terminated == [6565]
+    assert process.waited is True
+    assert result.outcome is not None
+    assert result.outcome.state == "crash"
+    assert result.outcome.failure_reason == f"process-monitor-error:{error_type.__name__}"
+    assert result.paths.report_json_path.is_file()
+
+
+def test_runner_contains_cleanup_failures_after_post_spawn_exception_and_reports_crash(
+    tmp_path: Path,
+) -> None:
+    deps, _, _, _ = _deps(tmp_path)
+    process = BrokenCleanupProcess([None] * 10, pid=6666)
+    spawn = SpawnRecorder(process, [])
+    monitor = Monitor(
+        now=lambda: 10.0,
+        sleep=lambda _: None,
+        tail_factory=lambda _: RaisingTail(PermissionError("owned log denied")),
+        terminate_tree=lambda _: (_ for _ in ()).throw(OSError("taskkill failed")),
+    )
+    deps = replace(deps, spawn=spawn, monitor=monitor)
+
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(), tmp_path / "artifacts", dry_run=False
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.state == "crash"
+    assert result.outcome.failure_reason == "termination-failure"
+    assert result.paths.report_json_path.is_file()
 
 
 def test_relative_output_directory_becomes_absolute_before_it_reaches_faf(tmp_path: Path) -> None:
@@ -274,12 +450,89 @@ def test_real_runner_writes_one_immutable_manifest_and_deterministic_reports(tmp
     assert manifest["map"] == {"id": "SCMP_007", "sha256": "map123", "version": 3}
     assert manifest["active_sim_mod_uids"] == ["0d46fbb2-beeb-4bde-b3c6-8bac28232a4b"]
     assert manifest["argv"] == argv
+    assert manifest["artifacts"]["prefs"] == str(result.paths.prefs_path)
+    prefs_argument = argv[argv.index("/prefs") + 1]
+    assert prefs_argument == "Overmind4-run-fixed.prefs"
+    assert prefs_argument == Path(prefs_argument).name
+    assert not (deps.preferences_directory / prefs_argument).exists()
+    prefs_text = result.paths.prefs_path.read_text(encoding="utf-8")
+    assert "current = 1" in prefs_text
+    assert "Name = 'Overmind4 Harness'" in prefs_text
+    assert "options = {" in prefs_text
+    assert "active_mods = { }" in prefs_text
     assert result.paths.report_json_path.is_file()
     assert result.paths.report_markdown_path.is_file()
     report = json.loads(result.paths.report_json_path.read_text(encoding="utf-8"))
     assert report["completed_at"] == "2026-08-10T12:00:00Z"
     assert report["artifacts_present"] == {"log": False, "replay": False}
     assert "achieved_sim_speed" in report
+
+
+def test_isolated_prefs_collision_is_refused_without_overwrite_or_launch(
+    tmp_path: Path,
+) -> None:
+    deps, _, _, spawn = _deps(tmp_path)
+    deps.preferences_directory.mkdir(parents=True)
+    existing = deps.preferences_directory / "Overmind4-run-fixed.prefs"
+    existing.write_text("user-owned", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="isolated prefs file already exists"):
+        Runner(tmp_path / "repo", deps).run(
+            RunConfig(), tmp_path / "artifacts", dry_run=False
+        )
+
+    assert existing.read_text(encoding="utf-8") == "user-owned"
+    assert spawn.calls == []
+
+
+def test_spawn_failure_removes_only_the_exact_owned_transient_prefs(
+    tmp_path: Path,
+) -> None:
+    deps, _, _, _ = _deps(tmp_path)
+    deps.preferences_directory.mkdir(parents=True)
+    unrelated = deps.preferences_directory / "Game.prefs"
+    unrelated.write_text("user-owned", encoding="utf-8")
+
+    def fail_spawn(_: list[str], __: Path) -> FakeProcess:
+        raise OSError("launch failed")
+
+    deps = replace(deps, spawn=fail_spawn)
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(), tmp_path / "artifacts", dry_run=False
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.state == "crash"
+    assert not (deps.preferences_directory / "Overmind4-run-fixed.prefs").exists()
+    assert unrelated.read_text(encoding="utf-8") == "user-owned"
+
+
+def test_transient_prefs_cleanup_failure_is_contained_and_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps, _, _, _ = _deps(tmp_path)
+    owned_prefs = (
+        deps.preferences_directory / "Overmind4-run-fixed.prefs"
+    ).resolve()
+    original_unlink = Path.unlink
+
+    def fail_owned_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.resolve() == owned_prefs:
+            raise PermissionError("owned prefs is locked")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_owned_unlink)
+
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(), tmp_path / "artifacts", dry_run=False
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.state == "crash"
+    assert result.outcome.failure_reason == "preferences-cleanup-error:PermissionError"
+    assert result.paths.report_json_path.is_file()
+    assert owned_prefs.is_file()
 
 
 def test_manifest_creation_refuses_run_id_collision_instead_of_overwriting(tmp_path: Path) -> None:

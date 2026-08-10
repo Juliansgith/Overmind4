@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
-from .model import RunConfig, validate_identifier
+from .model import RunConfig, ValidationError, validate_identifier
 
 
 @dataclass(frozen=True)
@@ -11,6 +12,8 @@ class ArtifactPaths:
     run_dir: Path
     log_path: Path
     replay_path: Path
+    prefs_path: Path
+    prefs_filename: str
     manifest_path: Path
     report_json_path: Path
     report_markdown_path: Path
@@ -23,6 +26,8 @@ class ArtifactPaths:
             run_dir=run_dir,
             log_path=run_dir / "game.log",
             replay_path=run_dir / "game.scfareplay",
+            prefs_path=run_dir / "overmind4.prefs",
+            prefs_filename=f"Overmind4-{run_id}.prefs",
             manifest_path=run_dir / "manifest.json",
             report_json_path=run_dir / "report.json",
             report_markdown_path=run_dir / "report.md",
@@ -37,6 +42,8 @@ def build_argv(
     run_id: str,
 ) -> list[str]:
     validate_identifier(run_id, "run ID")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", artifacts.prefs_filename):
+        raise ValidationError("prefs filename must be a safe leaf filename")
     ai_wire = ",".join(spec.wire for spec in config.ai_specs)
     return [
         str(executable),
@@ -45,6 +52,8 @@ def build_argv(
         "/exitongameover",
         "/init",
         str(generated_init),
+        "/prefs",
+        artifacts.prefs_filename,
         "/map",
         config.map_id,
         "/log",

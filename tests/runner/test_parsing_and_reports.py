@@ -114,6 +114,28 @@ def test_sim_timeout_has_priority_over_later_ui_result() -> None:
     assert outcome.is_win is False
 
 
+def test_structured_sim_timeout_cannot_be_overridden_by_generic_wall_timeout() -> None:
+    telemetry = parse_log(
+        _valid_lifecycle_prefix()
+        + "OM4HARNESS|v=1|kind=timeout|run=run-1|sim=1800\n",
+        "run-1",
+        our_slot=1,
+    )
+
+    outcome = classify_outcome(
+        telemetry,
+        ProcessObservation(
+            exit_code=None,
+            wall_seconds=300,
+            wall_timeout=True,
+            sim_timeout=True,
+        ),
+    )
+
+    assert outcome.state == "sim-timeout"
+    assert outcome.failure_reason is None
+
+
 def test_result_parser_ignores_score_and_keeps_first_valid_terminal_result() -> None:
     text = (
         _valid_lifecycle_prefix()
@@ -211,6 +233,11 @@ def test_wall_timeout_is_an_operational_failure_and_non_win() -> None:
     ("text", "exit_code", "expected"),
     [
         ("warning: LUA ERROR: import failed\n", 1, "load-error"),
+        (
+            "warning: Error running lua script: /lua/example.lua(12): failure\n",
+            1,
+            "load-error",
+        ),
         ("info: DESYNC detected\n", 0, "desync"),
         ("OM4HARNESS|v=1|kind=failure|run=run-1|reason=mod_missing\n", 1, "load-error"),
         ("EXCEPTION_ACCESS_VIOLATION\n", 1, "crash"),
@@ -229,6 +256,21 @@ def test_operational_failures_have_distinct_states(text: str, exit_code: int, ex
 
     assert outcome.state == expected
     assert outcome.is_win is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "info: unit description says desync resistant\n",
+        "debug: documentation example: LUA ERROR: example only\n",
+        "info: tooltip text says unable to load map when missing\n",
+        "warning: prior report mentioned EXCEPTION_ACCESS_VIOLATION but recovered\n",
+    ],
+)
+def test_log_parser_ignores_benign_unanchored_diagnostic_words(text: str) -> None:
+    telemetry = parse_log(text, "run-1", our_slot=1)
+
+    assert telemetry.failure_reason is None
 
 
 def test_missing_telemetry_uses_null_not_numeric_zero() -> None:

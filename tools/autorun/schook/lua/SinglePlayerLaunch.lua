@@ -1,7 +1,6 @@
 -- Overmind4 FAF 3836 autorun hook.
 -- This file intentionally replaces only the command-line session entry point.
 
-local Prefs = import('/lua/user/prefs.lua')
 local MapUtils = import('/lua/ui/maputil.lua')
 local Mods = import('/lua/mods.lua')
 local Lobby = import('/lua/ui/lobby/lobbycomm.lua')
@@ -184,7 +183,7 @@ function StartCommandLineSession(mapName, isPerfTest)
     local armyCount = table.getn(armies)
     local colorCount = table.getn(GameColors.PlayerColors)
     local sessionInfo = {
-        playerName = Prefs.GetFromCurrentProfile('Name') or 'Overmind4 Harness',
+        playerName = 'Overmind4 Harness',
         createReplay = true,
         scenarioInfo = scenario,
         teamInfo = {},
@@ -261,7 +260,6 @@ function StartCommandLineSession(mapName, isPerfTest)
         AIThreatDisplay = 'threatOff',
     }
 
-    Prefs.SetToCurrentProfile('LoadingFaction', specs[1].Faction)
     Marker('start', runId, {
         'map=' .. Safe(mapName),
         'seed=' .. tostring(seed),

@@ -6,11 +6,26 @@ from typing import Any
 import pytest
 from lupa.lua51 import LuaError, LuaRuntime
 
+from tools.overmind4_runner.runner import ISOLATED_PREFS
+
 
 ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / "tools" / "autorun" / "schook" / "lua" / "SinglePlayerLaunch.lua"
 RESULT_HOOK = ROOT / "tools" / "autorun" / "schook" / "lua" / "ui" / "game" / "gameresult.lua"
 UID = "0d46fbb2-beeb-4bde-b3c6-8bac28232a4b"
+
+
+def test_isolated_prefs_bootstraps_the_profile_shape_required_by_faf_user_init() -> None:
+    lua = LuaRuntime(unpack_returned_tuples=True)
+
+    lua.execute(ISOLATED_PREFS)
+
+    profile = lua.globals().profile
+    assert profile.current == 1
+    assert profile.profiles[1].Name == "Overmind4 Harness"
+    assert profile.profiles[1].options.selectedlanguage == "us"
+    assert lua.globals().options_overrides.language == "us"
+    assert len(lua.globals().active_mods) == 0
 
 
 def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
@@ -293,6 +308,25 @@ def test_unit_cap_argument_controls_the_explicit_session_unit_cap() -> None:
     lua.globals().StartCommandLineSession("SCMP_007", False)
 
     assert launched[0].scenarioInfo.Options.UnitCap == "750"
+
+
+def test_harness_uses_fixed_player_name_without_reading_or_mutating_current_profile() -> None:
+    lua, _, launched = _runtime(_valid_args())
+    profile_calls: list[tuple[str, str, object | None]] = []
+    prefs = lua.globals().import_("/lua/user/prefs.lua")
+    prefs.GetFromCurrentProfile = lambda field: (
+        profile_calls.append(("get", field, None)),
+        "Current User Profile",
+    )[1]
+    prefs.SetToCurrentProfile = lambda field, value: profile_calls.append(
+        ("set", field, value)
+    )
+    lua.execute(HOOK.read_text(encoding="utf-8"))
+
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    assert launched[0].playerName == "Overmind4 Harness"
+    assert profile_calls == []
 
 
 def test_hash_extra_armies_are_sorted_deterministically_before_current_civilians() -> None:

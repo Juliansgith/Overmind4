@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,8 @@ def test_artifact_paths_are_explicit_and_unique() -> None:
     assert first.run_dir != second.run_dir
     assert first.log_path == first.run_dir / "game.log"
     assert first.replay_path == first.run_dir / "game.scfareplay"
+    assert first.prefs_path == first.run_dir / "overmind4.prefs"
+    assert first.prefs_filename == "Overmind4-run-0001.prefs"
     assert first.manifest_path == first.run_dir / "manifest.json"
     assert first.report_json_path == first.run_dir / "report.json"
     assert first.report_markdown_path == first.run_dir / "report.md"
@@ -116,6 +119,9 @@ def test_exact_argv_preserves_paths_with_spaces_as_individual_arguments() -> Non
     assert argv[argv.index("/init") + 1] == str(generated_init)
     assert argv[argv.index("/log") + 1] == str(artifacts.log_path)
     assert argv[argv.index("/savereplay") + 1] == str(artifacts.replay_path)
+    prefs_argument = argv[argv.index("/prefs") + 1]
+    assert prefs_argument == artifacts.prefs_filename
+    assert prefs_argument == Path(prefs_argument).name
     assert argv[argv.index("/aitest") + 1] == "1:overmind4:1:1,2:easy:1:2"
     assert argv[argv.index("/map") + 1] == "SCMP_007"
     assert argv[argv.index("/seed") + 1] == "7777"
@@ -127,3 +133,23 @@ def test_exact_argv_preserves_paths_with_spaces_as_individual_arguments() -> Non
     assert "/nosound" in argv
     assert "/exitongameover" in argv
     assert all('"' not in item for item in argv)
+
+
+@pytest.mark.parametrize(
+    "unsafe_filename",
+    ["C:/temp/Overmind4.prefs", "..\\Game.prefs", "folder/Game.prefs"],
+)
+def test_argv_rejects_non_leaf_engine_prefs_filename(unsafe_filename: str) -> None:
+    artifacts = replace(
+        ArtifactPaths.for_run(Path("C:/reports"), "run-0001"),
+        prefs_filename=unsafe_filename,
+    )
+
+    with pytest.raises(ValidationError, match="prefs filename"):
+        build_argv(
+            Path("C:/FAF/ForgedAlliance.exe"),
+            Path("C:/FAF/init_overmind4.lua"),
+            RunConfig(),
+            artifacts,
+            "run-0001",
+        )

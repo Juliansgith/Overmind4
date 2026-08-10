@@ -7,7 +7,7 @@ import subprocess
 import time
 from typing import Callable, Protocol
 
-from .parsing import ProcessObservation
+from .parsing import ProcessObservation, detect_engine_failure, harness_marker_fields
 
 
 class ProcessHandle(Protocol):
@@ -34,20 +34,36 @@ class IncrementalTail:
         return data.decode("utf-8", errors="replace")
 
 
-def detect_fail_fast(chunk: str) -> str | None:
-    lowered = chunk.lower()
-    patterns = (
-        ("om4harness|v=1|kind=failure", "harness-failure"),
-        ("desync", "desync"),
-        ("lua error", "lua-error"),
-        ("error importing", "import-error"),
-        ("unable to load map", "map-load-error"),
-        ("exception_access_violation", "engine-crash"),
-    )
-    for needle, reason in patterns:
-        if needle in lowered:
-            return reason
+def detect_fail_fast(chunk: str, *, run_id: str | None = None) -> str | None:
+    for line in chunk.splitlines():
+        fields = harness_marker_fields(line)
+        if (
+            fields
+            and run_id is not None
+            and fields.get("v") == "1"
+            and fields.get("run") == run_id
+            and fields.get("kind") == "failure"
+        ):
+            return fields.get("reason") or "harness-failure"
+        engine_failure = detect_engine_failure(line)
+        if engine_failure:
+            return engine_failure
     return None
+
+
+def _has_structured_sim_timeout(chunk: str, run_id: str | None) -> bool:
+    if run_id is None:
+        return False
+    for line in chunk.splitlines():
+        fields = harness_marker_fields(line)
+        if (
+            fields
+            and fields.get("v") == "1"
+            and fields.get("run") == run_id
+            and fields.get("kind") == "timeout"
+        ):
+            return True
+    return False
 
 
 def spawn_owned(argv: list[str], cwd: Path) -> subprocess.Popen[bytes]:
@@ -93,7 +109,7 @@ class Monitor:
         self._terminate_tree = terminate_tree
         self._poll_interval = poll_interval
 
-    def _stop_owned(self, process: ProcessHandle) -> tuple[int | None, bool]:
+    def stop_owned(self, process: ProcessHandle) -> tuple[int | None, bool]:
         cleanup_failed = False
         try:
             self._terminate_tree(process.pid)
@@ -113,36 +129,68 @@ class Monitor:
         process: ProcessHandle,
         owned_log_path: Path,
         wall_timeout: float,
+        *,
+        run_id: str | None = None,
     ) -> ProcessObservation:
-        started = self._now()
-        tail = self._tail_factory(owned_log_path)
+        started: float | None = None
         timeout = False
+        sim_timeout = False
         fail_fast_reason: str | None = None
         exit_code: int | None = None
+        pending_line = ""
 
-        while True:
-            fail_fast_reason = detect_fail_fast(tail.read_new())
-            if fail_fast_reason:
-                exit_code, cleanup_failed = self._stop_owned(process)
-                if cleanup_failed:
-                    fail_fast_reason = "termination-failure"
-                break
+        try:
+            started = self._now()
+            tail = self._tail_factory(owned_log_path)
+            while True:
+                scan_text = pending_line + tail.read_new()
+                last_newline = max(scan_text.rfind("\n"), scan_text.rfind("\r"))
+                pending_line = scan_text[last_newline + 1 :] if last_newline >= 0 else scan_text
+                fail_fast_reason = detect_fail_fast(scan_text, run_id=run_id)
+                if fail_fast_reason:
+                    exit_code, cleanup_failed = self.stop_owned(process)
+                    if cleanup_failed:
+                        fail_fast_reason = "termination-failure"
+                    break
 
-            exit_code = process.poll()
-            if exit_code is not None:
-                break
+                if _has_structured_sim_timeout(scan_text, run_id):
+                    sim_timeout = True
+                    exit_code, cleanup_failed = self.stop_owned(process)
+                    if cleanup_failed:
+                        fail_fast_reason = "termination-failure"
+                    break
 
-            if self._now() - started >= wall_timeout:
-                timeout = True
-                exit_code, cleanup_failed = self._stop_owned(process)
-                if cleanup_failed:
-                    fail_fast_reason = "termination-failure"
-                break
-            self._sleep(self._poll_interval)
+                exit_code = process.poll()
+                if exit_code is not None:
+                    break
+
+                if self._now() - started >= wall_timeout:
+                    timeout = True
+                    exit_code, cleanup_failed = self.stop_owned(process)
+                    if cleanup_failed:
+                        fail_fast_reason = "termination-failure"
+                    break
+                self._sleep(self._poll_interval)
+        except Exception as error:
+            exit_code, cleanup_failed = self.stop_owned(process)
+            fail_fast_reason = (
+                "termination-failure"
+                if cleanup_failed
+                else f"process-monitor-error:{type(error).__name__}"
+            )
+        except BaseException:
+            self.stop_owned(process)
+            raise
+
+        try:
+            wall_seconds = 0.0 if started is None else max(0.0, self._now() - started)
+        except Exception:
+            wall_seconds = 0.0
 
         return ProcessObservation(
             exit_code=exit_code,
-            wall_seconds=max(0.0, self._now() - started),
+            wall_seconds=wall_seconds,
             wall_timeout=timeout,
             fail_fast_reason=fail_fast_reason,
+            sim_timeout=sim_timeout,
         )

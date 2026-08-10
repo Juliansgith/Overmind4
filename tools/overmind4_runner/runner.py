@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -26,6 +27,38 @@ from .reporting import render_json, render_markdown
 
 
 Spawn = Callable[[list[str], Path], ProcessHandle]
+ISOLATED_PREFS = """options_overrides = {
+    language = 'us'
+}
+profile = {
+    current = 1,
+    profiles = {
+        {
+            Name = 'Overmind4 Harness',
+            options = {
+                primary_adapter = 'windowed',
+                secondary_adapter = 'disabled',
+                selectedlanguage = 'us'
+            }
+        }
+    }
+}
+version = {
+    major = 1
+}
+active_mods = { }
+"""
+
+
+def _preferences_directory() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise RuntimeError("LOCALAPPDATA is required to isolate FAF preferences")
+    return (
+        Path(local_app_data)
+        / "Gas Powered Games"
+        / "Supreme Commander Forged Alliance"
+    )
 
 
 def _default_run_id() -> str:
@@ -151,6 +184,7 @@ def fingerprint_map(map_id: str, roots: tuple[Path, ...]) -> dict[str, object]:
 @dataclass(frozen=True)
 class RunnerDependencies:
     layout: RuntimeLayout
+    preferences_directory: Path
     expected_hashes: Mapping[str, str]
     run_id_factory: Callable[[], str]
     utc_now: Callable[[], str]
@@ -167,6 +201,7 @@ class RunnerDependencies:
         map_roots = discover_map_roots(repository, layout.fa_path_file)
         return cls(
             layout=layout,
+            preferences_directory=_preferences_directory(),
             expected_hashes=PINNED_HASHES,
             run_id_factory=_default_run_id,
             utc_now=_utc_now,
@@ -196,6 +231,22 @@ def _config_hash(config: RunConfig) -> str:
         config.document(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("ascii")
     return hashlib.sha256(encoded).hexdigest().upper()
+
+
+def _preserve_and_remove_preferences(runtime_path: Path, artifact_path: Path) -> str | None:
+    snapshot_failure: str | None = None
+    try:
+        artifact_path.write_bytes(runtime_path.read_bytes())
+    except OSError as error:
+        snapshot_failure = f"preferences-snapshot-error:{type(error).__name__}"
+
+    try:
+        runtime_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        return f"preferences-cleanup-error:{type(error).__name__}"
+    return snapshot_failure
 
 
 class Runner:
@@ -230,15 +281,25 @@ class Runner:
             paths,
             run_id,
         )
+        map_data = deps.map_fingerprint(config.map_id)
         if dry_run:
             return RunnerResult(run_id, True, paths, argv, None)
 
         if paths.run_dir.exists():
             raise FileExistsError(f"run directory already exists: {paths.run_dir}")
+        preferences_directory = deps.preferences_directory.resolve()
+        runtime_prefs_path = (preferences_directory / paths.prefs_filename).resolve()
+        if runtime_prefs_path.parent != preferences_directory:
+            raise RuntimeError("isolated prefs filename escaped the FAF preferences directory")
+        if runtime_prefs_path.exists():
+            raise FileExistsError(
+                f"isolated prefs file already exists: {runtime_prefs_path}"
+            )
         install_generated_init(deps.layout, deps.expected_hashes)
         paths.run_dir.mkdir(parents=True, exist_ok=False)
+        with paths.prefs_path.open("x", encoding="utf-8", newline="") as handle:
+            handle.write(ISOLATED_PREFS)
         created_at = deps.utc_now()
-        map_data = deps.map_fingerprint(config.map_id)
         manifest = {
             "schema_version": 1,
             "run_id": run_id,
@@ -267,10 +328,18 @@ class Runner:
                 "cheats": False,
             },
             "active_sim_mod_uids": [MOD_UID],
+            "preferences": {
+                "argument": paths.prefs_filename,
+                "runtime_path": str(runtime_prefs_path),
+                "initial_sha256": hashlib.sha256(
+                    ISOLATED_PREFS.encode("utf-8")
+                ).hexdigest().upper(),
+            },
             "argv": argv,
             "artifacts": {
                 "log": str(paths.log_path),
                 "replay": str(paths.replay_path),
+                "prefs": str(paths.prefs_path),
                 "report_json": str(paths.report_json_path),
                 "report_markdown": str(paths.report_markdown_path),
             },
@@ -278,16 +347,53 @@ class Runner:
         with paths.manifest_path.open("x", encoding="utf-8", newline="") as handle:
             handle.write(_canonical_json(manifest))
 
+        preferences_directory.mkdir(parents=True, exist_ok=True)
+        with runtime_prefs_path.open("x", encoding="utf-8", newline="") as handle:
+            handle.write(ISOLATED_PREFS)
+        preferences_failure: str | None = None
         try:
-            process = deps.spawn(argv, deps.layout.executable.parent)
-            observation = deps.monitor.wait(
-                process, paths.log_path, config.wall_time_limit
+            try:
+                process = deps.spawn(argv, deps.layout.executable.parent)
+            except Exception as error:
+                observation = ProcessObservation(
+                    exit_code=None,
+                    wall_seconds=0.0,
+                    fail_fast_reason=f"process-launch-error:{type(error).__name__}",
+                )
+            else:
+                try:
+                    observation = deps.monitor.wait(
+                        process,
+                        paths.log_path,
+                        config.wall_time_limit,
+                        run_id=run_id,
+                    )
+                except Exception as error:
+                    exit_code, cleanup_failed = deps.monitor.stop_owned(process)
+                    observation = ProcessObservation(
+                        exit_code=exit_code,
+                        wall_seconds=0.0,
+                        fail_fast_reason=(
+                            "termination-failure"
+                            if cleanup_failed
+                            else f"process-monitor-error:{type(error).__name__}"
+                        ),
+                    )
+                except BaseException:
+                    deps.monitor.stop_owned(process)
+                    raise
+        finally:
+            preferences_failure = _preserve_and_remove_preferences(
+                runtime_prefs_path, paths.prefs_path
             )
-        except OSError as error:
+
+        if preferences_failure:
             observation = ProcessObservation(
-                exit_code=None,
-                wall_seconds=0.0,
-                fail_fast_reason=f"process-launch-error:{type(error).__name__}",
+                exit_code=observation.exit_code,
+                wall_seconds=observation.wall_seconds,
+                wall_timeout=observation.wall_timeout,
+                fail_fast_reason=preferences_failure,
+                sim_timeout=observation.sim_timeout,
             )
 
         log_text = (
