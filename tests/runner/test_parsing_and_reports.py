@@ -125,7 +125,7 @@ def test_structured_sim_timeout_cannot_be_overridden_by_generic_wall_timeout() -
     outcome = classify_outcome(
         telemetry,
         ProcessObservation(
-            exit_code=None,
+            exit_code=-1,
             wall_seconds=300,
             wall_timeout=True,
             sim_timeout=True,
@@ -134,6 +134,50 @@ def test_structured_sim_timeout_cannot_be_overridden_by_generic_wall_timeout() -
 
     assert outcome.state == "sim-timeout"
     assert outcome.failure_reason is None
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        (
+            "OM4|v=1|kind=lifecycle|army=1|event=created\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            "OM4HARNESS|v=1|kind=timeout|run=run-1|sim=1800\n",
+            "missing-harness-start",
+        ),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            "OM4HARNESS|v=1|kind=timeout|run=run-1|sim=1800\n",
+            "fallback-brain",
+        ),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=created\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+            "OM4HARNESS|v=1|kind=timeout|run=run-1|sim=1800\n",
+            "lifecycle-out-of-order",
+        ),
+    ],
+)
+def test_structured_sim_timeout_requires_a_valid_ordered_lifecycle(
+    text: str,
+    reason: str,
+) -> None:
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(
+            exit_code=-1,
+            wall_seconds=300,
+            wall_timeout=True,
+            sim_timeout=True,
+        ),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.failure_reason == reason
 
 
 def test_result_parser_ignores_score_and_keeps_first_valid_terminal_result() -> None:

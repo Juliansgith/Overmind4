@@ -316,7 +316,11 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
     if failure_reason:
         state = _state_for_failure(failure_reason)
     elif telemetry.sim_timeout or process.sim_timeout:
-        state = "sim-timeout"
+        if not telemetry.lifecycle.valid:
+            failure_reason = telemetry.lifecycle.reason
+            state = "load-error"
+        else:
+            state = "sim-timeout"
     elif process.wall_timeout:
         state = "wall-timeout"
     elif process.exit_code not in (0, None):
