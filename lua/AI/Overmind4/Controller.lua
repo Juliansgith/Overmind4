@@ -1806,6 +1806,8 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
     local tokens = {}
     local actors = {}
     local seen = {}
+    local displacedToken = intent.displacedToken
+    local rotation = displacedToken ~= nil
     for _, token in ipairs(intent.actorTokens or {}) do
         if type(token) ~= 'string' or seen[token] then return false end
         seen[token] = true
@@ -1813,6 +1815,12 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
     end
     table.sort(tokens)
     if TableGetn(tokens) == 0 then return false end
+    if rotation and (type(displacedToken) ~= 'string'
+        or TableGetn(tokens) ~= 1
+        or displacedToken == tokens[1])
+    then
+        return false
+    end
     for _, token in ipairs(tokens) do
         local record = recordByToken[token]
         if usedActors[token]
@@ -1828,6 +1836,102 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
         local actor = LiveOwnedActor(controller, token, record, record.role)
         if not actor then return false end
         TableInsert(actors, actor)
+    end
+    if rotation then
+        if not existingMission or recordByToken[tokens[1]].role ~= 'anti_air' then
+            return false
+        end
+        local missionTokens = {}
+        local missionSeen = {}
+        local displacedActor = nil
+        local screenHasAntiAir = false
+        for _, token in ipairs(existingMission.escortTokens or {}) do
+            if type(token) ~= 'string' or missionSeen[token] then return false end
+            missionSeen[token] = true
+            local assignment = controller.frontierAssignments[token]
+            local record = recordByToken[token]
+            if usedActors[token]
+                or controller.pending[token]
+                or controller.waveAssignments[token]
+                or not assignment
+                or assignment.engineerToken ~= intent.engineerToken
+                or assignment.clusterKey ~= intent.clusterKey
+                or not record
+                or not COMBAT_ROLES[record.role]
+                or record.complete ~= true
+            then
+                return false
+            end
+            local actor = LiveOwnedActor(controller, token, record, record.role)
+            if not actor then return false end
+            if record.role == 'anti_air' then screenHasAntiAir = true end
+            if token == displacedToken then
+                if record.role == 'anti_air' then return false end
+                displacedActor = actor
+            end
+            TableInsert(missionTokens, token)
+        end
+        if TableGetn(missionTokens) ~= FRONTIER_SCREEN_MAX
+            or screenHasAntiAir
+            or not displacedActor
+        then
+            return false
+        end
+        local liveHomeReserve = 0
+        for token, record in pairs(recordByToken or {}) do
+            if type(token) == 'string'
+                and COMBAT_ROLES[record.role]
+                and record.complete == true
+                and record.assignedToWave ~= true
+                and not usedActors[token]
+                and not controller.pending[token]
+                and not controller.waveAssignments[token]
+                and not controller.frontierAssignments[token]
+            then
+                local actor = LiveOwnedActor(controller, token, record, record.role)
+                if actor then liveHomeReserve = liveHomeReserve + 1 end
+            end
+        end
+        if liveHomeReserve < HOME_RESERVE_MIN then return false end
+
+        local clearNewOk = pcall(function() IssueClearCommands(actors) end)
+        if not clearNewOk then return false end
+        local guardNewOk = pcall(function() IssueGuard(actors, engineer) end)
+        if not guardNewOk then
+            pcall(function() IssueClearCommands(actors) end)
+            return false
+        end
+        local clearDisplacedOk = pcall(function()
+            IssueClearCommands({ displacedActor })
+        end)
+        if not clearDisplacedOk then
+            pcall(function() IssueClearCommands(actors) end)
+            return false
+        end
+
+        local tick = CurrentTick(controller)
+        local replacement = {}
+        for _, token in ipairs(missionTokens) do
+            if token ~= displacedToken then TableInsert(replacement, token) end
+        end
+        TableInsert(replacement, tokens[1])
+        table.sort(replacement)
+        usedActors[tokens[1]] = true
+        usedActors[displacedToken] = true
+        controller.frontierAssignments[displacedToken] = nil
+        controller.frontierAssignments[tokens[1]] = {
+            engineerToken = intent.engineerToken,
+            clusterKey = intent.clusterKey,
+            issuedTick = tick,
+        }
+        existingMission.escortTokens = replacement
+        Emit(controller, 'order', {
+            actor = intent.engineerToken,
+            command = 'frontier_screen',
+            role = 'combat',
+            units = 1,
+        })
+        return true
     end
     local clearOk = pcall(function() IssueClearCommands(actors) end)
     if not clearOk then return false end

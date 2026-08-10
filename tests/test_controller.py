@@ -248,7 +248,11 @@ def make_harness() -> ControllerHarness:
         function IssueGuard(units, target)
             table.insert(calls.sequence, 'guard')
             table.insert(calls.guard, { units = units, target = target })
-            if calls.failGuard then error('guard failed') end
+            if calls.failGuard
+                or tonumber(calls.failGuardAt) == table.getn(calls.guard)
+            then
+                error('guard failed')
+            end
             return { kind = 'guard' }
         end
         function IssueMove(units, position)
@@ -260,7 +264,11 @@ def make_harness() -> ControllerHarness:
         function IssueClearCommands(units)
             table.insert(calls.sequence, 'clear')
             table.insert(calls.clear, { units = units })
-            if calls.failClear then error('clear failed') end
+            if calls.failClear
+                or tonumber(calls.failClearAt) == table.getn(calls.clear)
+            then
+                error('clear failed')
+            end
             return { kind = 'clear' }
         end
         function IssueReclaim(units, target)

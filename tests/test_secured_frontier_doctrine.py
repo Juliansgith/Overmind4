@@ -764,6 +764,235 @@ def test_surviving_partial_frontier_screen_is_replenished_with_new_aa() -> None:
     assert existing["token"] not in screen[0]["actorTokens"]
     assert any(by_token[token]["role"] == "anti_air" for token in screen[0]["actorTokens"])
     assert len(screen[0]["actorTokens"]) == 3
+    assert "displacedToken" not in screen[0]
+
+
+def full_frontier_screen_snapshot() -> tuple[dict[str, Any], list[str], list[str], str]:
+    snapshot = screen_snapshot()
+    combat = sorted(
+        (
+            unit
+            for unit in snapshot["units"]
+            if unit["role"] in {"tank", "artillery", "anti_air", "lab"}
+        ),
+        key=lambda unit: unit["token"],
+    )
+    screen_units = [unit for unit in combat if unit["role"] == "tank"][:4]
+    for unit in screen_units:
+        unit["assignedToWave"] = True
+        unit["frontierEscort"] = True
+    home_units = [unit for unit in combat if unit not in screen_units]
+    anti_air = next(unit for unit in home_units if unit["role"] == "anti_air")
+    snapshot["macro"].update(frontierScreenCount=4, homeReserveCount=4)
+    return (
+        snapshot,
+        [unit["token"] for unit in screen_units],
+        [unit["token"] for unit in home_units],
+        anti_air["token"],
+    )
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_full_tank_screen_rotates_home_aa_one_for_one_deterministically(seed: int) -> None:
+    snapshot, old_screen, old_home, anti_air = full_frontier_screen_snapshot()
+    random.Random(seed).shuffle(snapshot["units"])
+
+    screen = intents_of(decide(snapshot), "frontier_screen")
+
+    assert len(screen) == 1
+    assert screen[0]["actorTokens"] == [anti_air]
+    assert screen[0]["displacedToken"] == min(old_screen)
+    new_screen = (set(old_screen) - {screen[0]["displacedToken"]}) | {anti_air}
+    new_home = (set(old_home) - {anti_air}) | {screen[0]["displacedToken"]}
+    assert len(new_screen) == 4
+    assert len(new_home) == 4
+    assert new_screen.isdisjoint(new_home)
+
+
+def test_full_screen_displacement_tie_breaks_by_token_not_input_order() -> None:
+    displaced = set()
+    for seed in range(20):
+        snapshot, old_screen, _, _ = full_frontier_screen_snapshot()
+        random.Random(seed).shuffle(snapshot["units"])
+        intent = intents_of(decide(snapshot), "frontier_screen")[0]
+        displaced.add(intent["displacedToken"])
+
+    assert displaced == {min(old_screen)}
+
+
+def test_full_screen_with_existing_aa_does_not_rotate_another_aa() -> None:
+    snapshot, old_screen, old_home, anti_air = full_frontier_screen_snapshot()
+    by_token = {unit["token"]: unit for unit in snapshot["units"]}
+    displaced_tank = old_screen[0]
+    by_token[displaced_tank]["assignedToWave"] = False
+    by_token[displaced_tank]["frontierEscort"] = False
+    by_token[anti_air]["assignedToWave"] = True
+    by_token[anti_air]["frontierEscort"] = True
+    snapshot["macro"].update(frontierScreenCount=4, homeReserveCount=4)
+
+    assert intents_of(decide(snapshot), "frontier_screen") == []
+
+
+def _call_actor_ids(call: Any) -> list[int]:
+    return [call.units[index].options.entityId for index in range(1, len(call.units) + 1)]
+
+
+def full_frontier_screen_harness() -> tuple[Any, Any, dict[str, Any]]:
+    harness = make_harness()
+    engineer = harness.unit(entityId=1, blueprintId="uel0105")
+    tanks = [harness.unit(entityId=entity_id, blueprintId="uel0201") for entity_id in range(2, 6)]
+    home = [
+        harness.unit(entityId=6, blueprintId="uel0104"),
+        harness.unit(entityId=7, blueprintId="uel0201"),
+        harness.unit(entityId=8, blueprintId="uel0103"),
+        harness.unit(entityId=9, blueprintId="uel0106"),
+    ]
+    harness.brain.units = harness.lua.table_from([engineer, *tanks, *home])
+    harness.observe()
+    install_pending_frontier_operation(harness)
+    harness.controller.frontierMission = lua_value(
+        harness.lua,
+        {
+            "engineerToken": "1:1",
+            "clusterKey": "cluster-a",
+            "escortTokens": ["2:1", "3:1", "4:1", "5:1"],
+            "issuedTick": 0,
+        },
+    )
+    for token in ("2:1", "3:1", "4:1", "5:1"):
+        harness.controller.frontierAssignments[token] = lua_value(
+            harness.lua,
+            {"engineerToken": "1:1", "clusterKey": "cluster-a", "issuedTick": 0},
+        )
+    observation = harness.observe()
+    intent = {
+        "kind": "frontier_screen",
+        "engineerToken": "1:1",
+        "actorTokens": ["6:1"],
+        "displacedToken": "2:1",
+        "clusterKey": "cluster-a",
+        "priority": 24,
+        "reason": "secure_frontier",
+    }
+    return harness, observation, intent
+
+
+def _screen_state(harness: Any) -> tuple[Any, Any]:
+    return (
+        plain(harness.controller.frontierMission),
+        plain(harness.controller.frontierAssignments),
+    )
+
+
+def test_full_screen_aa_rotation_executes_exact_swap_and_actor_partition() -> None:
+    harness, observation, intent = full_frontier_screen_harness()
+
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "guard", "clear"]
+    assert _call_actor_ids(harness.calls.clear[1]) == [6]
+    assert _call_actor_ids(harness.calls.guard[1]) == [6]
+    assert harness.calls.guard[1].target.options.entityId == 1
+    assert _call_actor_ids(harness.calls.clear[2]) == [2]
+    assert plain(harness.controller.frontierMission.escortTokens) == ["3:1", "4:1", "5:1", "6:1"]
+    assert harness.controller.frontierAssignments["2:1"] is None
+    assert harness.controller.frontierAssignments["6:1"] is not None
+    screen = set(plain(harness.controller.frontierMission.escortTokens))
+    home = {"2:1", "7:1", "8:1", "9:1"}
+    assert len(screen) == len(home) == 4
+    assert screen.isdisjoint(home)
+    next_observation = harness.observe()
+    next_macro = plain(next_observation.macro)
+    assert next_macro["frontierScreenCount"] == 4
+    assert next_macro["homeReserveCount"] == 4
+    next_intents = plain(harness.lua.globals().Policy.Decide(next_observation))
+    assert intents_of(next_intents, "frontier_screen") == []
+
+
+@pytest.mark.parametrize(
+    ("failure_field", "failure_call", "expected_failure_sequence"),
+    [
+        ("failClearAt", 1, ["clear"]),
+        ("failGuardAt", 1, ["clear", "guard", "clear"]),
+        ("failClearAt", 2, ["clear", "guard", "clear", "clear"]),
+    ],
+)
+def test_full_screen_rotation_order_failure_restores_exact_state_and_retries_immediately(
+    failure_field: str,
+    failure_call: int,
+    expected_failure_sequence: list[str],
+) -> None:
+    harness, observation, intent = full_frontier_screen_harness()
+    before = _screen_state(harness)
+    harness.calls[failure_field] = failure_call
+
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == expected_failure_sequence
+    assert _screen_state(harness) == before
+    assert harness.controller.frontierAssignments["6:1"] is None
+
+    harness.calls[failure_field] = None
+    sequence_count = len(harness.calls.sequence)
+    execute_intents(harness, [intent], harness.observe())
+
+    assert plain(harness.calls.sequence)[sequence_count:] == ["clear", "guard", "clear"]
+    assert plain(harness.controller.frontierMission.escortTokens) == ["3:1", "4:1", "5:1", "6:1"]
+
+
+@pytest.mark.parametrize("actor", ["replacement", "displaced"])
+@pytest.mark.parametrize("mutation", ["dead", "captured", "recycled"])
+def test_full_screen_rotation_fails_closed_for_invalid_exact_actor(
+    actor: str,
+    mutation: str,
+) -> None:
+    harness, observation, intent = full_frontier_screen_harness()
+    entity_id = 6 if actor == "replacement" else 2
+    token = f"{entity_id}:1"
+    unit = harness.controller.unitRefs[token]
+    if mutation == "dead":
+        unit.Dead = True
+    elif mutation == "captured":
+        unit.options.army = 2
+    else:
+        replacement = harness.unit(
+            entityId=entity_id,
+            blueprintId="uel0104" if actor == "replacement" else "uel0201",
+        )
+        units = [
+            replacement if item.options.entityId == entity_id else item
+            for item in harness.brain.units.values()
+        ]
+        harness.brain.units = harness.lua.table_from(units)
+        harness.observe()
+    before = _screen_state(harness)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.sequence) == 0
+    assert _screen_state(harness) == before
+
+
+def test_full_screen_rotation_rejects_nonmember_displacement_without_orders() -> None:
+    harness, observation, intent = full_frontier_screen_harness()
+    intent["displacedToken"] = "7:1"
+    before = _screen_state(harness)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.sequence) == 0
+    assert _screen_state(harness) == before
+
+
+def test_full_screen_rotation_fails_closed_if_home_reserve_is_no_longer_four_live_units() -> None:
+    harness, observation, intent = full_frontier_screen_harness()
+    harness.controller.unitRefs["7:1"].Dead = True
+    before = _screen_state(harness)
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.sequence) == 0
+    assert _screen_state(harness) == before
 
 
 def test_frontier_escorts_are_never_consumed_by_home_defense_or_regroup() -> None:

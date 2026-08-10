@@ -1036,6 +1036,8 @@ local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
     local engineer = nil
     local available = {}
     local antiAir = {}
+    local frontierEscorts = {}
+    local frontierNonAir = {}
     local screenHasAntiAir = false
     for _, unit in ipairs(units or {}) do
         if unit.token == engineerToken
@@ -1043,20 +1045,34 @@ local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
             and unit.complete == true
         then
             engineer = unit
-        elseif COMBAT_ROLES[unit.role]
-            and unit.complete == true
-            and unit.assignedToWave ~= true
-            and not pendingActors[unit.token]
-        then
-            TableInsert(available, unit)
-            if unit.role == 'anti_air' then TableInsert(antiAir, unit) end
-        elseif unit.frontierEscort == true and unit.role == 'anti_air' then
-            screenHasAntiAir = true
+        elseif COMBAT_ROLES[unit.role] and unit.complete == true then
+            if unit.frontierEscort == true then
+                TableInsert(frontierEscorts, unit)
+                if unit.role == 'anti_air' then
+                    screenHasAntiAir = true
+                else
+                    TableInsert(frontierNonAir, unit)
+                end
+            elseif unit.assignedToWave ~= true and not pendingActors[unit.token] then
+                TableInsert(available, unit)
+                if unit.role == 'anti_air' then TableInsert(antiAir, unit) end
+            end
         end
     end
     local screenTarget = math.min(4, currentScreen + TableGetn(available) - 4)
     local screenSize = screenTarget - currentScreen
+    local displacedToken = nil
     if screenSize <= 0
+        and currentScreen >= 4
+        and TableGetn(frontierEscorts) >= 4
+        and not screenHasAntiAir
+        and TableGetn(antiAir) > 0
+        and TableGetn(available) >= 4
+        and TableGetn(frontierNonAir) > 0
+    then
+        screenSize = 1
+        displacedToken = frontierNonAir[1].token
+    elseif screenSize <= 0
         and not screenHasAntiAir
         and TableGetn(antiAir) > 0
         and TableGetn(available) > 4
@@ -1076,14 +1092,16 @@ local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
             selectedTokens[unit.token] = true
         end
     end
-    AddIntent(intents, {
+    local intent = {
         kind = 'frontier_screen',
         engineerToken = engineerToken,
         actorTokens = ActorTokens(selected),
         clusterKey = clusterKey or tostring(macro.selectedFrontierCluster or 'none'),
         priority = 24,
         reason = 'secure_frontier',
-    })
+    }
+    if displacedToken then intent.displacedToken = displacedToken end
+    AddIntent(intents, intent)
 end
 
 local function RegroupDecision(snapshot, units, intents)
