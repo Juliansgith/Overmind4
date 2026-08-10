@@ -35,6 +35,13 @@ def _valid_match(result: str, *, army: int = 1, sim: int = 123) -> str:
     )
 
 
+def _terminal_line(result: str, *, army: int = 1) -> str:
+    return (
+        "info: OM4|v=1|kind=lifecycle|army="
+        f"{army}|event=terminal|result={result}\n"
+    )
+
+
 def test_json_stats_parser_handles_braces_inside_quoted_strings() -> None:
     text = 'debug: JsonStats {"stats":[{"name":"AI } { quoted","score":7}]} tail\n'
 
@@ -97,6 +104,209 @@ def test_official_result_maps_to_explicit_outcome(result: str, expected: str) ->
 
     assert outcome.state == expected
     assert outcome.is_win is (expected == "win")
+
+
+def test_corroborated_win_outranks_late_engine_error_and_reports_it_as_warning() -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + _result_line("defeat -10", army=2, sim=642)
+        + (
+            "warning: Error running lua script: "
+            "...lua.nx2\\lua\\platoon.lua(1528): attempt to call method "
+            "`GetLocationCoords' (a nil value)\n"
+        )
+        + _terminal_line("victory")
+        + _result_line("victory 10", sim=647)
+        + 'debug: GpgNetSend JsonStats {"stats":[]}\n'
+    )
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(
+            exit_code=1,
+            wall_seconds=34.7,
+            fail_fast_reason="lua-error",
+        ),
+    )
+
+    assert outcome.state == "win"
+    assert outcome.is_win is True
+    assert outcome.failure_reason is None
+    assert outcome.warnings == ("lua-error",)
+
+    document = json.loads(render_json(outcome, run_id="run-1"))
+    assert document["warnings"] == ["lua-error"]
+    assert "- Warnings: lua-error" in render_markdown(outcome, run_id="run-1")
+
+
+@pytest.mark.parametrize(
+    "startup_with_error",
+    [
+        "warning: LUA ERROR: import failed\n" + _valid_lifecycle_prefix(),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1|map=SCMP_007\n"
+            "warning: LUA ERROR: import failed\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=created|plan=none\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+        ),
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-1|map=SCMP_007\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=created|plan=none\n"
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+            "warning: LUA ERROR: startup failed\n"
+            "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+        ),
+    ],
+)
+def test_engine_error_before_completed_startup_lifecycle_remains_a_load_error(
+    startup_with_error: str,
+) -> None:
+    text = (
+        startup_with_error
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.is_win is False
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.warnings == ()
+
+
+def test_engine_error_without_matching_brain_terminal_remains_a_load_error() -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + "warning: LUA ERROR: update failed\n"
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.warnings == ()
+
+
+def test_owned_harness_failure_is_never_downgraded_by_same_named_engine_warning() -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + "warning: LUA ERROR: late stock callback failed\n"
+        + "OM4HARNESS|v=1|kind=failure|run=run-1|reason=lua-error\n"
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.is_win is False
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.warnings == ()
+
+
+def test_terminal_before_started_brain_lifecycle_cannot_corroborate_an_engine_error() -> None:
+    text = (
+        "OM4HARNESS|v=1|kind=start|run=run-1|map=SCMP_007\n"
+        + _terminal_line("victory")
+        + "OM4|v=1|kind=lifecycle|army=1|event=created|plan=none\n"
+        + "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+        + "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+        + "warning: LUA ERROR: late update failed\n"
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.is_win is False
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.lifecycle.reason == "lifecycle-out-of-order"
+
+
+@pytest.mark.parametrize(
+    ("completion_lines", "expected_reason"),
+    [
+        (
+            _terminal_line("defeat") + _result_line("victory 10"),
+            "terminal-result-mismatch",
+        ),
+        (
+            _terminal_line("victory")
+            + _result_line("victory 10")
+            + _result_line("victory 10", sim=124),
+            "duplicate-official-result",
+        ),
+        (
+            _terminal_line("victory")
+            + _terminal_line("victory")
+            + _result_line("victory 10"),
+            "duplicate-brain-terminal",
+        ),
+        (
+            _terminal_line("victory")
+            + _result_line("victory 10")
+            + _result_line("defeat -10", sim=124),
+            "conflicting-official-results",
+        ),
+    ],
+)
+def test_mismatched_duplicate_or_conflicting_results_fail_closed(
+    completion_lines: str,
+    expected_reason: str,
+) -> None:
+    outcome = classify_outcome(
+        parse_log(_valid_lifecycle_prefix() + completion_lines, "run-1", our_slot=1),
+        ProcessObservation(exit_code=0, wall_seconds=4),
+    )
+
+    assert outcome.state == "malformed"
+    assert outcome.is_win is False
+    assert outcome.failure_reason == expected_reason
+
+
+@pytest.mark.parametrize(
+    "safety_reason",
+    [
+        "termination-failure",
+        "preferences-cleanup-error:PermissionError",
+        "preferences-snapshot-error:PermissionError",
+    ],
+)
+def test_safety_failure_outranks_a_corroborated_official_win(safety_reason: str) -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + "warning: LUA ERROR: late stock callback failed\n"
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(
+            exit_code=1,
+            wall_seconds=4,
+            fail_fast_reason=safety_reason,
+        ),
+    )
+
+    assert outcome.state == "crash"
+    assert outcome.is_win is False
+    assert outcome.failure_reason == safety_reason
+    assert outcome.warnings == ()
 
 
 def test_sim_timeout_has_priority_over_later_ui_result() -> None:

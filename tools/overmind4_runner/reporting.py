@@ -69,6 +69,7 @@ def render_markdown(outcome: Outcome, run_id: str) -> str:
             f"- Achieved simulation speed: {achieved}",
             f"- Exit code: {_display(outcome.exit_code)}",
             f"- Failure reason: {_display(outcome.failure_reason)}",
+            f"- Warnings: {', '.join(outcome.warnings) if outcome.warnings else 'none'}",
             "",
         )
     )
