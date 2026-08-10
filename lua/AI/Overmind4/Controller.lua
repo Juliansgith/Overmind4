@@ -15,7 +15,6 @@ local REJECT_TICKS = 12
 local OPERATION_TIMEOUT_TICKS = 900
 local REORDER_COOLDOWN_TICKS = 100
 local WAVE_STUCK_TICKS = 300
-local WAVE_STUCK_DISTANCE = 4
 local SNAPSHOT_INTERVAL_TICKS = 300
 local SITE_BACKOFF_TICKS = 300
 local TableGetn = table.getn
@@ -506,6 +505,27 @@ local function OrderAllowed(controller, signature)
     return true
 end
 
+local function UpdateSafetyEpisodes(controller, intents)
+    local present = { retreat = false, defend = false }
+    for _, intent in ipairs(intents or {}) do
+        if intent.kind == 'retreat' then
+            present.retreat = true
+        elseif intent.kind == 'defend_wave' then
+            present.defend = true
+        end
+    end
+    for _, kind in ipairs({ 'retreat', 'defend' }) do
+        if present[kind] then
+            if controller.safetyActive[kind] ~= true then
+                controller.safetyEpisodes[kind] = controller.safetyEpisodes[kind] + 1
+            end
+            controller.safetyActive[kind] = true
+        else
+            controller.safetyActive[kind] = false
+        end
+    end
+end
+
 local function RecordPending(controller, intent, observation)
     local operation = {
         actorToken = intent.actorToken,
@@ -644,6 +664,9 @@ local function ExecuteCombatGroup(controller, intent, recordByToken, usedActors)
     local position = TerrainPosition(intent.position)
     if not position then return false end
     local signature = Signature(intent) .. ':' .. table.concat(tokens, ',')
+    if intent.kind == 'defend_wave' then
+        signature = signature .. ':safety:' .. tostring(controller.safetyEpisodes.defend)
+    end
     if not OrderAllowed(controller, signature) then return false end
 
     if intent.kind == 'defend_wave' then
@@ -695,10 +718,12 @@ local function ExecuteRetreat(controller, intent, record)
     local actor = controller.unitRefs[intent.actorToken]
     local position = TerrainPosition(intent.position)
     if not actor or not position then return false end
-    local signature = Signature(intent)
-    if not OrderAllowed(controller, signature) then return false end
     ReleaseOperation(controller, intent.actorToken, 'retreat_preempted')
-    local clearKey = 'retreat:' .. intent.actorToken
+    local signature = Signature(intent)
+        .. ':safety:' .. tostring(controller.safetyEpisodes.retreat)
+    if not OrderAllowed(controller, signature) then return false end
+    local clearKey = 'retreat:' .. tostring(controller.safetyEpisodes.retreat)
+        .. ':' .. intent.actorToken
     if not controller.safetyCleared[clearKey] then
         IssueClearCommands({ actor })
         controller.safetyCleared[clearKey] = true
@@ -751,6 +776,8 @@ Controller.Create = function(brain)
         rallied = {},
         waveAssignments = {},
         safetyCleared = {},
+        safetyActive = { retreat = false, defend = false },
+        safetyEpisodes = { retreat = 0, defend = 0 },
         lastOrders = {},
         initialWaveSent = false,
         lastWaveTick = -10000,
@@ -836,13 +863,8 @@ Controller.Reconcile = function(controller, observation)
         if not record then
             controller.waveAssignments[token] = nil
         elseif tick - assignment.issuedTick >= WAVE_STUCK_TICKS then
-            if Distance(record.position, assignment.position) < WAVE_STUCK_DISTANCE then
-                controller.waveAssignments[token] = nil
-                Emit(controller, 'wave_released', { actor = token, reason = 'stuck' })
-            else
-                assignment.issuedTick = tick
-                assignment.position = CopyPosition(record.position)
-            end
+            assignment.issuedTick = tick
+            assignment.position = CopyPosition(record.position)
         end
     end
 
@@ -854,6 +876,7 @@ Controller.Execute = function(controller, intents, observation)
     local records = RecordByToken(observation.units)
     local ordered = {}
     for _, intent in ipairs(intents or {}) do TableInsert(ordered, intent) end
+    UpdateSafetyEpisodes(controller, ordered)
     table.sort(ordered, function(a, b)
         local ap = tonumber(a.priority) or 1000
         local bp = tonumber(b.priority) or 1000

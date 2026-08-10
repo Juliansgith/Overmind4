@@ -303,6 +303,36 @@ def test_acu_power_opener_and_engineer_recovery_never_share_a_placement() -> Non
     assert power[0]["actorToken"] == "1:1"
 
 
+def test_engineer_power_and_factory_plans_reserve_distinct_shared_placements() -> None:
+    snapshot = post_opening_snapshot(
+        "engineer",
+        "engineer",
+        "mass_extractor",
+        "mass_extractor",
+    )
+    shared = [[30, 2, 30], [34, 2, 30], [38, 2, 30], [42, 2, 30]]
+    snapshot["placements"] = {
+        "land_factory": copy.deepcopy(shared),
+        "power_generator": copy.deepcopy(shared),
+    }
+    snapshot["economy"] = {
+        "energyTrend": -2,
+        "energyStoredRatio": 0.1,
+        "massTrend": 1,
+        "massStoredRatio": 0.5,
+    }
+
+    builds = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent["actorToken"] != "1:1" and "siteKey" not in intent
+    ]
+    coordinates = [(intent["position"][0], intent["position"][2]) for intent in builds]
+
+    assert {intent["buildRole"] for intent in builds} == {"power_generator", "land_factory"}
+    assert len(coordinates) == len(set(coordinates))
+
+
 def test_factory_counts_completed_incomplete_and_pending_engineers() -> None:
     snapshot = post_opening_snapshot("engineer")
     snapshot["units"] += [dict(role_counts("engineer")[0], token="98:1", complete=False, idle=False)]

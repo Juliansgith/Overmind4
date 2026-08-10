@@ -591,6 +591,46 @@ def test_wave_orders_only_named_combat_references_in_deterministic_order() -> No
     assert [call.units[index].GetEntityId(call.units[index]) for index in (1, 2)] == [4, 9]
 
 
+def test_stationary_live_attacker_remains_assigned_and_is_not_regrouped_home() -> None:
+    harness = make_harness()
+    tank = harness.unit(
+        entityId=2,
+        blueprintId="uel0201",
+        position=[110, 2, 120],
+        idleState=False,
+    )
+    harness.brain.units = harness.lua.table_from([tank])
+    execute_intents(
+        harness,
+        [{"kind": "attack_wave", "actorTokens": ["2:1"], "position": [200, 0, 200]}],
+    )
+    assert harness.controller.waveAssignments["2:1"] is not None
+
+    harness.brain.tick = 301
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+    after_reconcile = harness.observe()
+    intents = plain(harness.lua.globals().Policy.Decide(after_reconcile))
+
+    assert harness.controller.waveAssignments["2:1"] is not None
+    assert not any(intent.get("kind") == "regroup_wave" for intent in intents)
+
+
+def test_dead_attacker_releases_wave_assignment() -> None:
+    harness = make_harness()
+    tank = harness.unit(entityId=2, blueprintId="uel0201", position=[110, 2, 120])
+    harness.brain.units = harness.lua.table_from([tank])
+    execute_intents(
+        harness,
+        [{"kind": "attack_wave", "actorTokens": ["2:1"], "position": [200, 0, 200]}],
+    )
+    tank.options.destroyed = True
+    harness.brain.tick = 301
+
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+
+    assert harness.controller.waveAssignments["2:1"] is None
+
+
 def test_retreat_and_defense_clear_only_once_for_same_intent_signature() -> None:
     harness = make_harness()
     acu = harness.unit(entityId=1, blueprintId="uel0001")
@@ -631,6 +671,65 @@ def test_retreat_releases_preempted_build_pending_and_reservation_immediately() 
 
     assert harness.controller.pending["1:1"] is None
     assert harness.controller.reservations[build["siteKey"]] is None
+
+
+def test_retreat_reentry_starts_fresh_safety_epoch_and_cancels_new_build() -> None:
+    harness = make_harness()
+    acu = harness.unit(entityId=1, blueprintId="uel0001", canBuild={"ueb1103": True})
+    harness.brain.units = harness.lua.table_from([acu])
+    retreat = {"kind": "retreat", "actorToken": "1:1", "position": [10, 0, 20]}
+
+    execute_intents(harness, [retreat])
+    harness.brain.tick = 1
+    execute_intents(harness, [retreat])
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.move) == 1
+
+    execute_intents(harness, [])
+    harness.brain.tick = 10
+    build = {
+        "kind": "build_structure",
+        "actorToken": "1:1",
+        "buildRole": "mass_extractor",
+        "siteKey": "Mass:12000:20000",
+        "position": [12, 0, 20],
+    }
+    execute_intents(harness, [build])
+    assert harness.controller.pending["1:1"] is not None
+    assert harness.controller.reservations[build["siteKey"]] is not None
+
+    harness.brain.tick = 20
+    execute_intents(harness, [retreat])
+
+    assert harness.controller.pending["1:1"] is None
+    assert harness.controller.reservations[build["siteKey"]] is None
+    assert len(harness.calls.clear) == 2
+    assert len(harness.calls.move) == 2
+
+
+def test_defense_reentry_clears_regroup_and_orders_fresh_defense_within_cooldown() -> None:
+    harness = make_harness()
+    tank = harness.unit(entityId=2, blueprintId="uel0201", position=[70, 2, 70])
+    harness.brain.units = harness.lua.table_from([tank])
+    defense = {"kind": "defend_wave", "actorTokens": ["2:1"], "position": [20, 0, 20]}
+    regroup = {"kind": "regroup_wave", "actorTokens": ["2:1"], "position": [35, 0, 45]}
+
+    execute_intents(harness, [defense])
+    harness.brain.tick = 1
+    execute_intents(harness, [defense])
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.aggressive) == 1
+
+    execute_intents(harness, [])
+    harness.brain.tick = 10
+    execute_intents(harness, [regroup])
+    assert len(harness.calls.move) == 1
+
+    harness.brain.tick = 20
+    execute_intents(harness, [defense])
+
+    assert len(harness.calls.clear) == 2
+    assert len(harness.calls.aggressive) == 2
 
 
 def test_regroup_uses_bounded_move_without_clear_or_aggressive_order() -> None:

@@ -95,12 +95,32 @@ local function AddIntent(intents, intent)
     TableInsert(intents, intent)
 end
 
-local function FirstPlacement(snapshot, role, index)
+local function PlacementKey(position)
+    if not IsUsablePosition(position) then return nil end
+    return tostring(position[1]) .. ':' .. tostring(position[3])
+end
+
+local function ReservePlacement(snapshot, role, index, virtualPlacements)
     local placements = snapshot.placements or {}
     local candidates = placements[role] or {}
-    local position = candidates[index or 1] or candidates[1]
-    if IsUsablePosition(position) then
-        return position
+    local count = TableGetn(candidates)
+    local first = tonumber(index) or 1
+    if first < 1 or first > count then first = 1 end
+    for candidateIndex = first, count do
+        local position = candidates[candidateIndex]
+        local key = PlacementKey(position)
+        if key and not virtualPlacements[key] then
+            virtualPlacements[key] = true
+            return position
+        end
+    end
+    for candidateIndex = 1, first - 1 do
+        local position = candidates[candidateIndex]
+        local key = PlacementKey(position)
+        if key and not virtualPlacements[key] then
+            virtualPlacements[key] = true
+            return position
+        end
     end
     return nil
 end
@@ -266,7 +286,7 @@ local function SafetyDecision(snapshot, units)
     return nil, false
 end
 
-local function AcuOpening(snapshot, units, counts, virtualReserved, pendingActors)
+local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors)
     local acu = nil
     for _, unit in ipairs(units) do
         if unit.role == 'acu' then
@@ -279,7 +299,7 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, pendingActor
     end
 
     if (counts.land_factory or 0) < 1 and CanBuild(acu, 'land_factory') then
-        return BuildAtPlacement(acu, 'land_factory', FirstPlacement(snapshot, 'land_factory', 1), 10, 'opening_factory')
+        return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 1, virtualPlacements), 10, 'opening_factory')
     end
     if (counts.land_factory or 0) < 1 then
         return nil
@@ -287,7 +307,7 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, pendingActor
 
     local powerCount = counts.power_generator or 0
     if powerCount < 2 and CanBuild(acu, 'power_generator') then
-        return BuildAtPlacement(acu, 'power_generator', FirstPlacement(snapshot, 'power_generator', powerCount + 1), 11, 'opening_power')
+        return BuildAtPlacement(acu, 'power_generator', ReservePlacement(snapshot, 'power_generator', powerCount + 1, virtualPlacements), 11, 'opening_power')
     end
     if powerCount < 2 then
         return nil
@@ -304,12 +324,12 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, pendingActor
     end
 
     if (counts.land_factory or 0) < 2 and CanBuild(acu, 'land_factory') then
-        return BuildAtPlacement(acu, 'land_factory', FirstPlacement(snapshot, 'land_factory', 2), 13, 'opening_second_factory')
+        return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 2, virtualPlacements), 13, 'opening_second_factory')
     end
     return nil
 end
 
-local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendingActors, underContact, allowPlacement, intents)
+local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors, underContact, allowPlacement, intents)
     local engineers = {}
     for _, unit in ipairs(units) do
         if unit.role == 'engineer'
@@ -354,7 +374,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
             and not plannedPower
             and CanBuild(engineer, 'power_generator')
         then
-            local position = FirstPlacement(snapshot, 'power_generator', placementIndex.power_generator)
+            local position = ReservePlacement(snapshot, 'power_generator', placementIndex.power_generator, virtualPlacements)
             if position then
                 plannedPower = true
                 placementIndex.power_generator = placementIndex.power_generator + 1
@@ -371,7 +391,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, pendi
             and (counts.mass_extractor or 0) >= 6
             and CanBuild(engineer, 'land_factory')
         then
-            local position = FirstPlacement(snapshot, 'land_factory', placementIndex.land_factory)
+            local position = ReservePlacement(snapshot, 'land_factory', placementIndex.land_factory, virtualPlacements)
             if position then
                 plannedFactory = true
                 placementIndex.land_factory = placementIndex.land_factory + 1
@@ -545,6 +565,7 @@ Policy.Decide = function(snapshot)
     local counts = CountRoles(units, pending)
     local pendingActors = PendingActors(pending)
     local virtualReserved = {}
+    local virtualPlacements = {}
     for _, operation in ipairs(pending) do
         if operation.siteKey then
             virtualReserved[operation.siteKey] = true
@@ -557,7 +578,7 @@ Policy.Decide = function(snapshot)
     end
     local opening = nil
     if not emergency then
-        opening = AcuOpening(snapshot, units, counts, virtualReserved, pendingActors)
+        opening = AcuOpening(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors)
     end
     if opening then
         AddIntent(intents, opening)
@@ -572,6 +593,7 @@ Policy.Decide = function(snapshot)
         units,
         counts,
         virtualReserved,
+        virtualPlacements,
         pendingActors,
         underContact or emergency,
         openingComplete or emergency,
