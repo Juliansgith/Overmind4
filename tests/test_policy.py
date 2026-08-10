@@ -508,39 +508,58 @@ def test_off_staging_defenders_regroup_after_contact_clears() -> None:
     assert regroup[0]["position"] == snapshot["stagingPosition"]
 
 
-def test_attack_threshold_requires_eighteen_combat_and_three_artillery() -> None:
-    assert not intents_of(decide(combat_snapshot(["tank"] * 15 + ["artillery"] * 2)), "attack_wave")
-    attack = intents_of(decide(combat_snapshot(["tank"] * 15 + ["artillery"] * 3)), "attack_wave")
-    assert len(attack) == 1
-    assert len(attack[0]["actorTokens"]) == 18
+def test_twenty_three_with_only_three_artillery_never_launches_at_any_time_or_state() -> None:
+    for initial_wave_sent in (False, True):
+        snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 3, tick=999999)
+        snapshot["state"] = {
+            "initialWaveSent": initial_wave_sent,
+            "lastWaveTick": -999999,
+            "lastReinforcementTick": -999999,
+        }
+
+        assert not intents_of(decide(snapshot), "attack_wave")
 
 
-def test_timed_force_attacks_with_ten_but_never_without_path() -> None:
-    snapshot = combat_snapshot(["tank"] * 9 + ["artillery"], tick=3600)
-    assert intents_of(decide(snapshot), "attack_wave")
-    snapshot["targetPath"] = False
-    assert not intents_of(decide(snapshot), "attack_wave")
+def test_exactly_twenty_four_with_four_artillery_launches_every_available_unit() -> None:
+    for initial_wave_sent in (False, True):
+        snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 4)
+        snapshot["state"] = {"initialWaveSent": initial_wave_sent}
+
+        attack = intents_of(decide(snapshot), "attack_wave")
+
+        assert len(attack) == 1
+        assert len(attack[0]["actorTokens"]) == 24
+        assert attack[0]["reason"] == "concentration_gate"
 
 
-def test_reinforcements_wait_for_eight_or_bounded_delay() -> None:
-    snapshot = combat_snapshot(["tank"] * 7, tick=5000)
-    snapshot["state"] = {"initialWaveSent": True, "lastWaveTick": 4000, "lastReinforcementTick": 4500}
-    assert not intents_of(decide(snapshot), "attack_wave")
-    snapshot["units"] += role_counts("artillery")
-    assert intents_of(decide(snapshot), "attack_wave")
-    snapshot = combat_snapshot(["tank"] * 4, tick=6000)
-    snapshot["state"] = {"initialWaveSent": True, "lastWaveTick": 4000, "lastReinforcementTick": 5000}
-    assert intents_of(decide(snapshot), "attack_wave")
+def test_concentration_gate_has_no_time_escape_and_still_requires_target_path() -> None:
+    below_gate = combat_snapshot(["tank"] * 20 + ["artillery"] * 3, tick=999999999)
+    assert not intents_of(decide(below_gate), "attack_wave")
+
+    ready = combat_snapshot(["tank"] * 20 + ["artillery"] * 4, tick=999999999)
+    ready["targetPath"] = False
+    assert not intents_of(decide(ready), "attack_wave")
+
+
+def test_concentration_gate_ignores_missing_or_malformed_legacy_wave_state() -> None:
+    for state in (None, "malformed", {"initialWaveSent": "unknown"}):
+        snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 4)
+        snapshot["state"] = state
+
+        attack = intents_of(decide(snapshot), "attack_wave")
+
+        assert len(attack) == 1
+        assert len(attack[0]["actorTokens"]) == 24
 
 
 def test_wave_never_includes_acu_engineer_scout_incomplete_or_unavailable() -> None:
-    snapshot = combat_snapshot(["tank"] * 15 + ["artillery"] * 3)
+    snapshot = combat_snapshot(["tank"] * 20 + ["artillery"] * 4)
     snapshot["units"] += role_counts("engineer", "scout")
     snapshot["units"].append(dict(role_counts("tank")[0], token="99:1", complete=False, availableForWave=True))
     snapshot["units"].append(dict(role_counts("tank")[0], token="100:1", complete=True, availableForWave=False))
     tokens = intents_of(decide(snapshot), "attack_wave")[0]["actorTokens"]
     assert "1:1" not in tokens and "99:1" not in tokens and "100:1" not in tokens
-    assert len(tokens) == 18
+    assert len(tokens) == 24
 
 
 def test_nil_optional_fields_are_safe_and_policy_is_deterministic_under_permutation() -> None:

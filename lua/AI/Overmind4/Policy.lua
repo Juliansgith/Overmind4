@@ -5,13 +5,8 @@ local COMBAT_ROLES = {
     tank = true,
 }
 
-local FIRST_WAVE_COMBAT = 18
-local FIRST_WAVE_ARTILLERY = 3
-local FORCED_WAVE_TICK = 3600
-local FORCED_WAVE_COMBAT = 10
-local REINFORCEMENT_COMBAT = 8
-local REINFORCEMENT_DELAY_TICKS = 900
-local REINFORCEMENT_DELAY_COMBAT = 4
+local ATTACK_COMBAT = 24
+local ATTACK_ARTILLERY = 4
 local ACU_RETREAT_HEALTH_RATIO = 0.55
 local LOW_ENERGY_STORED_RATIO = 0.35
 local TableGetn = table.getn
@@ -492,27 +487,13 @@ local function AttackDecision(snapshot, units, intents)
     end
 
     local combat, artillery = CombatUnits(units)
-    local state = snapshot.state or {}
-    local tick = tonumber(snapshot.tick) or 0
-    local launch = false
-
-    if state.initialWaveSent ~= true then
-        launch = (TableGetn(combat) >= FIRST_WAVE_COMBAT and artillery >= FIRST_WAVE_ARTILLERY)
-            or (tick >= FORCED_WAVE_TICK and TableGetn(combat) >= FORCED_WAVE_COMBAT)
-    else
-        local lastReinforcementTick = tonumber(state.lastReinforcementTick) or tonumber(state.lastWaveTick) or 0
-        local delayed = tick - lastReinforcementTick >= REINFORCEMENT_DELAY_TICKS
-        launch = TableGetn(combat) >= REINFORCEMENT_COMBAT
-            or (delayed and TableGetn(combat) >= REINFORCEMENT_DELAY_COMBAT)
-    end
-
-    if launch then
+    if TableGetn(combat) >= ATTACK_COMBAT and artillery >= ATTACK_ARTILLERY then
         AddIntent(intents, {
             kind = 'attack_wave',
             actorTokens = ActorTokens(combat),
             position = snapshot.targetPosition,
             priority = 40,
-            reason = state.initialWaveSent == true and 'reinforcement_wave' or 'first_wave',
+            reason = 'concentration_gate',
         })
     end
 end
