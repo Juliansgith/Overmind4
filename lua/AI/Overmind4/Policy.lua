@@ -2726,7 +2726,9 @@ Policy.Decide = function(snapshot)
         and not emergency
         and not commanderRecovery
         and not (type(snapshot.macro) == 'table'
-            and snapshot.macro.campaignEnabled == true)
+            and snapshot.macro.campaignEnabled == true
+            and not (snapshot.macro.campaignKind == 'none'
+                and snapshot.macro.campaignState == 'idle'))
     then
         FrontierScreenDecision(snapshot, units, pendingActors, intents)
         local screened = {}

@@ -789,6 +789,64 @@ def test_frontier_screen_includes_available_aa_and_preserves_disjoint_home_reser
     )
 
 
+def test_idle_enabled_campaign_still_screens_remote_frontier_engineer() -> None:
+    snapshot = screen_snapshot()
+    snapshot["macro"].update(
+        campaignEnabled=True,
+        campaignReady=False,
+        campaignState="idle",
+        campaignKind="none",
+    )
+
+    screen = intents_of(decide(snapshot), "frontier_screen")
+
+    assert len(screen) == 1
+    assert len(screen[0]["actorTokens"]) == 4
+    by_token = {unit["token"]: unit for unit in snapshot["units"]}
+    assert any(by_token[token]["role"] == "anti_air" for token in screen[0]["actorTokens"])
+    combat_tokens = {
+        unit["token"]
+        for unit in snapshot["units"]
+        if unit["role"] in {"tank", "artillery", "anti_air", "lab"}
+    }
+    assert len(combat_tokens - set(screen[0]["actorTokens"])) == 4
+
+
+@pytest.mark.parametrize(
+    "campaign_state",
+    ["awaiting_order", "mobilizing", "active", "recalled"],
+)
+def test_live_campaign_states_suppress_legacy_frontier_screen(campaign_state: str) -> None:
+    snapshot = screen_snapshot()
+    snapshot["macro"].update(
+        campaignEnabled=True,
+        campaignReady=True,
+        campaignState=campaign_state,
+        campaignKind="pressure_front",
+    )
+
+    assert intents_of(decide(snapshot), "frontier_screen") == []
+
+
+@pytest.mark.parametrize("boundary", ["contact", "emergency", "recovery"])
+def test_idle_campaign_frontier_screen_preserves_safety_boundaries(boundary: str) -> None:
+    snapshot = screen_snapshot()
+    snapshot["macro"].update(
+        campaignEnabled=True,
+        campaignReady=False,
+        campaignState="idle",
+        campaignKind="none",
+    )
+    if boundary == "contact":
+        snapshot["enemyContact"] = {"position": [18, 2, 18], "immediate": True}
+    elif boundary == "emergency":
+        next(unit for unit in snapshot["units"] if unit["role"] == "acu")["healthRatio"] = 0.54
+    else:
+        snapshot["state"]["commanderRetreating"] = True
+
+    assert intents_of(decide(snapshot), "frontier_screen") == []
+
+
 def test_surviving_partial_frontier_screen_is_replenished_with_new_aa() -> None:
     snapshot = screen_snapshot()
     existing = next(unit for unit in snapshot["units"] if unit["role"] == "tank")
