@@ -11,6 +11,7 @@ from conftest import source
 from test_controller import execute_intents
 from test_field_campaign import (
     actor_tokens_from_call,
+    assert_campaign_cohort_indexes,
     campaign_intents,
     expected_initial_cohorts,
     layered_marker,
@@ -1258,6 +1259,187 @@ def test_complete_holding_below_quorum_still_recovers_at_300() -> None:
     current = reconcile(harness)
     intents = campaign_intents(harness, current)
     assert len(intents) == 1 and intents[0]["mode"] == "recover"
+
+
+def pending_reinforcement_before_campaign_progress(
+    next_mode: str,
+    seed: int,
+) -> tuple[Any, Any, dict[str, Any]]:
+    if next_mode == "recover":
+        harness, acu, engineer, combat, observation = start_campaign(seed=seed)
+        activate_pressure_front(harness, observation)
+        fixed_units = [acu, engineer, *combat]
+        next_tick = 299
+    elif next_mode == "transition":
+        harness, acu, engineer, combat, observation = forward_graph_campaign(seed)
+        activate_pressure_front(harness, observation)
+        mexes = [
+            complete_mex(harness, 860, [45, 2, 35]),
+            complete_mex(harness, 861, [55, 2, 45]),
+        ]
+        hold_cluster(harness, acu, engineer, combat, mexes, start_tick=10)
+        fixed_units = [acu, engineer, *combat, *mexes]
+        next_tick = 159
+    elif next_mode == "assault":
+        harness, acu, engineer, combat, observation = start_campaign(
+            seed=seed,
+            site_key="last-front",
+            cluster_key="last-front",
+            position=[100, 2, 100],
+        )
+        activate_pressure_front(harness, observation)
+        mex = complete_mex(harness, 862, [100, 2, 100])
+        hold_cluster(harness, acu, engineer, combat, [mex], start_tick=10)
+        fixed_units = [acu, engineer, *combat, mex]
+        next_tick = 159
+    else:
+        raise AssertionError(next_mode)
+
+    home_fill = harness.unit(entityId=9730, blueprintId="uel0201")
+    pending_actor = harness.unit(entityId=9731, blueprintId="uel0201")
+    put_units(
+        harness,
+        [*fixed_units, home_fill, pending_actor],
+        seed=seed + 100,
+    )
+    harness.brain.tick = next_tick
+    current = reconcile(harness)
+    reinforcement = campaign_intents(harness, current)
+    assert len(reinforcement) == 1
+    assert reinforcement[0]["mode"] == "reinforce"
+    assert reinforcement[0]["actorTokens"] == ["9731:1"]
+    return harness, current, reinforcement[0]
+
+
+def invalidate_pending_reinforcement_actor(
+    harness: Any,
+    intent: dict[str, Any],
+    mutation: str,
+    seed: int,
+) -> tuple[str, str | None]:
+    old_token = intent["actorTokens"][0]
+    entity_id = int(old_token.split(":", 1)[0])
+    actor = harness.controller.unitRefs[old_token]
+    units = list(harness.brain.units.values())
+    new_token = None
+    if mutation == "dead":
+        actor.Dead = True
+    elif mutation == "captured":
+        actor.options.army = 2
+    elif mutation == "recycled":
+        replacement = harness.unit(
+            entityId=entity_id,
+            blueprintId="uel0201",
+            position=[10, 2, 20],
+        )
+        units = [
+            replacement
+            if int(candidate.options.entityId) == entity_id
+            else candidate
+            for candidate in units
+        ]
+        harness.controller.unitRefs[old_token] = replacement
+        new_token = f"{entity_id}:2"
+    else:
+        raise AssertionError(mutation)
+    random.Random(seed + 200).shuffle(units)
+    harness.brain.units = harness.lua.table_from(units)
+    return old_token, new_token
+
+
+@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("mutation", ["dead", "captured", "recycled"])
+@pytest.mark.parametrize("next_mode", ["recover", "transition", "assault"])
+def test_stale_pending_reinforcement_cannot_freeze_campaign_progress(
+    seed: int,
+    mutation: str,
+    next_mode: str,
+) -> None:
+    harness, stale_observation, stale_intent = pending_reinforcement_before_campaign_progress(
+        next_mode,
+        seed,
+    )
+    before = campaign_state(harness)
+    old_token, new_token = invalidate_pending_reinforcement_actor(
+        harness,
+        stale_intent,
+        mutation,
+        seed,
+    )
+    aggressive_before = len(harness.calls.aggressive)
+
+    execute_intents(harness, [stale_intent], stale_observation)
+
+    assert len(harness.calls.aggressive) == aggressive_before
+    assert campaign_state(harness) == before
+    harness.brain.tick += 1
+    current = reconcile(harness)
+    state = campaign_state(harness)
+    assert_campaign_cohort_indexes(harness.controller.fieldCampaign)
+    assert old_token not in (state.get("fieldTokens") or [])
+    assert old_token not in (state.get("homeTokens") or [])
+    assert state.get("orderedTokens", {}).get(old_token) is not True
+    assert state["state"] == before["state"]
+    assert state["serial"] == before["serial"]
+    assert state["anchorKey"] == before["anchorKey"]
+    intents = campaign_intents(harness, current)
+
+    if mutation == "recycled":
+        assert new_token is not None
+        assert len(intents) == 1
+        assert intents[0]["mode"] == "reinforce"
+        assert intents[0]["actorTokens"] == [new_token]
+        assert new_token in state["fieldTokens"]
+        assert state.get("orderedTokens", {}).get(new_token) is not True
+        execute_intents(harness, intents, current)
+        assert campaign_state(harness)["orderedTokens"][new_token] is True
+        harness.brain.tick += 1
+        current = reconcile(harness)
+        intents = campaign_intents(harness, current)
+
+    assert len(intents) == 1
+    assert intents[0]["mode"] == next_mode
+    assert campaign_state(harness).get("pendingMode") == next_mode
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_pruning_one_stale_reinforcement_retains_exact_live_unordered_survivors(
+    seed: int,
+) -> None:
+    harness, acu, engineer, combat, observation = start_campaign(seed=seed)
+    activate_pressure_front(harness, observation)
+    additions = [
+        harness.unit(entityId=9740 + index, blueprintId="uel0201")
+        for index in range(4)
+    ]
+    put_units(harness, [acu, engineer, *combat, *additions], seed=seed + 300)
+    harness.brain.tick = 10
+    staged_observation = reconcile(harness)
+    staged = campaign_intents(harness, staged_observation)
+    assert len(staged) == 1 and staged[0]["mode"] == "reinforce"
+    assert len(staged[0]["actorTokens"]) == 3
+    victim = staged[0]["actorTokens"][0]
+    survivors = staged[0]["actorTokens"][1:]
+    harness.controller.unitRefs[victim].Dead = True
+    aggressive_before = len(harness.calls.aggressive)
+    execute_intents(harness, staged, staged_observation)
+    assert len(harness.calls.aggressive) == aggressive_before
+
+    harness.brain.tick = 11
+    current = reconcile(harness)
+    retry = campaign_intents(harness, current)
+    state = campaign_state(harness)
+
+    assert len(retry) == 1
+    assert retry[0]["mode"] == "reinforce"
+    assert retry[0]["actorTokens"] == survivors
+    assert state["pendingTokens"] == survivors
+    assert victim not in state["fieldTokens"]
+    assert state.get("orderedTokens", {}).get(victim) is not True
+    assert_campaign_cohort_indexes(harness.controller.fieldCampaign)
+    execute_intents(harness, retry, current)
+    after = campaign_state(harness)
+    assert all(after["orderedTokens"][token] is True for token in survivors)
 
 
 def test_permanent_pressure_graph_ignores_selected_frontier_and_ownership_churn() -> None:

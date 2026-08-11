@@ -3452,7 +3452,12 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
         for _, token in ipairs(field) do
             if campaign.orderedTokens[token] ~= true then TableInsert(unordered, token) end
         end
-        CampaignSetPending(campaign, 'reinforce', unordered)
+        if TableGetn(unordered) > 0 then
+            CampaignSetPending(campaign, 'reinforce', unordered)
+        else
+            campaign.pendingMode = nil
+            campaign.pendingTokens = {}
+        end
     end
 end
 
