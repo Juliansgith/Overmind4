@@ -6,7 +6,7 @@ from test_controller import execute_intents, make_harness
 from test_policy import lua_value, plain
 
 
-def _set_director_result(harness: Any, name: str, value: dict[str, Any]) -> None:
+def _set_director_result(harness: Any, name: str, value: Any) -> None:
     harness.lua.globals().directorResults[name] = lua_value(harness.lua, value)
 
 
@@ -165,28 +165,92 @@ def test_controller_assembles_director_snapshot_in_dependency_order_and_persists
     assert plain(harness.controller.forcePlan)["epoch"] == 1
 
 
-def test_step_default_policy_composes_every_subplanner_executes_actions_and_keeps_next_tick_state() -> None:
+def test_step_default_merge_adapts_every_planner_output_once_and_persists_lifecycle() -> None:
     harness = make_harness()
-    engineer_radar = harness.unit(
+    harness.controller.crossMapOffenseEnabled = False
+    expansion_engineer = harness.unit(
         entityId=10,
         blueprintId="uel0105",
         position=[10, 2, 20],
-        canBuild={"ueb3101": True},
+        canBuild={"ueb1103": True},
     )
-    engineer_defense = harness.unit(
+    package_engineer = harness.unit(
         entityId=11,
         blueprintId="uel0105",
-        position=[12, 2, 20],
+        position=[11, 2, 20],
         canBuild={"ueb2101": True},
     )
-    responder = harness.unit(
+    reclaim_engineer = harness.unit(
+        entityId=12,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        blueprintIntel={"VisionRadius": 10},
+    )
+    radar_engineer = harness.unit(
+        entityId=14,
+        blueprintId="uel0105",
+        position=[14, 2, 20],
+        canBuild={"ueb3101": True},
+    )
+    tech_factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0101",
+        position=[10, 2, 22],
+        canBuild={"ueb0201": True},
+    )
+    scout = harness.unit(
         entityId=30,
+        blueprintId="uea0101",
+        position=[10, 20, 20],
+    )
+    air_factory = harness.unit(
+        entityId=40,
+        blueprintId="ueb0102",
+        position=[12, 2, 22],
+        canBuild={"uea0102": True},
+    )
+    transport = harness.unit(
+        entityId=50,
+        blueprintId="uea0107",
+        position=[14, 20, 20],
+        cargo=[],
+    )
+    cargo_engineer = harness.unit(
+        entityId=51,
+        blueprintId="uel0105",
+        position=[14, 2, 20],
+    )
+    responder = harness.unit(
+        entityId=60,
         blueprintId="uel0201",
         position=[16, 2, 20],
     )
     harness.brain.units = harness.lua.table_from(
-        [engineer_radar, engineer_defense, responder]
+        [
+            expansion_engineer,
+            package_engineer,
+            reclaim_engineer,
+            radar_engineer,
+            tech_factory,
+            scout,
+            air_factory,
+            transport,
+            cargo_engineer,
+            responder,
+        ]
     )
+    reclaim_prop = harness.lua.globals().MakeProp(
+        lua_value(
+            harness.lua,
+            {
+                "entityId": 501,
+                "position": [13, 2, 20],
+                "cachePosition": [13, 2, 20],
+                "mass": 500,
+            },
+        )
+    )
+    harness.brain.reclaimables = harness.lua.table_from([reclaim_prop])
     harness.brain.energyTrend = 180
     harness.brain.energyIncome = 200
     harness.brain.energyUsage = 20
@@ -200,63 +264,91 @@ def test_step_default_policy_composes_every_subplanner_executes_actions_and_keep
     harness.brain.massStored = 1000
     harness.brain.massStoredRatio = 0.9
 
-    _set_director_result(
-        harness,
-        "intelState",
-        {
-            "epoch": 1,
-            "contacts": {},
-            "threat": {"home": 1, "air": 0},
-            "expansionSafety": {"front": "safe"},
-        },
-    )
-    _set_director_result(
-        harness,
-        "macroPlan",
-        {
-            "valid": True,
-            "epoch": 1,
-            "lanes": {},
-            "regions": [
-                {
-                    "key": "front",
-                    "state": "establishing",
-                    "position": [100, 2, 100],
-                }
-            ],
-            "intents": [],
-        },
-    )
-    _set_director_result(
-        harness,
-        "jobLedger",
-        {
-            "epoch": 1,
-            "jobs": {
-                "region:front:radar": {
-                    "id": "region:front:radar",
-                    "phase": "ordered",
-                    "actorToken": "10:1",
-                }
-            },
-        },
-    )
+    near_site = plain(harness.controller.markers.mass[1])
+    home_position = plain(harness.controller.basePosition)
+    expansion_job = {
+        "id": "mex:front:1",
+        "kind": "build_mex",
+        "actorToken": "10:1",
+        "targetKey": near_site["key"],
+        "regionKey": "front",
+        "position": near_site["position"],
+        "estimatedTravelTicks": 30,
+    }
+    region = {
+        "key": "front",
+        "state": "establishing",
+        "position": [100, 2, 100],
+    }
     _set_director_result(
         harness,
         "expansionPlan",
+        {"jobs": [expansion_job], "denials": []},
+    )
+    _set_director_result(
+        harness,
+        "regionPackagePlan",
         {
-            "jobs": [],
-            "denials": [],
-            "intents": [
+            "requiredRoles": ["point_defense"],
+            "garrisonMinimum": 4,
+            "garrisonAntiAirMinimum": 1,
+            "persistent": True,
+        },
+    )
+    _set_director_result(
+        harness,
+        "reclaimPlan",
+        {
+            "jobs": [
                 {
-                    "kind": "build_structure",
-                    "actorToken": "10:1",
-                    "buildRole": "radar",
-                    "regionKey": "front",
-                    "position": [100, 2, 100],
-                    "reason": "expansion_anchor",
+                    "id": "reclaim:prop:501",
+                    "kind": "reclaim",
+                    "actorToken": "12:1",
+                    "targetKey": "prop:501",
+                    "regionKey": "home",
+                    "requiresLiveVisionRevalidation": True,
                 }
-            ],
+            ]
+        },
+    )
+    _set_director_result(
+        harness,
+        "techPlan",
+        {
+            "hqAction": "start_t2",
+            "hqSourceToken": "20:1",
+            "remainingT1ProductionLanes": 1,
+            "t2ProductionRoles": ["t2_direct_fire", "t2_anti_air"],
+        },
+    )
+    _set_director_result(
+        harness,
+        "scoutPlan",
+        {
+            "objectiveKeys": [near_site["key"]],
+            "nextObjectiveKey": near_site["key"],
+            "waypoints": [near_site["position"]],
+            "coverageAgeTicks": {near_site["key"]: 3000},
+        },
+    )
+    _set_director_result(
+        harness,
+        "airPlan",
+        {"orders": [{"buildRole": "interceptor"}]},
+    )
+    _set_director_result(
+        harness,
+        "transportPlan",
+        {
+            "mode": "airlift",
+            "missionId": "airlift:front",
+            "state": "planned",
+            "siteKey": "remote-safe",
+            "transportToken": "50:1",
+            "cargoTokens": ["51:1"],
+            "dropPosition": [300, 303, 300],
+            "dropTolerance": 20,
+            "retryCount": 0,
         },
     )
     _set_director_result(
@@ -265,157 +357,250 @@ def test_step_default_policy_composes_every_subplanner_executes_actions_and_keep
         [
             {
                 "kind": "build_structure",
-                "actorToken": "11:1",
-                "buildRole": "point_defense",
+                "actorToken": "14:1",
+                "buildRole": "radar",
                 "regionKey": "front",
                 "position": [104, 2, 100],
-                "reason": "region_package",
+                "reason": "establish_region_radar",
+                "priority": 2,
             }
         ],
     )
-    force_state = {
-        "epoch": 1,
-        "assignments": {
-            "home": [],
-            "garrison": [],
-            "field": [],
-            "response": ["30:1"],
-            "raider": [],
-            "unassigned": [],
-        },
-        "ownershipByToken": {"30:1": "response"},
-        "intents": [],
-    }
-    _set_director_result(harness, "forcePlan", force_state)
-    _set_director_result(
-        harness,
-        "homeBreachPlan",
-        {
-            **force_state,
-            "intents": [
-                {
-                    "kind": "home_response",
-                    "actorTokens": ["30:1"],
-                    "position": [10, 2, 20],
-                    "priority": "immediate_home_breach",
-                }
-            ],
-        },
-    )
 
+    def set_state_epoch(epoch: int) -> None:
+        _set_director_result(
+            harness,
+            "intelState",
+            {
+                "epoch": epoch,
+                "contacts": {},
+                "threat": {"home": 1, "air": 0},
+                "expansionSafety": {"front": "safe"},
+            },
+        )
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": epoch,
+                "lanes": {},
+                "regions": [region],
+                "intents": [],
+            },
+        )
+        _set_director_result(
+            harness,
+            "jobLedger",
+            {
+                "epoch": epoch,
+                "jobs": {
+                    expansion_job["id"]: {
+                        **expansion_job,
+                        "phase": "travelling",
+                        "deadlineTick": 600,
+                    }
+                },
+            },
+        )
+        force_state = {
+            "epoch": epoch,
+            "assignments": {
+                "home": [],
+                "garrison": [],
+                "field": [],
+                "response": ["60:1"],
+                "raider": [],
+                "unassigned": [],
+            },
+            "ownershipByToken": {"60:1": "response"},
+        }
+        _set_director_result(harness, "forcePlan", force_state)
+        _set_director_result(
+            harness,
+            "homeBreachPlan",
+            {
+                **force_state,
+                "responseIntent": {
+                    "actorTokens": ["60:1"],
+                    "position": home_position,
+                    "priority": "immediate_home_breach",
+                },
+            },
+        )
+
+    set_state_epoch(1)
     harness.lua.globals().Controller.Step(harness.controller)
 
-    subplanner_calls = {
+    planners = {
         "expansion": harness.calls.macroPlanExpansion,
         "package": harness.calls.macroPlanRegionPackage,
         "reclaim": harness.calls.macroPlanReclaim,
         "tech": harness.calls.macroPlanTech,
         "scout": harness.calls.intelligencePlanScoutRoute,
+        "radar": harness.calls.intelligencePlanRadar,
         "air": harness.calls.intelligencePlanAir,
         "transport": harness.calls.intelligencePlanTransport,
         "home-breach": harness.calls.forceHandleHomeBreach,
     }
-    assert all(len(calls) == 1 for calls in subplanner_calls.values()), {
-        name: len(calls) for name, calls in subplanner_calls.items()
+    assert {name: len(calls) for name, calls in planners.items()} == {
+        name: 1 for name in planners
+    }
+    first_new_jobs = plain(harness.calls.macroUpdateJobLedger[1].snapshot)[
+        "newJobs"
+    ]
+    assert len(first_new_jobs) == 1
+    assert {
+        key: first_new_jobs[0][key]
+        for key in ("id", "actorToken", "targetKey", "regionKey")
+    } == {
+        key: expansion_job[key]
+        for key in ("id", "actorToken", "targetKey", "regionKey")
     }
 
     assert len(harness.calls.buildMobile) == 2
-    builds = {}
-    for index in range(1, len(harness.calls.buildMobile) + 1):
-        call = harness.calls.buildMobile[index]
-        builds[call.blueprintId] = {
+    structure_builds = {
+        call.blueprintId: {
             "actor": call.units[1].options.entityId,
             "position": plain(call.position),
         }
-    assert builds == {
-        "ueb3101": {"actor": 10, "position": [100, 2, 100]},
-        "ueb2101": {"actor": 11, "position": [104, 2, 100]},
+        for call in harness.calls.buildMobile.values()
     }
+    assert structure_builds == {
+        "ueb2101": {"actor": 11, "position": [100, 101, 100]},
+        "ueb3101": {"actor": 14, "position": [104, 105, 100]},
+    }
+    assert len(harness.calls.reclaim) == 1
+    assert harness.calls.reclaim[1].units[1].options.entityId == 12
+    assert harness.calls.reclaim[1].target.EntityId == 501
+    assert len(harness.calls.upgrade) == 1
+    assert harness.calls.upgrade[1].units[1].options.entityId == 20
+    assert harness.calls.upgrade[1].blueprintId == "ueb0201"
+    assert len(harness.calls.patrol) == 1
+    assert harness.calls.patrol[1].units[1].options.entityId == 30
+    assert plain(harness.calls.patrol[1].position) == [12, 12.2, 20]
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].units[1].options.entityId == 40
+    assert harness.calls.buildFactory[1].blueprintId == "uea0102"
+    assert harness.calls.buildFactory[1].count == 1
+    assert len(harness.calls.transportLoad) == 1
+    assert harness.calls.transportLoad[1].transport.options.entityId == 50
+    assert harness.calls.transportLoad[1].units[1].options.entityId == 51
     assert len(harness.calls.move) == 1
-    assert harness.calls.move[1].units[1].options.entityId == 30
-    assert plain(harness.calls.move[1].position) == [10, 2, 20]
-    assert len(harness.calls.clear) == 1
-    assert harness.calls.clear[1].units[1].options.entityId == 30
+    assert harness.calls.move[1].units[1].options.entityId == 60
+    assert plain(harness.calls.move[1].position) == home_position
+    assert sorted(
+        call.units[1].options.entityId for call in harness.calls.clear.values()
+    ) == [30, 60]
     for calls in (
-        harness.calls.buildFactory,
-        harness.calls.upgrade,
-        harness.calls.patrol,
         harness.calls.aggressive,
         harness.calls.guard,
-        harness.calls.reclaim,
-        harness.calls.transportLoad,
+        harness.calls.rally,
         harness.calls.transportUnload,
     ):
         assert len(calls) == 0
 
-    _set_director_result(
-        harness,
-        "intelState",
-        {
-            "epoch": 2,
-            "contacts": {},
-            "threat": {"home": 0, "air": 0},
-            "expansionSafety": {"front": "safe"},
-        },
-    )
-    _set_director_result(
-        harness,
-        "macroPlan",
-        {
-            "valid": True,
-            "epoch": 2,
-            "previousEpoch": 1,
-            "lanes": {},
-            "regions": [
-                {
-                    "key": "front",
-                    "state": "establishing",
-                    "position": [100, 2, 100],
-                }
-            ],
-            "intents": [],
-        },
-    )
-    _set_director_result(
-        harness,
-        "jobLedger",
-        {
-            "epoch": 2,
-            "previousEpoch": 1,
-            "jobs": {
-                "region:front:radar": {
-                    "id": "region:front:radar",
-                    "phase": "travelling",
-                    "actorToken": "10:1",
-                }
-            },
-        },
-    )
-    for result_name, empty in (
-        ("expansionPlan", {"jobs": [], "denials": [], "intents": []}),
-        ("radarIntents", []),
-        ("homeBreachPlan", {**force_state, "epoch": 2, "intents": []}),
-        ("forcePlan", {**force_state, "epoch": 2, "intents": []}),
-    ):
-        _set_director_result(harness, result_name, empty)
-    harness.brain.tick = 1
+    pending = plain(harness.controller.pending)
+    assert pending["11:1"]["buildRole"] == "point_defense"
+    assert pending["14:1"]["buildRole"] == "radar"
+    assert pending["12:1"]["kind"] == "reclaim"
+    assert pending["20:1"]["kind"] == "factory_upgrade"
+    assert pending["40:1"]["kind"] == "factory_build"
+    assert harness.controller.reclaimReservations["prop:501"] == "12:1"
+    assert harness.controller.airScoutAssignments["30:1"] is True
+    assert plain(harness.controller.transportMissions["airlift:front"])["state"] == "loading"
+    assert plain(harness.controller.forcePlan)["ownershipByToken"]["60:1"] == "response"
 
+    first_order_counts = {
+        "build": len(harness.calls.buildMobile),
+        "reclaim": len(harness.calls.reclaim),
+        "upgrade": len(harness.calls.upgrade),
+        "patrol": len(harness.calls.patrol),
+        "production": len(harness.calls.buildFactory),
+        "load": len(harness.calls.transportLoad),
+        "response": len(harness.calls.move),
+        "clear": len(harness.calls.clear),
+    }
+    set_state_epoch(2)
+    harness.brain.tick = 1
     harness.lua.globals().Controller.Step(harness.controller)
 
-    assert len(harness.calls.buildMobile) == 2
-    assert len(harness.calls.move) == 1
+    assert {name: len(calls) for name, calls in planners.items()} == {
+        name: 2 for name in planners
+    }
+    second_new_jobs = plain(harness.calls.macroUpdateJobLedger[2].snapshot)[
+        "newJobs"
+    ]
+    assert len(second_new_jobs) == 0
+    assert {
+        "build": len(harness.calls.buildMobile),
+        "reclaim": len(harness.calls.reclaim),
+        "upgrade": len(harness.calls.upgrade),
+        "patrol": len(harness.calls.patrol),
+        "production": len(harness.calls.buildFactory),
+        "load": len(harness.calls.transportLoad),
+        "response": len(harness.calls.move),
+        "clear": len(harness.calls.clear),
+    } == first_order_counts
+    assert len(harness.calls.transportUnload) == 1
+    unload = harness.calls.transportUnload[1]
+    assert unload.transports[1].options.entityId == 50
+    assert plain(unload.position) == [300, 303, 300]
+    assert plain(harness.controller.transportMissions["airlift:front"])["state"] == "unloading"
+    second_pending = plain(harness.controller.pending)
+    assert set(second_pending) >= {"11:1", "12:1", "14:1", "20:1", "40:1"}
+    assert harness.controller.reclaimReservations["prop:501"] == "12:1"
+    assert harness.controller.airScoutAssignments["30:1"] is True
+    assert plain(harness.controller.forcePlan)["ownershipByToken"]["60:1"] == "response"
+
     assert plain(harness.calls.intelligenceUpdateMemory[2].previous)["epoch"] == 1
     assert plain(harness.calls.macroUpdateJobLedger[2].ledger)["epoch"] == 1
-    second_macro = plain(harness.calls.macroBuildPortfolio[2])
-    assert second_macro["previousMacroPlan"]["epoch"] == 1
+    assert plain(harness.calls.macroBuildPortfolio[2])["previousMacroPlan"]["epoch"] == 1
+    second_transport_snapshot = plain(harness.calls.intelligencePlanTransport[2])
+    assert second_transport_snapshot["transportMissions"]["airlift:front"]["state"] == "loading"
     assert any(
         plain(call.plan).get("epoch") == 1
         for call in harness.calls.forceReconcile.values()
     )
-    assert plain(harness.controller.intelState)["epoch"] == 2
-    assert plain(harness.controller.macroPlan)["epoch"] == 2
-    assert plain(harness.controller.jobLedger)["epoch"] == 2
-    assert plain(harness.controller.forcePlan)["epoch"] == 2
+
+    set_state_epoch(3)
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert {name: len(calls) for name, calls in planners.items()} == {
+        name: 3 for name in planners
+    }
+    assert len(
+        plain(harness.calls.macroUpdateJobLedger[3].snapshot)["newJobs"]
+    ) == 0
+    assert {
+        "build": len(harness.calls.buildMobile),
+        "reclaim": len(harness.calls.reclaim),
+        "upgrade": len(harness.calls.upgrade),
+        "patrol": len(harness.calls.patrol),
+        "production": len(harness.calls.buildFactory),
+        "load": len(harness.calls.transportLoad),
+        "response": len(harness.calls.move),
+        "clear": len(harness.calls.clear),
+    } == first_order_counts
+    assert len(harness.calls.transportUnload) == 1
+    assert plain(harness.controller.intelState)["epoch"] == 3
+    assert plain(harness.controller.macroPlan)["epoch"] == 3
+    assert plain(harness.controller.jobLedger)["epoch"] == 3
+    assert plain(harness.controller.forcePlan)["epoch"] == 3
+    assert harness.controller.transportMissions["airlift:front"] is None
+    transport_events = [
+        plain(call.event)
+        for call in harness.calls.intelligenceAdvanceTransport.values()
+    ]
+    assert [event["kind"] for event in transport_events] == [
+        "load_ordered",
+        "observed",
+        "unload_ordered",
+        "observed",
+    ]
+    assert transport_events[1]["attachedCargoTokens"] == ["51:1"]
+    assert len(transport_events[3]["attachedCargoTokens"]) == 0
 
 
 def test_policy_receives_own_director_state_but_never_observer_opponent_aggregates() -> None:

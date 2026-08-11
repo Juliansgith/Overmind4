@@ -41,7 +41,7 @@ def make_harness() -> ControllerHarness:
             macroPlanReclaim = {}, macroPlanTech = {},
             intelligenceUpdateMemory = {}, intelligencePlanRadar = {},
             intelligencePlanScoutRoute = {}, intelligencePlanAir = {},
-            intelligencePlanTransport = {},
+            intelligencePlanTransport = {}, intelligenceAdvanceTransport = {},
             forceAssign = {}, forceReconcile = {}, forceHandleHomeBreach = {},
             policySnapshots = {},
             waits = {}, sequence = {}, unitReclaimInspections = 0,
@@ -559,7 +559,44 @@ def make_harness() -> ControllerHarness:
                 table.insert(calls.intelligencePlanTransport, snapshot)
                 return directorResults.transportPlan
             end,
-            AdvanceTransport = function(mission) return mission end,
+            AdvanceTransport = function(mission, event)
+                table.insert(calls.intelligenceAdvanceTransport, {
+                    mission = mission,
+                    event = event,
+                })
+                local advanced = {}
+                for key, value in pairs(mission or {}) do advanced[key] = value end
+                local function ExactCargo(expected, observed)
+                    if table.getn(expected or {}) ~= table.getn(observed or {}) then
+                        return false
+                    end
+                    local found = {}
+                    for _, token in ipairs(observed or {}) do found[token] = true end
+                    for _, token in ipairs(expected or {}) do
+                        if found[token] ~= true then return false end
+                    end
+                    return true
+                end
+                if event and event.kind == 'load_ordered' then
+                    advanced.state = 'loading'
+                elseif event and event.kind == 'observed'
+                    and advanced.state == 'loading'
+                    and event.transportToken == advanced.transportToken
+                    and ExactCargo(advanced.cargoTokens, event.attachedCargoTokens)
+                then
+                    advanced.state = 'loaded'
+                elseif event and event.kind == 'unload_ordered' then
+                    advanced.state = 'unloading'
+                elseif event and event.kind == 'observed'
+                    and advanced.state == 'unloading'
+                    and event.transportToken == advanced.transportToken
+                    and table.getn(event.attachedCargoTokens or {}) == 0
+                then
+                    advanced.state = 'completed'
+                    advanced.released = true
+                end
+                return advanced
+            end,
         }
         ForceDirectorStub = {
             Assign = function(snapshot)
