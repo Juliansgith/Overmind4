@@ -312,6 +312,10 @@ def make_harness() -> ControllerHarness:
     brain = lua.globals().brain
     controller = lua.globals().Controller.Create(brain)
     assert controller.crossMapOffenseEnabled is False
+    # Legacy unit tests exercise the retired adapters in isolation. Live
+    # controllers default to the secured field campaign; campaign tests opt
+    # back into that production doctrine explicitly after using this harness.
+    controller.fieldCampaignEnabled = False
     # Legacy executor tests opt back into dormant offense adapters explicitly.
     controller.crossMapOffenseEnabled = True
     return ControllerHarness(

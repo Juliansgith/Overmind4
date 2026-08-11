@@ -29,6 +29,15 @@ local SITE_BACKOFF_TICKS = 300
 local FRONTIER_CLUSTER_DISTANCE = 18
 local FRONTIER_SCREEN_MAX = 4
 local HOME_RESERVE_MIN = 4
+local FIELD_CAMPAIGN_MIN_COMBAT = 24
+local FIELD_CAMPAIGN_MIN_AA = 2
+local FIELD_CAMPAIGN_EARLY_MAX = 4
+local FIELD_CAMPAIGN_HOLD_TICKS = 150
+local FIELD_CAMPAIGN_STUCK_TICKS = 300
+local FIELD_CAMPAIGN_ANCHOR_RADIUS = 20
+local FIELD_CAMPAIGN_RECALL_HEALTH = 0.70
+local FIELD_CAMPAIGN_RESUME_HEALTH = 0.75
+local FIELD_CAMPAIGN_RESUME_TICKS = 300
 local MASS_SURPLUS_TICKS = 300
 -- A UEF T1 land factory's most expensive normal queue member is T1 AA:
 -- 55 mass / (220 build time / 20 factory build rate) / 10 ticks per second.
@@ -141,6 +150,37 @@ local function SortedKeys(values)
     end
     table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
     return keys
+end
+
+local function ArrayContains(values, wanted)
+    for _, value in ipairs(values or {}) do
+        if value == wanted then return true end
+    end
+    return false
+end
+
+local function CopyArray(values)
+    local copy = {}
+    for _, value in ipairs(values or {}) do TableInsert(copy, value) end
+    return copy
+end
+
+local function SameArray(left, right)
+    if TableGetn(left or {}) ~= TableGetn(right or {}) then return false end
+    for index = 1, TableGetn(left or {}) do
+        if left[index] ~= right[index] then return false end
+    end
+    return true
+end
+
+local function IsCampaignPosition(position)
+    local copy = CopyPosition(position)
+    if not copy then return false end
+    for _, index in ipairs({ 1, 3 }) do
+        local value = copy[index]
+        if value ~= value or math.abs(value) > 10000000 then return false end
+    end
+    return true
 end
 
 local function Emit(controller, event, fields)
@@ -415,12 +455,27 @@ local function NormalizeOwnUnit(controller, unit)
     local healthRatio = maxHealth > 0 and health / maxHealth or 0
     local assignment = controller.waveAssignments[token]
     local frontierAssignment = controller.frontierAssignments[token]
-    local assigned = assignment ~= nil or frontierAssignment ~= nil
+    local campaign = controller.fieldCampaign
+    local fieldCohort = campaign
+        and ArrayContains(campaign.fieldTokens, token)
+        or false
+    local homeCohort = campaign
+        and ArrayContains(campaign.homeTokens, token)
+        or false
+    local campaignEngineer = campaign
+        and (campaign.engineerToken == token
+            or campaign.desiredEngineerToken == token)
+        or false
+    local assigned = assignment ~= nil
+        or frontierAssignment ~= nil
+        or fieldCohort == true
     local stagingRadius = role == 'acu' and COMMANDER_STAGING_RADIUS or STAGING_RADIUS
     local nearStaging = DistanceSquared(position, controller.stagingPosition)
         <= stagingRadius * stagingRadius
     local rallyPosition = controller.rallyPosition or controller.basePosition
     local nearRally = DistanceSquared(position, rallyPosition)
+        <= STAGING_RADIUS * STAGING_RADIUS
+    local nearHome = DistanceSquared(position, controller.basePosition)
         <= STAGING_RADIUS * STAGING_RADIUS
     local physics = blueprint.Physics or {}
     local economy = blueprint.Economy or {}
@@ -452,8 +507,12 @@ local function NormalizeOwnUnit(controller, unit)
         assignedToWave = assigned,
         commanderEscort = assignment and assignment.commanderEscort == true or false,
         frontierEscort = frontierAssignment ~= nil,
+        fieldCohort = fieldCohort == true,
+        homeCohort = homeCohort == true,
+        campaignEngineer = campaignEngineer == true,
         nearStaging = nearStaging,
         nearRally = nearRally,
+        nearHome = nearHome,
         moveSpeed = moveSpeed,
         buildRate = buildRate,
         buildDistance = buildDistance,
@@ -787,6 +846,8 @@ local function UpdateFrontier(controller, massSites)
     end
     if previousRallyPosition
         and DistanceSquared(previousRallyPosition, controller.rallyPosition) > 4
+        and not (controller.fieldCampaignEnabled == true
+            and controller.fieldCampaign ~= nil)
     then
         controller.rallied = {}
     end
@@ -1201,6 +1262,34 @@ local function MacroSnapshot(controller, units)
     if controller.frontierTotal > 0 then
         progress = controller.frontierOwned / controller.frontierTotal
     end
+    local campaign = controller.fieldCampaign
+    local campaignState = campaign and campaign.state or 'idle'
+    local campaignCluster = campaign and campaign.clusterKey or 'none'
+    local campaignObjective = campaign and campaign.objectiveKey or 'none'
+    local fieldTokens = campaign and CopyArray(campaign.fieldTokens) or {}
+    local homeTokens = campaign and CopyArray(campaign.homeTokens) or {}
+    local fieldAa = 0
+    local homeAa = 0
+    local fieldAtAnchor = 0
+    local objectivePosition = campaign and campaign.objectivePosition or nil
+    for _, unit in ipairs(units or {}) do
+        if unit.complete == true and COMBAT_ROLES[unit.role] then
+            if ArrayContains(fieldTokens, unit.token) then
+                if unit.role == 'anti_air' then fieldAa = fieldAa + 1 end
+                if objectivePosition
+                    and Distance(unit.position, objectivePosition)
+                        <= FIELD_CAMPAIGN_ANCHOR_RADIUS
+                then
+                    fieldAtAnchor = fieldAtAnchor + 1
+                end
+            elseif ArrayContains(homeTokens, unit.token)
+                and unit.role == 'anti_air'
+            then
+                homeAa = homeAa + 1
+            end
+        end
+    end
+    local tick = CurrentTick(controller)
     return {
         ownedMexCount = controller.ownedMexCount,
         lostMexCount = controller.lostMexCount,
@@ -1222,7 +1311,59 @@ local function MacroSnapshot(controller, units)
         homeReserveCount = homeReserve,
         reclaimTarget = reclaimTarget,
         reclaimValue = reclaimValue,
-        rallyPosition = CopyPosition(controller.rallyPosition or controller.basePosition),
+        rallyPosition = CopyPosition(campaign
+            and controller.basePosition
+            or controller.rallyPosition
+            or controller.basePosition),
+        campaignEnabled = controller.fieldCampaignEnabled == true,
+        campaignState = campaignState,
+        campaignCluster = campaignCluster,
+        campaignObjective = campaignObjective,
+        campaignMemberKeys = campaign and CopyArray(campaign.memberKeys) or {},
+        fieldTokens = fieldTokens,
+        homeTokens = homeTokens,
+        fieldUnits = TableGetn(fieldTokens),
+        fieldAa = fieldAa,
+        fieldAtAnchor = fieldAtAnchor,
+        homeUnits = TableGetn(homeTokens),
+        homeAa = homeAa,
+        campaignMissionAge = campaign
+            and math.max(0, tick - (tonumber(campaign.missionIssuedTick)
+                or tonumber(campaign.startedTick)
+                or tick))
+            or -1,
+        campaignLastProgressTick = campaign
+            and (tonumber(campaign.lastProgressTick) or -1)
+            or -1,
+        campaignFullFieldOrders = campaign
+            and (tonumber(campaign.fullFieldOrders) or 0)
+            or 0,
+        campaignModeSwitches = campaign
+            and (tonumber(campaign.modeSwitches) or 0)
+            or 0,
+        campaignEmergency = campaign and campaign.emergency == true or false,
+        campaignIntentMode = campaign
+            and controller.legacyFrontierRetirementPending ~= true
+            and campaign.pendingMode
+            or 'none',
+        campaignIntentTokens = campaign
+            and controller.legacyFrontierRetirementPending ~= true
+            and CopyArray(campaign.pendingTokens)
+            or {},
+        campaignIntentEngineer = campaign
+            and (campaign.desiredEngineerToken or campaign.engineerToken)
+            or 'none',
+        campaignIntentCluster = campaign
+            and (campaign.desiredClusterKey or campaign.clusterKey)
+            or 'none',
+        campaignIntentObjective = campaign
+            and (campaign.desiredObjectiveKey or campaign.objectiveKey)
+            or 'none',
+        campaignIntentPosition = campaign
+            and CopyPosition(campaign.desiredObjectivePosition
+                or campaign.objectivePosition)
+            or nil,
+        campaignSerial = campaign and campaign.serial or -1,
     }
 end
 
@@ -2484,7 +2625,10 @@ local function ExecuteCombatGroup(controller, intent, recordByToken, usedActors)
     local tokens = {}
     for _, record in ipairs(records) do
         local actor = controller.unitRefs[record.token]
+        local fieldOwned = controller.fieldCampaign
+            and ArrayContains(controller.fieldCampaign.fieldTokens, record.token)
         if actor
+            and not fieldOwned
             and not controller.frontierAssignments[record.token]
             and (intent.kind ~= 'attack_wave' or not controller.waveAssignments[record.token])
         then
@@ -2585,6 +2729,1033 @@ local function ExecuteRetreat(controller, intent, record)
     return true
 end
 
+local function CampaignCombatRecords(units)
+    local records = {}
+    for _, record in ipairs(units or {}) do
+        if COMBAT_ROLES[record.role] and record.complete == true then
+            TableInsert(records, record)
+        end
+    end
+    table.sort(records, function(a, b) return a.token < b.token end)
+    return records
+end
+
+local function CampaignTargetCounts(records)
+    local total = TableGetn(records)
+    local antiAir = 0
+    for _, record in ipairs(records) do
+        if record.role == 'anti_air' then antiAir = antiAir + 1 end
+    end
+    local full = total >= FIELD_CAMPAIGN_MIN_COMBAT
+        and antiAir >= FIELD_CAMPAIGN_MIN_AA
+    local field = math.min(
+        FIELD_CAMPAIGN_EARLY_MAX,
+        math.max(0, total - HOME_RESERVE_MIN)
+    )
+    local fieldAntiAir = math.min(field, antiAir > 0 and 1 or 0)
+    if full then
+        field = math.floor(3 * total / 4)
+        fieldAntiAir = math.max(1, math.min(
+            math.floor(3 * antiAir / 4),
+            antiAir - 1
+        ))
+    end
+    return total, antiAir, field, fieldAntiAir, full
+end
+
+local function InitialCampaignCohorts(records)
+    local _, _, fieldTarget, fieldAaTarget, full = CampaignTargetCounts(records)
+    local selected = {}
+    local field = {}
+    local home = {}
+    for _, record in ipairs(records) do
+        if record.role == 'anti_air'
+            and TableGetn(field) < fieldTarget
+            and TableGetn(field) < fieldAaTarget
+        then
+            selected[record.token] = true
+            TableInsert(field, record.token)
+        end
+    end
+    for _, record in ipairs(records) do
+        if TableGetn(field) < fieldTarget
+            and record.role ~= 'anti_air'
+            and not selected[record.token]
+        then
+            selected[record.token] = true
+            TableInsert(field, record.token)
+        end
+    end
+    for _, record in ipairs(records) do
+        if TableGetn(field) < fieldTarget and not selected[record.token] then
+            selected[record.token] = true
+            TableInsert(field, record.token)
+        end
+    end
+    for _, record in ipairs(records) do
+        if not selected[record.token] then TableInsert(home, record.token) end
+    end
+    table.sort(field)
+    table.sort(home)
+    return field, home, full
+end
+
+local function ExpandCampaignField(records, existingField, fieldTarget, fieldAaTarget)
+    local field = CopyArray(existingField)
+    local selected = {}
+    local fieldAa = 0
+    for _, token in ipairs(field) do selected[token] = true end
+    for _, record in ipairs(records) do
+        if selected[record.token] and record.role == 'anti_air' then
+            fieldAa = fieldAa + 1
+        end
+    end
+    for _, record in ipairs(records) do
+        if TableGetn(field) < fieldTarget
+            and fieldAa < fieldAaTarget
+            and record.role == 'anti_air'
+            and not selected[record.token]
+        then
+            selected[record.token] = true
+            TableInsert(field, record.token)
+            fieldAa = fieldAa + 1
+        end
+    end
+    for _, record in ipairs(records) do
+        if TableGetn(field) < fieldTarget
+            and record.role ~= 'anti_air'
+            and not selected[record.token]
+        then
+            selected[record.token] = true
+            TableInsert(field, record.token)
+        end
+    end
+    for _, record in ipairs(records) do
+        if TableGetn(field) < fieldTarget and not selected[record.token] then
+            selected[record.token] = true
+            TableInsert(field, record.token)
+        end
+    end
+    local home = {}
+    for _, record in ipairs(records) do
+        if not selected[record.token] then TableInsert(home, record.token) end
+    end
+    return field, home
+end
+
+local function CampaignMemberKeys(controller, clusterKey, siteKey)
+    local members = {}
+    for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
+        if site.key == siteKey or site.clusterKey == clusterKey then
+            TableInsert(members, site.key)
+        end
+    end
+    if TableGetn(members) == 0 and type(siteKey) == 'string' then
+        TableInsert(members, siteKey)
+    end
+    table.sort(members)
+    return members
+end
+
+local function CampaignSite(controller, siteKey)
+    for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
+        if site.key == siteKey then return site end
+    end
+    return nil
+end
+
+local function CampaignOperationRecord(observation, operation)
+    if not operation or type(operation.actorToken) ~= 'string' then return nil end
+    for _, record in ipairs(observation.units or {}) do
+        if record.token == operation.actorToken
+            and (record.role == 'engineer' or record.role == 'acu')
+            and record.complete == true
+        then
+            return record
+        end
+    end
+    return nil
+end
+
+local function ValidCampaignOperation(controller, observation, operation, creation)
+    if not StructureOperation(operation)
+        or operation.buildRole ~= 'mass_extractor'
+        or (operation.reason ~= 'frontier_expansion'
+            and operation.reason ~= 'rebuild_mex')
+        or type(operation.siteKey) ~= 'string'
+        or not IsCampaignPosition(operation.position)
+        or operation.phase == 'cancelling'
+        or operation.cancelReason ~= nil
+        or not CampaignOperationRecord(observation, operation)
+    then
+        return false
+    end
+    if creation then
+        local site = CampaignSite(controller, operation.siteKey)
+        if not site
+            or site.engineerReachable ~= true
+            or site.landReachable ~= true
+        then
+            return false
+        end
+    end
+    return true
+end
+
+local function CampaignCandidate(controller, observation)
+    for _, token in ipairs(SortedKeys(controller.pending)) do
+        local operation = controller.pending[token]
+        if operation.reason == 'rebuild_mex'
+            and ValidCampaignOperation(controller, observation, operation, true)
+        then
+            return operation
+        end
+    end
+    for _, token in ipairs(SortedKeys(controller.pending)) do
+        local operation = controller.pending[token]
+        if operation.reason == 'frontier_expansion'
+            and ValidCampaignOperation(controller, observation, operation, true)
+        then
+            return operation
+        end
+    end
+    return nil
+end
+
+local function CampaignSetPending(campaign, mode, tokens)
+    campaign.pendingMode = mode
+    campaign.pendingTokens = CopyArray(tokens or {})
+    table.sort(campaign.pendingTokens)
+end
+
+local function StartFieldCampaign(controller, observation, operation)
+    local records = CampaignCombatRecords(observation.units)
+    local field, home, full = InitialCampaignCohorts(records)
+    controller.fieldCampaignSerial = (tonumber(controller.fieldCampaignSerial) or 0) + 1
+    local tick = CurrentTick(controller)
+    local record = CampaignOperationRecord(observation, operation)
+    local clusterKey = operation.clusterKey
+        or controller.selectedFrontierCluster
+        or operation.siteKey
+    -- Factories may still carry the legacy frontier rally ledger when the
+    -- secured campaign doctrine first takes ownership.  Force one base-rally
+    -- reconciliation under the new doctrine.
+    controller.rallied = {}
+    local campaign = {
+        serial = controller.fieldCampaignSerial,
+        state = full and 'awaiting_order' or 'early_awaiting_order',
+        clusterKey = tostring(clusterKey),
+        objectiveKey = operation.siteKey,
+        objectivePosition = CopyPosition(operation.position),
+        objectiveReason = operation.reason,
+        engineerToken = operation.actorToken,
+        engineerRole = record.role,
+        memberKeys = CampaignMemberKeys(controller, clusterKey, operation.siteKey),
+        fieldTokens = field,
+        homeTokens = home,
+        orderedTokens = {},
+        fullCohorts = full,
+        startedTick = tick,
+        lastProgressTick = tick,
+        bestDistance = Distance(record.position, operation.position),
+        lastRecoveryAttemptTick = tick - FIELD_CAMPAIGN_STUCK_TICKS,
+        heldSinceTick = nil,
+        healthySinceTick = nil,
+        emergency = false,
+        fullFieldOrders = 0,
+        reinforcementOrders = 0,
+        recoveryOrders = 0,
+        modeSwitches = 0,
+    }
+    controller.fieldCampaign = campaign
+    if TableGetn(field) > 0 then CampaignSetPending(campaign, 'activate', field) end
+    Emit(controller, 'campaign_started', {
+        cluster = campaign.clusterKey,
+        objective = campaign.objectiveKey,
+        field_units = TableGetn(field),
+        home_units = TableGetn(home),
+    })
+end
+
+local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
+    local records = CampaignCombatRecords(units)
+    local previousState = campaign.state
+    local previousPendingMode = campaign.pendingMode
+    local byToken = RecordByToken(records)
+    local field = {}
+    local home = {}
+    local assigned = {}
+    for _, token in ipairs(campaign.fieldTokens or {}) do
+        if byToken[token] then
+            assigned[token] = true
+            TableInsert(field, token)
+        else
+            campaign.orderedTokens[token] = nil
+        end
+    end
+    for _, token in ipairs(campaign.homeTokens or {}) do
+        if byToken[token] and not assigned[token] then
+            assigned[token] = true
+            TableInsert(home, token)
+        end
+    end
+    local _, _, fieldTarget, fieldAaTarget, full = CampaignTargetCounts(records)
+    if full
+        and campaign.fullCohorts ~= true
+        and (campaign.state ~= 'recalled' or allowRecalledUpgrade == true)
+    then
+        local fieldSet = {}
+        local fieldAa = 0
+        for _, token in ipairs(field) do
+            fieldSet[token] = true
+            if byToken[token].role == 'anti_air' then fieldAa = fieldAa + 1 end
+        end
+        for _, record in ipairs(records) do
+            if TableGetn(field) < fieldTarget
+                and fieldAa < fieldAaTarget
+                and record.role == 'anti_air'
+                and not fieldSet[record.token]
+            then
+                fieldSet[record.token] = true
+                TableInsert(field, record.token)
+                fieldAa = fieldAa + 1
+            end
+        end
+        for _, record in ipairs(records) do
+            if TableGetn(field) < fieldTarget
+                and record.role ~= 'anti_air'
+                and not fieldSet[record.token]
+            then
+                fieldSet[record.token] = true
+                TableInsert(field, record.token)
+            end
+        end
+        for _, record in ipairs(records) do
+            if TableGetn(field) < fieldTarget and not fieldSet[record.token] then
+                fieldSet[record.token] = true
+                TableInsert(field, record.token)
+            end
+        end
+        home = {}
+        assigned = {}
+        campaign.orderedTokens = {}
+        for _, token in ipairs(field) do assigned[token] = true end
+        for _, record in ipairs(records) do
+            if not assigned[record.token] then
+                assigned[record.token] = true
+                TableInsert(home, record.token)
+            end
+        end
+        campaign.fullCohorts = true
+        if previousPendingMode == 'activate'
+            or previousPendingMode == 'retarget'
+            or previousPendingMode == 'transition'
+            or previousPendingMode == 'recover'
+            or previousPendingMode == 'recall'
+            or previousPendingMode == 'resume'
+        then
+            CampaignSetPending(campaign, previousPendingMode, field)
+        elseif previousState == 'active'
+            or previousState == 'awaiting_order'
+            or previousState == 'early_awaiting_order'
+        then
+            campaign.state = 'awaiting_order'
+            CampaignSetPending(campaign, 'activate', field)
+        end
+    else
+        local fieldAa = 0
+        for _, token in ipairs(field) do
+            if byToken[token].role == 'anti_air' then fieldAa = fieldAa + 1 end
+        end
+        for _, record in ipairs(records) do
+            if not assigned[record.token] then
+                local fieldDeficit = fieldTarget - TableGetn(field)
+                local homeDeficit = (TableGetn(records) - fieldTarget) - TableGetn(home)
+                local chooseField = false
+                if campaign.state ~= 'recalled'
+                    and record.role == 'anti_air'
+                    and fieldDeficit > 0
+                    and fieldAa < fieldAaTarget
+                then
+                    chooseField = true
+                elseif campaign.state ~= 'recalled'
+                    and fieldDeficit > homeDeficit
+                then
+                    chooseField = true
+                end
+                if chooseField then
+                    TableInsert(field, record.token)
+                    if record.role == 'anti_air' then fieldAa = fieldAa + 1 end
+                else
+                    TableInsert(home, record.token)
+                end
+                assigned[record.token] = true
+            end
+        end
+    end
+    if campaign.state == 'recalled'
+        and allowRecalledUpgrade == true
+        and TableGetn(field) < fieldTarget
+    then
+        field, home = ExpandCampaignField(
+            records,
+            field,
+            fieldTarget,
+            fieldAaTarget
+        )
+    end
+    table.sort(field)
+    table.sort(home)
+    campaign.fieldTokens = field
+    campaign.homeTokens = home
+    if campaign.pendingMode == 'activate'
+        or campaign.pendingMode == 'retarget'
+        or campaign.pendingMode == 'transition'
+        or campaign.pendingMode == 'recover'
+        or campaign.pendingMode == 'recall'
+        or campaign.pendingMode == 'resume'
+    then
+        CampaignSetPending(campaign, campaign.pendingMode, field)
+    elseif campaign.pendingMode == 'reinforce' then
+        local unordered = {}
+        for _, token in ipairs(field) do
+            if campaign.orderedTokens[token] ~= true then TableInsert(unordered, token) end
+        end
+        CampaignSetPending(campaign, 'reinforce', unordered)
+    end
+end
+
+local function ApplyCampaignFlags(campaign, units)
+    for _, record in ipairs(units or {}) do
+        local field = campaign and ArrayContains(campaign.fieldTokens, record.token) or false
+        local home = campaign and ArrayContains(campaign.homeTokens, record.token) or false
+        record.fieldCohort = field == true
+        record.homeCohort = home == true
+        record.campaignEngineer = campaign
+            and (record.token == campaign.engineerToken
+                or record.token == campaign.desiredEngineerToken)
+            or false
+        if field then
+            record.assignedToWave = true
+            record.availableForWave = false
+        end
+    end
+end
+
+local function RelevantCampaignOperation(controller, observation, campaign)
+    for _, token in ipairs(SortedKeys(controller.pending)) do
+        local operation = controller.pending[token]
+        if operation.reason == 'rebuild_mex'
+            and ArrayContains(campaign.memberKeys, operation.siteKey)
+            and ValidCampaignOperation(controller, observation, operation, false)
+        then
+            return operation
+        end
+    end
+    for _, token in ipairs(SortedKeys(controller.pending)) do
+        local operation = controller.pending[token]
+        if operation.reason == 'rebuild_mex'
+            and ValidCampaignOperation(controller, observation, operation, false)
+        then
+            return operation
+        end
+    end
+    for _, token in ipairs(SortedKeys(controller.pending)) do
+        local operation = controller.pending[token]
+        if ValidCampaignOperation(controller, observation, operation, false)
+            and (operation.siteKey == campaign.objectiveKey
+                or (operation.reason == 'frontier_expansion'
+                    and (operation.clusterKey == campaign.clusterKey
+                        or ArrayContains(campaign.memberKeys, operation.siteKey))))
+        then
+            return operation
+        end
+    end
+    return nil
+end
+
+local function CampaignClusterComplete(controller, campaign)
+    if TableGetn(campaign.memberKeys or {}) == 0 then return false end
+    for _, siteKey in ipairs(campaign.memberKeys) do
+        local site = CampaignSite(controller, siteKey)
+        if not site or site.complete ~= true then return false end
+    end
+    return true
+end
+
+local function CampaignTargetInvalid(controller, siteKey, position)
+    if not IsCampaignPosition(position) then return true end
+    local site = CampaignSite(controller, siteKey)
+    return not site
+        or site.engineerReachable ~= true
+        or site.landReachable ~= true
+end
+
+local function CampaignObjectiveInvalid(controller, campaign)
+    return CampaignTargetInvalid(
+        controller,
+        campaign.objectiveKey,
+        campaign.objectivePosition
+    )
+end
+
+local function AwaitCampaignObjective(controller, campaign, reason)
+    if campaign.state == 'awaiting_objective' then return end
+    campaign.state = 'awaiting_objective'
+    campaign.pendingMode = nil
+    campaign.pendingTokens = {}
+    campaign.heldSinceTick = nil
+    campaign.awaitingReason = reason or 'unknown'
+    Emit(controller,
+        reason == 'cluster_held' and 'campaign_held' or 'campaign_objective_released',
+        {
+            cluster = campaign.clusterKey or 'none',
+            objective = campaign.objectiveKey or 'none',
+            reason = reason or 'unknown',
+        }
+    )
+end
+
+local function SetDesiredCampaignObjective(controller, observation, campaign, operation)
+    local record = CampaignOperationRecord(observation, operation)
+    if not record then return false end
+    local clusterKey = operation.clusterKey
+        or controller.selectedFrontierCluster
+        or operation.siteKey
+    campaign.desiredObjectiveKey = operation.siteKey
+    campaign.desiredObjectivePosition = CopyPosition(operation.position)
+    campaign.desiredObjectiveReason = operation.reason
+    campaign.desiredEngineerToken = operation.actorToken
+    campaign.desiredEngineerRole = record.role
+    campaign.desiredClusterKey = tostring(clusterKey)
+    campaign.desiredMemberKeys = CampaignMemberKeys(
+        controller,
+        clusterKey,
+        operation.siteKey
+    )
+    return true
+end
+
+local function ClearDesiredCampaignObjective(campaign)
+    campaign.desiredObjectiveKey = nil
+    campaign.desiredObjectivePosition = nil
+    campaign.desiredObjectiveReason = nil
+    campaign.desiredEngineerToken = nil
+    campaign.desiredEngineerRole = nil
+    campaign.desiredClusterKey = nil
+    campaign.desiredMemberKeys = nil
+    campaign.desiredReplacesCampaign = nil
+end
+
+local function PendingCampaignOperationValid(controller, campaign)
+    local mode = campaign.pendingMode
+    if mode ~= 'activate'
+        and mode ~= 'retarget'
+        and mode ~= 'transition'
+        and mode ~= 'recover'
+    then
+        return true
+    end
+    local token = campaign.desiredEngineerToken or campaign.engineerToken
+    local siteKey = campaign.desiredObjectiveKey or campaign.objectiveKey
+    local reason = campaign.desiredObjectiveReason or campaign.objectiveReason
+    local position = campaign.desiredObjectivePosition or campaign.objectivePosition
+    local operation = token and controller.pending[token] or nil
+    return StructureOperation(operation)
+        and operation.actorToken == token
+        and operation.siteKey == siteKey
+        and operation.buildRole == 'mass_extractor'
+        and operation.reason == reason
+        and IsCampaignPosition(operation.position)
+        and IsCampaignPosition(position)
+        and DistanceSquared(operation.position, position) <= 0.01
+        and operation.phase ~= 'cancelling'
+        and operation.cancelReason == nil
+end
+
+local function AdoptCampaignOperation(controller, observation, campaign, operation)
+    local record = CampaignOperationRecord(observation, operation)
+    if not record then return false end
+    local clusterKey = operation.clusterKey
+        or controller.selectedFrontierCluster
+        or operation.siteKey
+    campaign.clusterKey = tostring(clusterKey)
+    campaign.memberKeys = CampaignMemberKeys(
+        controller,
+        clusterKey,
+        operation.siteKey
+    )
+    campaign.objectiveKey = operation.siteKey
+    campaign.objectivePosition = CopyPosition(operation.position)
+    campaign.objectiveReason = operation.reason
+    campaign.engineerToken = operation.actorToken
+    campaign.engineerRole = record.role
+    ClearDesiredCampaignObjective(campaign)
+    return true
+end
+
+local function UpdateCampaignProgress(controller, observation, campaign, operation)
+    if not operation then return end
+    local operationProgressTick = tonumber(operation.lastProgressTick)
+    if operationProgressTick
+        and operationProgressTick > (tonumber(campaign.lastProgressTick) or -1)
+    then
+        campaign.lastProgressTick = operationProgressTick
+    end
+    local record = CampaignOperationRecord(observation, operation)
+    if not record then return end
+    local distance = Distance(record.position, operation.position)
+    if distance + 2 < (tonumber(campaign.bestDistance) or 1000000000000) then
+        campaign.bestDistance = distance
+        campaign.lastProgressTick = CurrentTick(controller)
+    end
+end
+
+local function CampaignAcuHealth(observation)
+    for _, record in ipairs(observation.units or {}) do
+        if record.role == 'acu' and record.complete == true then
+            return tonumber(record.healthRatio)
+        end
+    end
+    return nil
+end
+
+local function UpdateFieldCampaign(controller, observation)
+    if controller.fieldCampaignEnabled ~= true then
+        ApplyCampaignFlags(nil, observation.units)
+        return
+    end
+    local campaign = controller.fieldCampaign
+    if not campaign then
+        local candidate = CampaignCandidate(controller, observation)
+        if candidate then StartFieldCampaign(controller, observation, candidate) end
+        campaign = controller.fieldCampaign
+        ApplyCampaignFlags(campaign, observation.units)
+        return
+    end
+
+    local tick = CurrentTick(controller)
+    local health = CampaignAcuHealth(observation)
+    local allowRecalledUpgrade = campaign.state == 'recalled'
+        and health ~= nil
+        and health >= FIELD_CAMPAIGN_RESUME_HEALTH
+        and campaign.healthySinceTick ~= nil
+        and tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
+    CampaignPruneAndFill(
+        campaign,
+        observation.units,
+        allowRecalledUpgrade
+    )
+    ApplyCampaignFlags(campaign, observation.units)
+    if campaign.state == 'recalled' then
+        if campaign.pendingMode == 'resume' then
+            campaign.pendingMode = nil
+            campaign.pendingTokens = {}
+        end
+        ClearDesiredCampaignObjective(campaign)
+        local currentObjectiveInvalid = CampaignObjectiveInvalid(
+            controller,
+            campaign
+        )
+        local resumeOperation = nil
+        if currentObjectiveInvalid then
+            resumeOperation = CampaignCandidate(controller, observation)
+        else
+            resumeOperation = RelevantCampaignOperation(
+                controller,
+                observation,
+                campaign
+            )
+        end
+        if resumeOperation
+            and (resumeOperation.siteKey ~= campaign.objectiveKey
+                or resumeOperation.actorToken ~= campaign.engineerToken
+                or resumeOperation.reason ~= campaign.objectiveReason
+                or not IsCampaignPosition(resumeOperation.position)
+                or DistanceSquared(
+                    resumeOperation.position,
+                    campaign.objectivePosition
+                ) > 0.01)
+        then
+            local desired = SetDesiredCampaignObjective(
+                controller,
+                observation,
+                campaign,
+                resumeOperation
+            )
+            if desired then
+                campaign.desiredReplacesCampaign = currentObjectiveInvalid == true
+            end
+        end
+        local resumeToken = campaign.desiredEngineerToken or campaign.engineerToken
+        local resumeRole = campaign.desiredEngineerRole or campaign.engineerRole
+        local resumeSiteKey = campaign.desiredObjectiveKey or campaign.objectiveKey
+        local resumePosition = campaign.desiredObjectivePosition
+            or campaign.objectivePosition
+        local resumeObjectiveInvalid = CampaignTargetInvalid(
+            controller,
+            resumeSiteKey,
+            resumePosition
+        )
+        local resumeRecord = nil
+        for _, record in ipairs(observation.units or {}) do
+            if record.token == resumeToken
+                and record.role == resumeRole
+                and record.complete == true
+            then
+                resumeRecord = record
+                break
+            end
+        end
+        if health and health >= FIELD_CAMPAIGN_RESUME_HEALTH then
+            if campaign.healthySinceTick == nil then campaign.healthySinceTick = tick end
+            if tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
+                and TableGetn(campaign.fieldTokens) > 0
+                and resumeOperation ~= nil
+                and resumeRecord ~= nil
+                and not resumeObjectiveInvalid
+            then
+                CampaignSetPending(campaign, 'resume', campaign.fieldTokens)
+            end
+        else
+            campaign.healthySinceTick = nil
+            campaign.pendingMode = nil
+            campaign.pendingTokens = {}
+        end
+        return
+    end
+    if health and health < FIELD_CAMPAIGN_RECALL_HEALTH
+        and TableGetn(campaign.fieldTokens) > 0
+    then
+        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
+        return
+    end
+    if campaign.state == 'awaiting_objective' then
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+        ClearDesiredCampaignObjective(campaign)
+        local candidate = CampaignCandidate(controller, observation)
+        if candidate
+            and SetDesiredCampaignObjective(
+                controller,
+                observation,
+                campaign,
+                candidate
+            )
+        then
+            CampaignSetPending(campaign, 'transition', campaign.fieldTokens)
+        end
+        return
+    end
+    if not PendingCampaignOperationValid(controller, campaign) then
+        local failedMode = campaign.pendingMode
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+        ClearDesiredCampaignObjective(campaign)
+        if failedMode == 'activate' then
+            local replacement = CampaignCandidate(controller, observation)
+            if replacement
+                and AdoptCampaignOperation(
+                    controller,
+                    observation,
+                    campaign,
+                    replacement
+                )
+            then
+                CampaignSetPending(campaign, 'activate', campaign.fieldTokens)
+                return
+            end
+            AwaitCampaignObjective(controller, campaign, 'operation_missing')
+            return
+        elseif failedMode == 'transition' then
+            AwaitCampaignObjective(controller, campaign, 'operation_missing')
+            return
+        end
+    end
+    if CampaignObjectiveInvalid(controller, campaign) then
+        AwaitCampaignObjective(controller, campaign, 'objective_invalid')
+        return
+    end
+
+    if CampaignClusterComplete(controller, campaign) then
+        if campaign.heldSinceTick == nil then campaign.heldSinceTick = tick end
+        campaign.state = 'holding'
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+        if tick - campaign.heldSinceTick >= FIELD_CAMPAIGN_HOLD_TICKS then
+            AwaitCampaignObjective(controller, campaign, 'cluster_held')
+        end
+        return
+    end
+    campaign.heldSinceTick = nil
+    if campaign.state == 'holding' then campaign.state = 'active' end
+
+    local operation = RelevantCampaignOperation(controller, observation, campaign)
+    UpdateCampaignProgress(controller, observation, campaign, operation)
+    if campaign.pendingMode == 'activate'
+        or campaign.pendingMode == 'retarget'
+        or campaign.pendingMode == 'recover'
+    then
+        return
+    end
+    if operation
+        and (operation.siteKey ~= campaign.objectiveKey
+            or operation.actorToken ~= campaign.engineerToken)
+    then
+        if SetDesiredCampaignObjective(
+            controller,
+            observation,
+            campaign,
+            operation
+        ) then
+            CampaignSetPending(campaign, 'retarget', campaign.fieldTokens)
+        end
+        return
+    end
+    if operation
+        and campaign.state == 'active'
+        and tick - (tonumber(campaign.lastProgressTick) or tick)
+            >= FIELD_CAMPAIGN_STUCK_TICKS
+        and tick - (tonumber(campaign.lastRecoveryAttemptTick) or -1000000)
+            >= FIELD_CAMPAIGN_STUCK_TICKS
+        and TableGetn(campaign.fieldTokens) > 0
+    then
+        CampaignSetPending(campaign, 'recover', campaign.fieldTokens)
+        return
+    end
+    if campaign.state == 'active' then
+        local unordered = {}
+        for _, token in ipairs(campaign.fieldTokens) do
+            if campaign.orderedTokens[token] ~= true then TableInsert(unordered, token) end
+        end
+        if TableGetn(unordered) > 0 then
+            CampaignSetPending(campaign, 'reinforce', unordered)
+        end
+    elseif operation
+        and TableGetn(campaign.fieldTokens) > 0
+        and campaign.pendingMode == nil
+    then
+        CampaignSetPending(campaign, 'activate', campaign.fieldTokens)
+    end
+end
+
+local function CampaignExpectedPosition(controller, campaign, mode)
+    if mode == 'recall' then return CopyPosition(controller.basePosition) end
+    return CopyPosition(campaign.desiredObjectivePosition or campaign.objectivePosition)
+end
+
+local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActors)
+    local campaign = controller.fieldCampaign
+    if controller.fieldCampaignEnabled ~= true
+        or controller.legacyFrontierRetirementPending == true
+        or controller.frontierMission ~= nil
+        or not campaign
+        or type(intent.mode) ~= 'string'
+        or intent.mode ~= campaign.pendingMode
+        or type(intent.campaignSerial) ~= 'number'
+        or intent.campaignSerial ~= campaign.serial
+        or type(intent.clusterKey) ~= 'string'
+        or intent.clusterKey
+            ~= (campaign.desiredClusterKey or campaign.clusterKey)
+        or type(intent.objectiveKey) ~= 'string'
+        or intent.objectiveKey
+            ~= (campaign.desiredObjectiveKey or campaign.objectiveKey)
+        or type(intent.actorTokens) ~= 'table'
+    then
+        return false
+    end
+    local tokens = {}
+    local seen = {}
+    for _, token in ipairs(intent.actorTokens or {}) do
+        if type(token) ~= 'string' or seen[token] then return false end
+        seen[token] = true
+        TableInsert(tokens, token)
+    end
+    table.sort(tokens)
+    local expected = CopyArray(campaign.pendingTokens)
+    table.sort(expected)
+    if not SameArray(tokens, expected) or TableGetn(tokens) == 0 then return false end
+    local expectedPosition = CampaignExpectedPosition(controller, campaign, intent.mode)
+    if not expectedPosition
+        or not IsCampaignPosition(intent.position)
+        or DistanceSquared(expectedPosition, intent.position) > 0.01
+    then
+        return false
+    end
+
+    local actors = {}
+    for _, token in ipairs(tokens) do
+        local record = recordByToken[token]
+        if usedActors[token]
+            or not ArrayContains(campaign.fieldTokens, token)
+            or controller.pending[token]
+            or controller.waveAssignments[token]
+            or not record
+            or not COMBAT_ROLES[record.role]
+            or record.complete ~= true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, record.role)
+        if not actor then return false end
+        TableInsert(actors, actor)
+    end
+
+    local guard = nil
+    if intent.mode ~= 'recall' then
+        local guardToken = campaign.desiredEngineerToken or campaign.engineerToken
+        local guardRole = campaign.desiredEngineerRole or campaign.engineerRole
+        if intent.engineerToken ~= guardToken then return false end
+        guard = LiveOwnedActor(
+            controller,
+            guardToken,
+            recordByToken[guardToken],
+            guardRole
+        )
+        if not guard then return false end
+        if intent.mode == 'activate'
+            or intent.mode == 'retarget'
+            or intent.mode == 'transition'
+            or intent.mode == 'recover'
+            or intent.mode == 'resume'
+        then
+            local operation = controller.pending[guardToken]
+            local expectedKey = campaign.desiredObjectiveKey
+                or campaign.objectiveKey
+            local expectedReason = campaign.desiredObjectiveReason
+                or campaign.objectiveReason
+            if not StructureOperation(operation)
+                or operation.actorToken ~= guardToken
+                or operation.siteKey ~= expectedKey
+                or operation.buildRole ~= 'mass_extractor'
+                or operation.reason ~= expectedReason
+                or not IsCampaignPosition(operation.position)
+                or DistanceSquared(operation.position, expectedPosition) > 0.01
+                or operation.phase == 'cancelling'
+                or operation.cancelReason ~= nil
+            then
+                return false
+            end
+        end
+    end
+
+    local clearOk = pcall(function() IssueClearCommands(actors) end)
+    if not clearOk then return false end
+    local orderOk = false
+    if intent.mode == 'recall' then
+        orderOk = pcall(function() IssueMove(actors, expectedPosition) end)
+    else
+        orderOk = pcall(function() IssueGuard(actors, guard) end)
+    end
+    if not orderOk then
+        pcall(function() IssueClearCommands(actors) end)
+        return false
+    end
+
+    local tick = CurrentTick(controller)
+    for _, token in ipairs(tokens) do
+        usedActors[token] = true
+        campaign.orderedTokens[token] = true
+    end
+    local mode = intent.mode
+    if mode == 'activate' then
+        campaign.state = 'active'
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.missionIssuedTick = tick
+    elseif mode == 'reinforce' then
+        campaign.reinforcementOrders = campaign.reinforcementOrders + 1
+    elseif mode == 'retarget' then
+        campaign.objectiveKey = campaign.desiredObjectiveKey
+        campaign.objectivePosition = CopyPosition(campaign.desiredObjectivePosition)
+        campaign.objectiveReason = campaign.desiredObjectiveReason
+        campaign.engineerToken = campaign.desiredEngineerToken
+        campaign.engineerRole = campaign.desiredEngineerRole
+        campaign.desiredObjectiveKey = nil
+        campaign.desiredObjectivePosition = nil
+        campaign.desiredObjectiveReason = nil
+        campaign.desiredEngineerToken = nil
+        campaign.desiredEngineerRole = nil
+        campaign.desiredClusterKey = nil
+        campaign.desiredMemberKeys = nil
+        campaign.state = 'active'
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.missionIssuedTick = tick
+        campaign.lastProgressTick = tick
+        campaign.bestDistance = 1000000000000
+    elseif mode == 'transition' then
+        local previousCluster = campaign.clusterKey
+        campaign.clusterKey = campaign.desiredClusterKey
+        campaign.memberKeys = CopyArray(campaign.desiredMemberKeys)
+        campaign.objectiveKey = campaign.desiredObjectiveKey
+        campaign.objectivePosition = CopyPosition(campaign.desiredObjectivePosition)
+        campaign.objectiveReason = campaign.desiredObjectiveReason
+        campaign.engineerToken = campaign.desiredEngineerToken
+        campaign.engineerRole = campaign.desiredEngineerRole
+        campaign.desiredObjectiveKey = nil
+        campaign.desiredObjectivePosition = nil
+        campaign.desiredObjectiveReason = nil
+        campaign.desiredEngineerToken = nil
+        campaign.desiredEngineerRole = nil
+        campaign.desiredClusterKey = nil
+        campaign.desiredMemberKeys = nil
+        campaign.awaitingReason = nil
+        campaign.state = 'active'
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.missionIssuedTick = tick
+        campaign.lastProgressTick = tick
+        campaign.bestDistance = 1000000000000
+        Emit(controller, 'campaign_transition', {
+            from = previousCluster or 'none',
+            cluster = campaign.clusterKey,
+            objective = campaign.objectiveKey,
+        })
+    elseif mode == 'recover' then
+        campaign.recoveryOrders = campaign.recoveryOrders + 1
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.lastRecoveryAttemptTick = tick
+    elseif mode == 'recall' then
+        campaign.state = 'recalled'
+        campaign.emergency = true
+        campaign.healthySinceTick = nil
+        campaign.modeSwitches = campaign.modeSwitches + 1
+    elseif mode == 'resume' then
+        if campaign.desiredObjectiveKey then
+            if campaign.desiredReplacesCampaign == true
+                or (campaign.desiredObjectiveReason == 'frontier_expansion'
+                and campaign.desiredClusterKey
+                )
+            then
+                campaign.clusterKey = campaign.desiredClusterKey
+                campaign.memberKeys = CopyArray(campaign.desiredMemberKeys)
+            end
+            campaign.objectiveKey = campaign.desiredObjectiveKey
+            campaign.objectivePosition = CopyPosition(campaign.desiredObjectivePosition)
+            campaign.objectiveReason = campaign.desiredObjectiveReason
+            campaign.engineerToken = campaign.desiredEngineerToken
+            campaign.engineerRole = campaign.desiredEngineerRole
+            ClearDesiredCampaignObjective(campaign)
+        end
+        campaign.state = 'active'
+        campaign.emergency = false
+        campaign.healthySinceTick = nil
+        campaign.modeSwitches = campaign.modeSwitches + 1
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.missionIssuedTick = tick
+        campaign.lastProgressTick = tick
+    else
+        return false
+    end
+    campaign.pendingMode = nil
+    campaign.pendingTokens = {}
+    Emit(controller, 'campaign_order', {
+        command = mode,
+        cluster = campaign.clusterKey,
+        objective = campaign.objectiveKey,
+        units = TableGetn(tokens),
+    })
+    return true
+end
+
 Controller = {}
 
 Controller.InitializeMap = function(controller)
@@ -2638,6 +3809,10 @@ Controller.Create = function(brain)
         waveAssignments = {},
         frontierAssignments = {},
         frontierMission = nil,
+        legacyFrontierRetirementPending = false,
+        fieldCampaignEnabled = true,
+        fieldCampaign = nil,
+        fieldCampaignSerial = 0,
         mexHistory = {},
         ownedMexCount = 0,
         lostMexCount = 0,
@@ -2936,7 +4111,18 @@ Controller.Reconcile = function(controller, observation)
         end
     end
 
-    if controller.frontierMission then
+    if controller.fieldCampaignEnabled == true then
+        controller.legacyFrontierRetirementPending = false
+        if controller.frontierMission
+            and not ClearFrontierMission(controller)
+        then
+            controller.legacyFrontierRetirementPending = true
+        elseif not controller.frontierMission then
+            for token in pairs(controller.frontierAssignments) do
+                controller.frontierAssignments[token] = nil
+            end
+        end
+    elseif controller.frontierMission then
         local mission = controller.frontierMission
         local engineer = records[mission.engineerToken]
         local operation = controller.pending[mission.engineerToken]
@@ -2965,6 +4151,8 @@ Controller.Reconcile = function(controller, observation)
         end
     end
 
+    UpdateFieldCampaign(controller, observation)
+
     observation.pending = PendingArray(controller)
     observation.state = StateSnapshot(controller)
     observation.macro = MacroSnapshot(controller, observation.units)
@@ -2984,10 +4172,17 @@ Controller.Execute = function(controller, intents, observation)
     local usedActors = {}
 
     for _, intent in ipairs(ordered) do
-        if intent.kind == 'frontier_screen' then
+        if intent.kind == 'field_campaign'
+            and controller.fieldCampaignEnabled == true
+        then
+            ExecuteFieldCampaign(controller, intent, records, usedActors)
+        elseif intent.kind == 'frontier_screen'
+            and controller.fieldCampaignEnabled ~= true
+        then
             ExecuteFrontierScreen(controller, intent, records, usedActors)
         elseif intent.kind == 'mobilize_commander'
             and controller.crossMapOffenseEnabled == true
+            and controller.fieldCampaignEnabled ~= true
         then
             ExecuteCommanderMobilization(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
@@ -2998,6 +4193,7 @@ Controller.Execute = function(controller, intents, observation)
             end
         elseif intent.kind == 'commander_push'
             and controller.crossMapOffenseEnabled == true
+            and controller.fieldCampaignEnabled ~= true
         then
             ExecuteCommanderPush(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
@@ -3008,6 +4204,7 @@ Controller.Execute = function(controller, intents, observation)
             end
         elseif intent.kind == 'reinforce_commander'
             and controller.crossMapOffenseEnabled == true
+            and controller.fieldCampaignEnabled ~= true
         then
             ExecuteCommanderReinforcement(controller, intent, records, usedActors)
             if type(intent.acuToken) == 'string' then
@@ -3017,16 +4214,12 @@ Controller.Execute = function(controller, intents, observation)
                 if type(token) == 'string' then usedActors[token] = true end
             end
         elseif (intent.kind == 'attack_wave'
-            and controller.crossMapOffenseEnabled == true)
+            and controller.crossMapOffenseEnabled == true
+            and controller.fieldCampaignEnabled ~= true)
             or intent.kind == 'defend_wave'
             or intent.kind == 'regroup_wave'
         then
             ExecuteCombatGroup(controller, intent, records, usedActors)
-            if intent.kind == 'defend_wave' then
-                for _, token in ipairs(intent.actorTokens or {}) do
-                    if type(token) == 'string' then usedActors[token] = true end
-                end
-            end
         elseif intent.actorToken and not usedActors[intent.actorToken] then
             local record = records[intent.actorToken]
             if record then
@@ -3213,6 +4406,21 @@ Controller.Step = function(controller)
             frontier_progress = tonumber(macro.frontierProgress) or -1,
             frontier_screen = tonumber(macro.frontierScreenCount) or 0,
             home_reserve = tonumber(macro.homeReserveCount) or 0,
+            campaign_state = tostring(macro.campaignState or 'idle'),
+            campaign_cluster = tostring(macro.campaignCluster or 'none'),
+            campaign_objective = tostring(macro.campaignObjective or 'none'),
+            field_units = tonumber(macro.fieldUnits) or 0,
+            field_aa = tonumber(macro.fieldAa) or 0,
+            field_at_anchor = tonumber(macro.fieldAtAnchor) or 0,
+            home_units = tonumber(macro.homeUnits) or 0,
+            home_aa = tonumber(macro.homeAa) or 0,
+            mission_age = tonumber(macro.campaignMissionAge) or -1,
+            last_campaign_progress_tick = tonumber(
+                macro.campaignLastProgressTick
+            ) or -1,
+            full_field_orders = tonumber(macro.campaignFullFieldOrders) or 0,
+            mode_switches = tonumber(macro.campaignModeSwitches) or 0,
+            campaign_emergency = macro.campaignEmergency == true,
             engineer_demand = tonumber(macro.engineerDemand) or 0,
             factory_demand = tonumber(macro.factoryDemand) or 0,
             reclaim_target = tostring(macro.reclaimTarget or 'none'),

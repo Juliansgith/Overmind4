@@ -260,6 +260,42 @@ local function FirstFrontierSite(sites, virtualReserved, selectedKey)
     return nil
 end
 
+local function KeyInArray(values, wanted)
+    for _, value in ipairs(values or {}) do
+        if value == wanted then return true end
+    end
+    return false
+end
+
+local function FirstCampaignSite(sites, virtualReserved, memberKeys, lostOnly)
+    for _, site in ipairs(SortSites(sites)) do
+        if KeyInArray(memberKeys, site.key)
+            and (not lostOnly or site.lost == true)
+            and site.complete ~= true
+            and SiteIsAvailable(site, virtualReserved, false)
+        then
+            return site
+        end
+    end
+    return nil
+end
+
+local function CampaignHasConnectedJob(snapshot, macro)
+    for _, operation in ipairs(snapshot.pending or {}) do
+        if operation.kind == 'build_structure'
+                or operation.kind == 'assist_structure'
+        then
+            if KeyInArray(macro.campaignMemberKeys, operation.siteKey)
+                or (operation.reason == 'frontier_expansion'
+                    and operation.clusterKey == macro.campaignCluster)
+            then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function HasLostMex(sites)
     for _, site in ipairs(sites or {}) do
         if site.lost == true and site.complete ~= true then return true end
@@ -360,6 +396,7 @@ local function DefensiveCombatUnits(units, excluded)
         if COMBAT_ROLES[unit.role]
             and unit.complete == true
             and unit.assignedToWave ~= true
+            and unit.fieldCohort ~= true
             and not (excluded and excluded[unit.token])
         then
             TableInsert(combat, unit)
@@ -640,20 +677,143 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         power_generator = (counts.power_generator or 0) + 1,
         land_factory = (counts.land_factory or 0) + 1,
     }
+    local campaignActive = macro
+        and macro.campaignEnabled == true
+        and macro.campaignState ~= 'idle'
+    local campaignJobPlanned = campaignActive
+        and CampaignHasConnectedJob(snapshot, macro)
+        or false
 
     for _, engineer in ipairs(engineers) do
         local intent = nil
-        if not underContact and CanBuild(engineer, 'mass_extractor') then
+        local campaignActor = campaignActive
+            and engineer.campaignEngineer == true
+        local reserveCampaignActor = false
+        if campaignActive
+            and not campaignJobPlanned
+            and not underContact
+            and CanBuild(engineer, 'mass_extractor')
+        then
+            local cachedLost = FirstCampaignSite(
+                massSites,
+                virtualReserved,
+                macro.campaignMemberKeys,
+                true
+            )
+            if cachedLost then
+                virtualReserved[cachedLost.key] = true
+                counts.mass_extractor = (counts.mass_extractor or 0) + 1
+                intent = BuildAtSite(
+                    engineer,
+                    'mass_extractor',
+                    cachedLost,
+                    18,
+                    'rebuild_mex'
+                )
+                intent.clusterKey = macro.campaignCluster
+                campaignJobPlanned = true
+            end
+        end
+        if not intent
+            and campaignActor
+            and not campaignJobPlanned
+            and not underContact
+            and CanBuild(engineer, 'mass_extractor')
+        then
+            local lost = FirstLostSite(massSites, virtualReserved, false)
+            if lost then
+                virtualReserved[lost.key] = true
+                counts.mass_extractor = (counts.mass_extractor or 0) + 1
+                intent = BuildAtSite(
+                    engineer,
+                    'mass_extractor',
+                    lost,
+                    18,
+                    'rebuild_mex'
+                )
+                intent.clusterKey = macro.campaignCluster
+                campaignJobPlanned = true
+            end
+        end
+        if not intent
+            and campaignActive
+            and (campaignActor or macro.campaignState == 'recalled')
+            and not campaignJobPlanned
+            and (macro.campaignState == 'active'
+                or macro.campaignState == 'awaiting_order'
+                or macro.campaignState == 'early_awaiting_order'
+                or macro.campaignState == 'recalled')
+            and not underContact
+            and CanBuild(engineer, 'mass_extractor')
+        then
+            local cached = FirstCampaignSite(
+                massSites,
+                virtualReserved,
+                macro.campaignMemberKeys,
+                false
+            )
+            if cached then
+                virtualReserved[cached.key] = true
+                counts.mass_extractor = (counts.mass_extractor or 0) + 1
+                intent = BuildAtSite(
+                    engineer,
+                    'mass_extractor',
+                    cached,
+                    22,
+                    'frontier_expansion'
+                )
+                intent.clusterKey = macro.campaignCluster
+                campaignJobPlanned = true
+            end
+        end
+        if not intent
+            and campaignActor
+            and not campaignJobPlanned
+            and macro.campaignState == 'awaiting_objective'
+            and not underContact
+            and CanBuild(engineer, 'mass_extractor')
+        then
+            local nextSite = FirstFrontierSite(
+                massSites,
+                virtualReserved,
+                macro.selectedFrontierSite
+            )
+            if nextSite then
+                virtualReserved[nextSite.key] = true
+                counts.mass_extractor = (counts.mass_extractor or 0) + 1
+                intent = BuildAtSite(
+                    engineer,
+                    'mass_extractor',
+                    nextSite,
+                    22,
+                    'frontier_expansion'
+                )
+                campaignJobPlanned = true
+            end
+        end
+        if campaignActor and not intent then reserveCampaignActor = true end
+
+        if not intent
+            and not reserveCampaignActor
+            and not underContact
+            and CanBuild(engineer, 'mass_extractor')
+        then
             local site = FirstLostSite(massSites, virtualReserved, false)
             if site then
                 virtualReserved[site.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(engineer, 'mass_extractor', site, 18, 'rebuild_mex')
+                if campaignActive
+                    and KeyInArray(macro.campaignMemberKeys, site.key)
+                then
+                    intent.clusterKey = macro.campaignCluster
+                    campaignJobPlanned = true
+                end
             end
         end
 
 
-        if not intent and not underContact then
+        if not intent and not reserveCampaignActor and not underContact then
             local foundation = FirstOrphanFoundation(
                 snapshot,
                 engineer,
@@ -666,6 +826,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
 
         if not intent
+            and not reserveCampaignActor
             and not lostOutstanding
             and lowEnergy
             and allowPlacement
@@ -682,6 +843,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
 
         if not intent
+            and not reserveCampaignActor
             and not lostOutstanding
             and not underContact
             and (counts.hydrocarbon or 0) < 1
@@ -696,6 +858,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
 
         if not intent
+            and not reserveCampaignActor
             and not lostOutstanding
             and not underContact
             and not plannedFactory
@@ -728,17 +891,40 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
 
         if not intent
+            and not reserveCampaignActor
             and not lostOutstanding
             and not underContact
             and CanBuild(engineer, 'mass_extractor')
         then
-            local site = macro
-                and FirstFrontierSite(
+            local site = nil
+            if campaignActive then
+                if not campaignJobPlanned
+                    and macro.campaignState == 'awaiting_objective'
+                then
+                    site = FirstFrontierSite(
+                        massSites,
+                        virtualReserved,
+                        macro.selectedFrontierSite
+                    )
+                elseif not campaignJobPlanned
+                    and macro.campaignState == 'active'
+                then
+                    site = FirstCampaignSite(
+                        massSites,
+                        virtualReserved,
+                        macro.campaignMemberKeys,
+                        false
+                    )
+                end
+            elseif macro then
+                site = FirstFrontierSite(
                     massSites,
                     virtualReserved,
                     macro.selectedFrontierSite
                 )
-                or FirstAvailableSite(massSites, virtualReserved, false)
+            else
+                site = FirstAvailableSite(massSites, virtualReserved, false)
+            end
             if site then
                 virtualReserved[site.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
@@ -749,10 +935,17 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     22,
                     macro and 'frontier_expansion' or 'mass_expansion'
                 )
+                if campaignActive then
+                    intent.clusterKey = macro.campaignState == 'active'
+                        and macro.campaignCluster
+                        or site.clusterKey
+                    campaignJobPlanned = true
+                end
             end
         end
 
         if not intent
+            and not reserveCampaignActor
             and macro
             and not lostOutstanding
             and not underContact
@@ -1118,6 +1311,49 @@ local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
     AddIntent(intents, intent)
 end
 
+local function FieldCampaignDecision(snapshot, intents)
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
+    if not macro or macro.campaignEnabled ~= true then return end
+    local mode = macro.campaignIntentMode
+    local allowed = {
+        activate = true,
+        reinforce = true,
+        retarget = true,
+        transition = true,
+        recover = true,
+        recall = true,
+        resume = true,
+    }
+    if type(mode) ~= 'string' or not allowed[mode] then return end
+    local tokens = {}
+    local seen = {}
+    for _, token in ipairs(macro.campaignIntentTokens or {}) do
+        if type(token) ~= 'string' or seen[token] then return end
+        seen[token] = true
+        TableInsert(tokens, token)
+    end
+    table.sort(tokens)
+    if TableGetn(tokens) == 0 then return end
+    local position = mode == 'recall'
+        and snapshot.basePosition
+        or macro.campaignIntentPosition
+    if not IsUsablePosition(position) then return end
+    local engineerToken = macro.campaignIntentEngineer
+    if mode ~= 'recall' and type(engineerToken) ~= 'string' then return end
+    AddIntent(intents, {
+        kind = 'field_campaign',
+        mode = mode,
+        actorTokens = tokens,
+        engineerToken = engineerToken,
+        position = position,
+        campaignSerial = macro.campaignSerial,
+        clusterKey = macro.campaignIntentCluster,
+        objectiveKey = macro.campaignIntentObjective,
+        priority = mode == 'recall' and 1 or 24,
+        reason = 'secure_expansion_campaign',
+    })
+end
+
 local function RegroupDecision(snapshot, units, intents)
     local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
     local position = macro and macro.rallyPosition
@@ -1129,8 +1365,11 @@ local function RegroupDecision(snapshot, units, intents)
         if COMBAT_ROLES[unit.role]
             and unit.complete == true
             and unit.assignedToWave ~= true
-            and (unit.nearRally == false
-                or (unit.nearRally == nil and unit.nearStaging == false))
+            and unit.fieldCohort ~= true
+            and ((unit.homeCohort == true and unit.nearHome == false)
+                or (unit.homeCohort ~= true
+                    and (unit.nearRally == false
+                        or (unit.nearRally == nil and unit.nearStaging == false))))
         then
             TableInsert(regroup, unit)
         end
@@ -1230,7 +1469,13 @@ Policy.Decide = function(snapshot)
             intents
         )
     end
-    if not underContact and not emergency and not commanderRecovery then
+    FieldCampaignDecision(snapshot, intents)
+    if not underContact
+        and not emergency
+        and not commanderRecovery
+        and not (type(snapshot.macro) == 'table'
+            and snapshot.macro.campaignEnabled == true)
+    then
         FrontierScreenDecision(snapshot, units, pendingActors, intents)
         local screened = {}
         for _, intent in ipairs(intents) do
