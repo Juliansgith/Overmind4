@@ -219,6 +219,8 @@ def test_benchmark_observer_is_installed_only_from_the_simulation_state_hook() -
     assert "GetGameTick" in sim_source
     assert "WaitTicks" in sim_source
     assert "local PreviousBeginSession = BeginSession" in sim_source
+    assert "'/schook/lua/Overmind4Benchmark.lua'" in sim_source
+    assert "'/lua/Overmind4Benchmark.lua'" not in sim_source
 
 
 def test_sim_hook_preserves_stock_begin_session_and_samples_configured_actual_slots() -> None:

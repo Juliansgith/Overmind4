@@ -26,7 +26,7 @@ end
 local function StartBenchmarkObserver(runId, armyOne, armyTwo)
     ForkThread(function()
         local Overmind4Benchmark = import(
-            '/lua/Overmind4Benchmark.lua'
+            '/schook/lua/Overmind4Benchmark.lua'
         ).Overmind4Benchmark
         local observer = Overmind4Benchmark.Create(runId, { armyOne, armyTwo }, LOG)
         while true do
