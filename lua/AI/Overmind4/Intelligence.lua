@@ -387,9 +387,6 @@ Intelligence.AdvanceTransport = function(mission, event)
         if event.transportToken ~= result.transportToken then
             return Release(result, 'transport_generation_mismatch')
         end
-        if result.deadlineTick and tick > result.deadlineTick then
-            return Release(result, 'mission_timeout')
-        end
         if result.state == 'loading' then
             if not ExactTokens(result.cargoTokens or {}, event.attachedCargoTokens or {}) then
                 if Count(event.attachedCargoTokens or {}) > 0 then
@@ -425,6 +422,11 @@ Intelligence.AdvanceTransport = function(mission, event)
             elseif not ExactTokens(result.cargoTokens or {}, attached) then
                 return Release(result, 'wrong_cargo')
             end
+        end
+        if result.state ~= 'completed' and result.deadlineTick
+            and tick > result.deadlineTick
+        then
+            return Release(result, 'mission_timeout')
         end
     elseif kind == 'unload_ordered' and (result.state == 'loaded' or result.state == 'flying') then
         result.state = 'unloading'

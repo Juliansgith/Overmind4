@@ -540,6 +540,38 @@ class TestAirAndMobility:
         assert outside_drop["state"] == "unloading"
         assert outside_drop["released"] is not True
 
+        late_arrival = invoke(
+            MODULE,
+            GLOBAL,
+            "AdvanceTransport",
+            unloading,
+            {
+                "kind": "observed",
+                "tick": 705,
+                "transportToken": "transport:1",
+                "attachedCargoTokens": [],
+                "cargoPositions": {"eng:1": [2610, 0, 0]},
+            },
+        )
+        assert late_arrival["state"] == "completed"
+        assert late_arrival["released"] is True
+
+        late_outside = invoke(
+            MODULE,
+            GLOBAL,
+            "AdvanceTransport",
+            unloading,
+            {
+                "kind": "observed",
+                "tick": 705,
+                "transportToken": "transport:1",
+                "attachedCargoTokens": [],
+                "cargoPositions": {"eng:1": [2621, 0, 0]},
+            },
+        )
+        assert late_outside["state"] == "released"
+        assert late_outside["failureReason"] == "mission_timeout"
+
     @pytest.mark.parametrize("state", ("loaded", "flying"))
     @pytest.mark.parametrize(
         "attached",
