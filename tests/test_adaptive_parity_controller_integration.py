@@ -2497,6 +2497,70 @@ def test_loaded_transport_reconcile_releases_retryably_when_exact_cargo_disappea
     assert history["retryCount"] == 1
 
 
+def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> None:
+    harness = make_harness()
+    drop = [300, 2, 300]
+    transport = harness.unit(
+        entityId=31,
+        blueprintId="uea0107",
+        position=drop,
+        cargo=[],
+    )
+    cargo = harness.unit(
+        entityId=32,
+        blueprintId="uel0105",
+        position=drop,
+        attached=False,
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([transport, cargo])
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                "key": "front",
+                "name": "Front",
+                "kind": "mass",
+                "position": drop,
+                "distance": 200,
+                "localSite": False,
+                "reachable": True,
+                "engineerReachable": True,
+            }
+        ],
+    )
+    harness.controller.transportMissions["airlift:front"] = lua_value(
+        harness.lua,
+        {
+            "missionId": "airlift:front",
+            "state": "unloading",
+            "transportToken": "31:1",
+            "cargoTokens": ["32:1"],
+            "siteKey": "front",
+            "dropPosition": drop,
+            "dropTolerance": 20,
+            "deadlineTick": 900,
+            "retryCount": 0,
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    mex_orders = [
+        call
+        for call in harness.calls.buildMobile.values()
+        if call.blueprintId == "ueb1103"
+    ]
+    assert len(mex_orders) == 1
+    assert mex_orders[0].units[1].options.entityId == 32
+    assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
+        300,
+        300,
+    )
+    assert harness.controller.transportMissions["airlift:front"] is None
+    assert len(harness.calls.transportLoad) == 0
+
+
 def test_loaded_transport_reconcile_rejects_attached_foreign_extra_cargo() -> None:
     harness = make_harness()
     cargo = harness.unit(

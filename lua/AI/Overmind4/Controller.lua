@@ -7857,6 +7857,7 @@ Controller.Create = function(brain)
         directorState = { epoch = 0 },
         transportMissions = {},
         transportHistory = {},
+        transportDeliveries = {},
         bomberMissions = {},
         enemyRefs = {},
         operationLifecycle = {},
@@ -8471,6 +8472,9 @@ ESCALATION.TransportTokenClaimed = function(controller, token)
             if cargoToken == token then return true end
         end
     end
+    for _, delivery in pairs(controller.transportDeliveries or {}) do
+        if delivery.actorToken == token then return true end
+    end
     return false
 end
 
@@ -8992,6 +8996,19 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
                     or advanced.state == 'released' or advanced.released == true)
             then
                 if advanced.state == 'completed' then
+                    local cargoToken = (mission.cargoTokens or {})[1]
+                    if type(mission.siteKey) == 'string'
+                        and type(cargoToken) == 'string'
+                        and CopyPosition(mission.dropPosition)
+                    then
+                        controller.transportDeliveries[mission.siteKey] = {
+                            actorToken = cargoToken,
+                            missionId = missionId,
+                            siteKey = mission.siteKey,
+                            position = CopyPosition(mission.dropPosition),
+                            completedTick = observation.tick,
+                        }
+                    end
                     ESCALATION.CompleteOperation(controller, mission)
                 else
                     ESCALATION.FailExpansionAttempt(
@@ -10017,7 +10034,47 @@ ESCALATION.AdaptAirIntents = function(controller, observation, airPlan, intents,
     end
 end
 
-ESCALATION.AdaptTransportIntent = function(controller, transportPlan, intents)
+ESCALATION.AdaptTransportIntent = function(
+    controller, observation, transportPlan, intents
+)
+    local records = RecordByToken((observation or {}).units or {})
+    for _, siteKey in ipairs(SortedKeys(controller.transportDeliveries or {})) do
+        local delivery = controller.transportDeliveries[siteKey]
+        local site = nil
+        for _, candidate in ipairs(((observation or {}).sites or {}).mass or {}) do
+            if candidate.key == siteKey then site = candidate break end
+        end
+        if site and site.complete == true then
+            controller.transportDeliveries[siteKey] = nil
+        elseif not site
+            or site.buildable == false
+            or not CopyPosition(site.position)
+            or not delivery
+            or not CopyPosition(delivery.position)
+            or DistanceSquared(site.position, delivery.position) > 0.01
+        then
+            controller.transportDeliveries[siteKey] = nil
+        else
+            local record = records[delivery.actorToken]
+            if not record or record.role ~= 'engineer' or record.complete ~= true then
+                controller.transportDeliveries[siteKey] = nil
+            elseif controller.pending[delivery.actorToken] then
+                return
+            else
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'build_structure',
+                    actorToken = delivery.actorToken,
+                    buildRole = 'mass_extractor',
+                    siteKey = siteKey,
+                    position = CopyPosition(site.position),
+                    operationId = 'mex:airlift:' .. siteKey,
+                    reason = 'airlift_mex',
+                    priority = 1,
+                })
+                return
+            end
+        end
+    end
     local activeMission = false
     for _, missionId in ipairs(SortedKeys(controller.transportMissions)) do
         local mission = controller.transportMissions[missionId]
@@ -10294,7 +10351,9 @@ ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
     for _, historyKey in ipairs(SortedKeys(controller.transportHistory or {})) do
         local history = controller.transportHistory[historyKey]
         if history.state == 'completed' and history.siteKey then
-            if ownedSites[history.siteKey] then
+            if ownedSites[history.siteKey]
+                or controller.transportDeliveries[history.siteKey]
+            then
                 completedTransportSites[history.siteKey] = true
             else
                 controller.transportHistory[historyKey] = nil
@@ -10873,7 +10932,9 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     ESCALATION.AdaptGrowthIntents(
         controller, observation, macroPlan, techPlan, intents, reserved
     )
-    ESCALATION.AdaptTransportIntent(controller, transportPlan, intents)
+    ESCALATION.AdaptTransportIntent(
+        controller, observation, transportPlan, intents
+    )
     ESCALATION.AdaptForceIntents(controller, forcePlan, intents, reserved)
 
     controller.intelState = intelState
