@@ -321,47 +321,35 @@ def test_holding_front_reinforces_new_field_actor_without_reordering_survivors()
 
 
 @pytest.mark.parametrize("seed", range(4))
-def test_early_campaign_activates_when_growth_creates_first_field_actor(seed: int) -> None:
+def test_sub_readiness_growth_does_not_create_an_early_campaign(seed: int) -> None:
     harness, acu, engineer, combat, observation = start_campaign(
         total=4,
         aa=1,
         seed=seed,
     )
     assert campaign_intents(harness, observation) == []
-    assert campaign_state(harness)["state"] == "early_awaiting_order"
-    assert not campaign_state(harness).get("fieldTokens")
+    assert harness.controller.fieldCampaign is None
     first_field = harness.unit(entityId=9720, blueprintId="uel0201")
     put_units(harness, [acu, engineer, *combat, first_field], seed=seed + 10)
     harness.brain.tick = 10
 
     current = reconcile(harness)
-    activation = campaign_intents(harness, current)
-
-    assert len(activation) == 1
-    assert activation[0]["mode"] == "activate"
-    assert activation[0]["actorTokens"] == ["9720:1"]
-    execute_intents(harness, activation, current)
-    assert campaign_state(harness)["state"] == "active"
-    assert actor_tokens_from_call(harness.calls.aggressive[1]) == ["9720:1"]
+    assert campaign_intents(harness, current) == []
+    assert harness.controller.fieldCampaign is None
+    assert plain(current)["macro"]["campaignReady"] is False
 
 
-def test_delayed_first_field_activation_starts_a_fresh_300_tick_progress_window() -> None:
+def test_delayed_sub_readiness_growth_stays_macro_only_past_300_ticks() -> None:
     harness, acu, engineer, combat, observation = start_campaign(total=4, aa=1)
     assert campaign_intents(harness, observation) == []
     first_field = harness.unit(entityId=9721, blueprintId="uel0201")
     put_units(harness, [acu, engineer, *combat, first_field])
     harness.brain.tick = 500
     ready = reconcile(harness)
-    activation = campaign_intents(harness, ready)
-    assert len(activation) == 1 and activation[0]["mode"] == "activate"
-    execute_intents(harness, activation, ready)
-    assert campaign_state(harness)["lastProgressTick"] == 500
-
-    harness.brain.tick = 799
-    assert campaign_intents(harness, reconcile(harness)) == []
+    assert campaign_intents(harness, ready) == []
+    assert harness.controller.fieldCampaign is None
     harness.brain.tick = 800
-    recovery = campaign_intents(harness, reconcile(harness))
-    assert len(recovery) == 1 and recovery[0]["mode"] == "recover"
+    assert campaign_intents(harness, reconcile(harness)) == []
 
 
 @pytest.mark.parametrize("failure", ["clear", "aggressive"])
@@ -623,7 +611,7 @@ def test_terminal_assault_requires_public_fixed_pathable_non_hidden_target(
     assert campaign_intents(harness, after) == []
 
 
-@pytest.mark.parametrize("tick,expected_recoveries", [(299, 0), (300, 1), (599, 1), (600, 2)])
+@pytest.mark.parametrize("tick,expected_recoveries", [(299, 0), (300, 1), (599, 1), (600, 1)])
 def test_stationary_field_recovery_has_300_tick_lower_bound_and_cadence(
     tick: int,
     expected_recoveries: int,
@@ -639,6 +627,9 @@ def test_stationary_field_recovery_has_300_tick_lower_bound_and_cadence(
     state = campaign_state(harness)
     assert state["recoveryOrders"] == expected_recoveries
     assert state["fullFieldOrders"] == 1 + expected_recoveries
+    if tick == 600:
+        assert state["rollbackOrders"] == 1
+        assert state["state"] == "rebuilding"
     assert len(harness.calls.guard) == 0
 
 
@@ -696,7 +687,7 @@ def test_stale_field_actor_fails_before_clear_and_reconciles_exact_live_generati
     else:
         replacement = harness.unit(
             entityId=int(victim.options.entityId),
-            blueprintId="uel0201",
+            blueprintId=str(victim.options.blueprintId),
             position=[10, 2, 20],
         )
         units = [replacement if actor is victim else actor for actor in units]
@@ -708,8 +699,13 @@ def test_stale_field_actor_fails_before_clear_and_reconciles_exact_live_generati
     assert len(harness.calls.aggressive) == 0
     current = reconcile(harness)
     retry = campaign_intents(harness, current)
-    assert retry
-    assert intent["actorTokens"] != retry[0]["actorTokens"] or mutation == "captured"
+    if mutation == "recycled":
+        assert len(retry) == 1 and retry[0]["mode"] == "activate"
+        assert intent["actorTokens"] != retry[0]["actorTokens"]
+        assert any(token.endswith(":2") for token in retry[0]["actorTokens"])
+    else:
+        assert retry == []
+        assert plain(current)["macro"]["campaignReady"] is False
 
 
 def test_malicious_home_and_acu_injection_cannot_mutate_or_order_campaign() -> None:
@@ -1123,8 +1119,11 @@ def test_home_reserve_recall_preempts_staged_destination_before_safe_resume(
 
     live = [actor for actor in harness.brain.units.values() if not actor.Dead]
     replacements = [
-        harness.unit(entityId=99500 + index, blueprintId="uel0201")
-        for index in range(4)
+        harness.unit(
+            entityId=99500 + index,
+            blueprintId="uel0104" if index == 0 else "uel0201",
+        )
+        for index in range(6)
     ]
     harness.brain.units = harness.lua.table_from([*live, *replacements])
     harness.brain.enemies = harness.lua.table_from([])
@@ -1147,27 +1146,20 @@ def test_home_reserve_recall_preempts_staged_destination_before_safe_resume(
     assert campaign_state(harness)["anchorKey"] == before["anchorKey"]
 
 
-def test_early_to_full_gate_reinforces_only_promoted_tokens_without_clearing_survivors() -> None:
+def test_readiness_gate_activates_full_cohort_without_an_early_survivor_order() -> None:
     harness, acu, engineer, combat, observation = start_campaign(total=23, aa=2)
-    activate_pressure_front(harness, observation)
-    early = campaign_state(harness)
-    assert len(early["fieldTokens"]) == 4
-    clear_count = len(harness.calls.clear)
-    aggressive_count = len(harness.calls.aggressive)
+    assert campaign_intents(harness, observation) == []
+    assert harness.controller.fieldCampaign is None
     promoted = harness.unit(entityId=9999, blueprintId="uel0201", position=[10, 2, 20])
     put_units(harness, [acu, engineer, *combat, promoted])
     harness.brain.tick = 10
     current = reconcile(harness)
-    intent = campaign_intents(harness, current)
-    assert len(intent) == 1 and intent[0]["mode"] == "reinforce"
-    assert set(early["fieldTokens"]).isdisjoint(intent[0]["actorTokens"])
-    assert len(intent[0]["actorTokens"]) == 14
-    execute_intents(harness, intent, current)
-    assert len(harness.calls.clear) == clear_count
-    assert len(harness.calls.aggressive) == aggressive_count + 1
-    assert actor_tokens_from_call(harness.calls.aggressive[aggressive_count + 1]) == sorted(
-        intent[0]["actorTokens"]
-    )
+    activation = campaign_intents(harness, current)
+    assert len(activation) == 1 and activation[0]["mode"] == "activate"
+    assert len(activation[0]["actorTokens"]) == 18
+    execute_intents(harness, activation, current)
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.aggressive) == 1
 
 
 def quorum_boundary_campaign(*, delta: float, total: int = 26) -> tuple[Any, Any]:
@@ -1221,6 +1213,8 @@ def test_zero_live_field_never_vacuously_transitions_or_recovers() -> None:
     current = reconcile(harness)
     assert campaign_state(harness)["arrivalQuorum"] == 0
     assert not campaign_state(harness)["fieldTokens"]
+    assert campaign_state(harness)["state"] == "rebuilding"
+    assert campaign_state(harness)["rollbackReason"] == "field_attrition"
     assert campaign_intents(harness, current) == []
 
 

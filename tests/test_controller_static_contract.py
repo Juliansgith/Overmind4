@@ -41,6 +41,8 @@ ALLOWED_ISSUES = {
     "IssueMove",
     "IssueReclaim",
     "IssueClearCommands",
+    "IssueUpgrade",
+    "IssuePatrol",
 }
 
 

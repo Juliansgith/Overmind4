@@ -3,6 +3,8 @@ local COMBAT_ROLES = {
     artillery = true,
     lab = true,
     tank = true,
+    t2_anti_air = true,
+    t2_direct_fire = true,
 }
 
 local ATTACK_COMBAT = 24
@@ -65,6 +67,13 @@ local function IsUsablePosition(position)
         and type(position[3]) == 'number'
 end
 
+local function FiniteNumber(value)
+    local number = tonumber(value)
+    return number ~= nil
+        and number == number
+        and math.abs(number) <= 1000000000
+end
+
 local function PositionDistanceSquared(a, b)
     if not IsUsablePosition(a) or not IsUsablePosition(b) then
         return 1000000000000
@@ -104,9 +113,13 @@ end
 
 local function CountRoles(units, pending, foundations)
     local counts = {}
+    local completeRolesByToken = {}
     for _, unit in ipairs(units) do
         if unit.role and unit.complete == true then
             counts[unit.role] = (counts[unit.role] or 0) + 1
+            if type(unit.token) == 'string' then
+                completeRolesByToken[unit.token] = unit.role
+            end
         end
     end
     for _, foundation in ipairs(foundations or {}) do
@@ -119,6 +132,18 @@ local function CountRoles(units, pending, foundations)
             and not PendingMatchesFoundation(operation, foundations)
         then
             counts[operation.buildRole] = (counts[operation.buildRole] or 0) + 1
+        end
+    end
+    local adjustedUpgradeSources = {}
+    for _, operation in ipairs(pending or {}) do
+        local token = operation.actorToken
+        local sourceRole = token and completeRolesByToken[token] or nil
+        if operation.kind == 'factory_upgrade'
+            and sourceRole
+            and not adjustedUpgradeSources[token]
+        then
+            counts[sourceRole] = math.max(0, (counts[sourceRole] or 0) - 1)
+            adjustedUpgradeSources[token] = true
         end
     end
     return counts
@@ -678,7 +703,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local lostOutstanding = HasLostMex(massSites)
     local plannedPower = false
     local plannedFactory = false
-    local plannedReclaim = false
+    local plannedAirFactory = false
     local constructionPlanned = false
     local reclaimCandidates = CopyArray(snapshot.reclaim or {})
     table.sort(reclaimCandidates, function(a, b)
@@ -706,6 +731,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local placementIndex = {
         power_generator = (counts.power_generator or 0) + 1,
         land_factory = (counts.land_factory or 0) + 1,
+        air_factory = (counts.air_factory or 0) + 1,
     }
     local campaignActive = macro
         and macro.campaignEnabled == true
@@ -713,13 +739,74 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local campaignJobPlanned = campaignActive
         and CampaignHasConnectedJob(snapshot, macro, massSites)
         or false
+    local lostAssignments = {}
+    for _, site in ipairs(SortSites(massSites)) do
+        if site.lost == true
+            and SiteIsAvailable(site, virtualReserved, false)
+        then
+            local best = nil
+            local bestDistance = nil
+            for _, engineer in ipairs(engineers) do
+                if not lostAssignments[engineer.token]
+                    and CanBuild(engineer, 'mass_extractor')
+                then
+                    local distance = PositionDistanceSquared(
+                        engineer.position,
+                        site.position
+                    )
+                    if not best
+                        or distance < bestDistance
+                        or (distance == bestDistance
+                            and engineer.token < best.token)
+                    then
+                        best = engineer
+                        bestDistance = distance
+                    end
+                end
+            end
+            if best then
+                lostAssignments[best.token] = site
+                virtualReserved[site.key] = true
+            end
+        end
+    end
+
+    local factoryTarget = macro and (tonumber(macro.factoryTarget)
+        or tonumber(macro.factoryDemand)) or 2
+    if not lostOutstanding
+        and (counts.land_factory or 0) < factoryTarget
+        and snapshot.placements
+        and IsUsablePosition((snapshot.placements.land_factory or {})[1])
+    then
+        local placement = snapshot.placements.land_factory[1]
+        table.sort(engineers, function(a, b)
+            local ad = PositionDistanceSquared(a.position, placement)
+            local bd = PositionDistanceSquared(b.position, placement)
+            if ad == bd then return tostring(a.token) < tostring(b.token) end
+            return ad < bd
+        end)
+    end
 
     for _, engineer in ipairs(engineers) do
         local intent = nil
         local campaignActor = campaignActive
             and engineer.campaignEngineer == true
         local reserveCampaignActor = false
-        if campaignActive
+        if not underContact and CanBuild(engineer, 'mass_extractor') then
+            local lost = lostAssignments[engineer.token]
+            if lost then
+                counts.mass_extractor = (counts.mass_extractor or 0) + 1
+                intent = BuildAtSite(engineer, 'mass_extractor', lost, 18, 'rebuild_mex')
+                if campaignActive
+                    and KeyInArray(macro.campaignMemberKeys, lost.key)
+                    and SiteSupportsLandCampaign(lost)
+                then
+                    intent.clusterKey = macro.campaignCluster
+                    campaignJobPlanned = true
+                end
+            end
+        end
+        if not intent and campaignActive
             and not campaignJobPlanned
             and not underContact
             and CanBuild(engineer, 'mass_extractor')
@@ -767,7 +854,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
         if not intent
             and campaignActive
-            and (campaignActor or macro.campaignState == 'recalled')
             and not campaignJobPlanned
             and (macro.campaignState == 'active'
                 or macro.campaignState == 'awaiting_order'
@@ -891,15 +977,17 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
 
         if not intent
             and not reserveCampaignActor
-            and not lostOutstanding
             and not underContact
             and not plannedFactory
             and CanBuild(engineer, 'land_factory')
         then
-            local currentFactories = counts.land_factory or 0
+            local currentFactories = (counts.land_factory or 0)
+                + (counts.land_factory_t2 or 0)
+                + (counts.air_factory or 0)
             local factoryDemand = macro and (tonumber(macro.factoryDemand) or currentFactories) or 3
             local sustained = not macro
                 or (tonumber(macro.massSurplusTicks) or 0) >= 300
+                or (tonumber(macro.factoryTarget) or 0) > currentFactories
             if currentFactories >= 2
                 and currentFactories < factoryDemand
                 and (macro or (counts.mass_extractor or 0) >= 6)
@@ -910,7 +998,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 if position then
                     plannedFactory = true
                     placementIndex.land_factory = placementIndex.land_factory + 1
-                    counts.land_factory = currentFactories + 1
+                    counts.land_factory = (counts.land_factory or 0) + 1
                     intent = BuildAtPlacement(
                         engineer,
                         'land_factory',
@@ -919,6 +1007,39 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                         macro and 'production_saturation' or 'third_factory'
                     )
                 end
+            end
+        end
+
+        if not intent
+            and not reserveCampaignActor
+            and not underContact
+            and not plannedAirFactory
+            and (counts.air_factory or 0) < 1
+            and (counts.mass_extractor or 0) >= 6
+            and ((counts.land_factory or 0) + (counts.land_factory_t2 or 0)) >= 2
+            and (counts.hydrocarbon or 0) >= 1
+            and FiniteNumber(economy.energyTrend)
+            and FiniteNumber(economy.energyStoredRatio)
+            and tonumber(economy.energyTrend) >= 0
+            and tonumber(economy.energyStoredRatio) >= 0.5
+            and CanBuild(engineer, 'air_factory')
+        then
+            local position = ReservePlacement(
+                snapshot,
+                'air_factory',
+                placementIndex.air_factory,
+                virtualPlacements
+            )
+            if position then
+                plannedAirFactory = true
+                counts.air_factory = 1
+                intent = BuildAtPlacement(
+                    engineer,
+                    'air_factory',
+                    position,
+                    20,
+                    'first_air_factory'
+                )
             end
         end
 
@@ -980,12 +1101,8 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         if not intent
             and not reserveCampaignActor
             and macro
-            and not lostOutstanding
             and not underContact
-            and not plannedReclaim
-            and not constructionPlanned
             and activeReclaimJobs < MAX_ACTIVE_RECLAIM_JOBS
-            and (tonumber(macro.constructionBacklog) or 0) <= 0
         then
             for _, candidate in ipairs(reclaimCandidates) do
                 if type(candidate.key) == 'string'
@@ -995,7 +1112,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     and (tonumber(candidate.mass) or 0) > 0
                     and ReclaimVisibleToEngineer(candidate, engineer)
                 then
-                    plannedReclaim = true
                     activeReclaimJobs = activeReclaimJobs + 1
                     virtualReclaim[candidate.key] = true
                     intent = {
@@ -1055,16 +1171,91 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     end
     local recoveryMode = completedEngineers < MIN_RECOVERY_ENGINEERS
     local recoveryOutstanding = (counts.engineer or 0) >= MIN_RECOVERY_ENGINEERS
+    local plannedUpgrade = false
+    local completedMex = 0
+    local completedLand = 0
+    local completedAir = 0
+    for _, unit in ipairs(units or {}) do
+        if unit.complete == true then
+            if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
+            if unit.role == 'land_factory' then completedLand = completedLand + 1 end
+            if unit.role == 'air_factory' then completedAir = completedAir + 1 end
+        end
+    end
+    local massStored = tonumber(economy.massStoredRatio)
+    local energyStored = tonumber(economy.energyStoredRatio)
+    local massTrend = tonumber(economy.massTrend)
+    local energyTrend = tonumber(economy.energyTrend)
+    local t2Ready = FiniteNumber(massStored)
+        and FiniteNumber(energyStored)
+        and FiniteNumber(massTrend)
+        and FiniteNumber(energyTrend)
+        and completedMex >= 10
+        and completedLand >= 3
+        and completedAir >= 1
+        and (counts.land_factory_t2 or 0) < 1
+        and massStored >= 0.5
+        and energyStored >= 0.5
+        and massTrend >= 0
+        and energyTrend >= 0
     local rallyPosition = macro and macro.rallyPosition
         or snapshot.rallyPosition
         or snapshot.basePosition
     for _, factory in ipairs(units) do
-        if factory.role == 'land_factory'
+        if factory.role == 'air_factory'
+            and factory.complete == true
+            and factory.idle == true
+            and not pendingActors[factory.token]
+            and (counts.interceptor or 0) < 4
+            and CanBuild(factory, 'interceptor')
+        then
+            AddIntent(intents, {
+                kind = 'factory_build',
+                actorToken = factory.token,
+                buildRole = 'interceptor',
+                priority = 31,
+                reason = 'persistent_air_screen',
+            })
+            counts.interceptor = (counts.interceptor or 0) + 1
+        elseif factory.role == 'land_factory_t2'
             and factory.complete == true
             and factory.idle == true
             and not pendingActors[factory.token]
         then
-            if factory.needsRally == true then
+            local t2Combat = (counts.t2_direct_fire or 0) + (counts.t2_anti_air or 0)
+            local role = 't2_direct_fire'
+            if t2Combat >= 4 and (counts.t2_anti_air or 0) * 5 < t2Combat then
+                role = 't2_anti_air'
+            end
+            if CanBuild(factory, role) then
+                AddIntent(intents, {
+                    kind = 'factory_build',
+                    actorToken = factory.token,
+                    buildRole = role,
+                    priority = 31,
+                    reason = 'continuous_t2_ground_production',
+                })
+                counts[role] = (counts[role] or 0) + 1
+            end
+        elseif factory.role == 'land_factory'
+            and factory.complete == true
+            and factory.idle == true
+            and not pendingActors[factory.token]
+        then
+            if t2Ready
+                and not plannedUpgrade
+                and CanBuild(factory, 'land_factory_t2')
+            then
+                AddIntent(intents, {
+                    kind = 'factory_upgrade',
+                    actorToken = factory.token,
+                    upgradeRole = 'land_factory_t2',
+                    priority = 23,
+                    reason = 'first_t2_land_hq',
+                })
+                plannedUpgrade = true
+                counts.land_factory_t2 = 1
+            elseif factory.needsRally == true then
                 AddIntent(intents, {
                     kind = 'rally',
                     actorToken = factory.token,
@@ -1119,6 +1310,27 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                 end
             end
         end
+    end
+    local patrol = {}
+    for _, unit in ipairs(units or {}) do
+        if unit.role == 'interceptor'
+            and unit.complete == true
+            and unit.idle == true
+            and unit.airAssigned ~= true
+            and not pendingActors[unit.token]
+        then
+            TableInsert(patrol, unit.token)
+        end
+    end
+    if TableGetn(patrol) > 0 and IsUsablePosition(snapshot.basePosition) then
+        table.sort(patrol)
+        AddIntent(intents, {
+            kind = 'air_screen',
+            actorTokens = patrol,
+            position = snapshot.basePosition,
+            priority = 32,
+            reason = 'defensive_air_screen',
+        })
     end
 end
 
@@ -1287,14 +1499,16 @@ local function FrontierScreenDecision(snapshot, units, pendingActors, intents)
         elseif COMBAT_ROLES[unit.role] and unit.complete == true then
             if unit.frontierEscort == true then
                 TableInsert(frontierEscorts, unit)
-                if unit.role == 'anti_air' then
+                if unit.role == 'anti_air' or unit.role == 't2_anti_air' then
                     screenHasAntiAir = true
                 else
                     TableInsert(frontierNonAir, unit)
                 end
             elseif unit.assignedToWave ~= true and not pendingActors[unit.token] then
                 TableInsert(available, unit)
-                if unit.role == 'anti_air' then TableInsert(antiAir, unit) end
+                if unit.role == 'anti_air' or unit.role == 't2_anti_air' then
+                    TableInsert(antiAir, unit)
+                end
             end
         end
     end
@@ -1356,6 +1570,7 @@ local function FieldCampaignDecision(snapshot, intents)
         recover = true,
         recall = true,
         resume = true,
+        rollback = true,
     }
     if type(mode) ~= 'string' or not allowed[mode] then return end
     local tokens = {}
@@ -1380,10 +1595,12 @@ local function FieldCampaignDecision(snapshot, intents)
         campaignSerial = macro.campaignSerial,
         clusterKey = macro.campaignIntentCluster,
         objectiveKey = macro.campaignIntentObjective,
-        priority = mode == 'recall' and 1 or 24,
-        reason = mode == 'assault'
-            and 'strategic_assault_campaign'
-            or 'pressure_front_campaign',
+        priority = (mode == 'recall' or mode == 'rollback') and 1 or 24,
+        reason = mode == 'rollback'
+            and tostring(macro.campaignIntentRollbackReason or 'rollback')
+            or (mode == 'assault'
+                and 'strategic_assault_campaign'
+                or 'pressure_front_campaign'),
     })
 end
 

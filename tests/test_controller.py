@@ -35,6 +35,7 @@ def make_harness() -> ControllerHarness:
             own = {}, enemy = {}, nav = {}, canBuild = {}, terrain = {},
             buildMobile = {}, buildFactory = {}, rally = {}, aggressive = {},
             guard = {}, move = {}, clear = {}, reclaim = {}, reclaimQuery = {},
+            upgrade = {}, patrol = {},
             waits = {}, sequence = {}, unitReclaimInspections = 0,
         }
 
@@ -92,6 +93,7 @@ def make_harness() -> ControllerHarness:
                 local canBuild = self.options.canBuild or {}
                 return canBuild[blueprintId] == true
             end
+            function unit:GetFocusUnit() return self.options.focusUnit end
             return unit
         end
 
@@ -125,6 +127,7 @@ def make_harness() -> ControllerHarness:
         brain = {
             Army = 1,
             units = {},
+            supportUnits = {},
             enemies = {},
             tick = 0,
             startX = 10,
@@ -152,7 +155,10 @@ def make_harness() -> ControllerHarness:
         function brain:GetFactionIndex() return self.faction end
         function brain:GetListOfUnits(category, idle, requireBuilt)
             table.insert(calls.own, { category, idle, requireBuilt })
-            return self.units
+            local result = {}
+            for _, unit in pairs(self.units or {}) do table.insert(result, unit) end
+            for _, unit in pairs(self.supportUnits or {}) do table.insert(result, unit) end
+            return result
         end
         function brain:GetUnitsAroundPoint(category, position, radius, alliance)
             table.insert(calls.enemy, { category, {position[1], position[2], position[3]}, radius, alliance })
@@ -232,6 +238,7 @@ def make_harness() -> ControllerHarness:
         end
         function IssueBuildFactory(units, blueprintId, count)
             table.insert(calls.buildFactory, { units = units, blueprintId = blueprintId, count = count })
+            if calls.failBuildFactory then error('factory build failed') end
             for _, factory in ipairs(units) do
                 factory.options.queue = { { commandType = 7, blueprintId = blueprintId } }
                 factory.options.idleState = false
@@ -239,6 +246,24 @@ def make_harness() -> ControllerHarness:
                 factory.options.states.Building = true
             end
             return { kind = 'build-factory' }
+        end
+        function IssueUpgrade(units, blueprintId)
+            table.insert(calls.sequence, 'upgrade')
+            table.insert(calls.upgrade, { units = units, blueprintId = blueprintId })
+            if calls.failUpgrade then error('upgrade failed') end
+            for _, factory in ipairs(units) do
+                factory.options.idleState = false
+                factory.options.states = factory.options.states or {}
+                factory.options.states.Upgrading = true
+                factory.options.queue = { { commandType = 10, blueprintId = blueprintId } }
+            end
+            return { kind = 'upgrade' }
+        end
+        function IssuePatrol(units, position)
+            table.insert(calls.sequence, 'patrol')
+            table.insert(calls.patrol, { units = units, position = position })
+            if calls.failPatrol then error('patrol failed') end
+            return { kind = 'patrol' }
         end
         function IssueFactoryRallyPoint(units, position)
             table.insert(calls.rally, { units = units, position = position })
@@ -558,11 +583,13 @@ def test_can_build_invokes_engine_bound_callable_with_owner_and_accepts_truthy_r
     calls = plain(harness.lua.globals().boundCanBuildCalls)
 
     assert record["canBuild"] == {
+        "air_factory": True,
         "land_factory": True,
         "power_generator": True,
         "mass_extractor": True,
     }
     assert calls == [
+        {"ownerMatches": True, "blueprintId": "ueb0102"},
         {"ownerMatches": True, "blueprintId": "ueb0101"},
         {"ownerMatches": True, "blueprintId": "ueb1101"},
         {"ownerMatches": True, "blueprintId": "ueb1103"},

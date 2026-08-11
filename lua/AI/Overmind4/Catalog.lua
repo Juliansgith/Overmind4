@@ -2,6 +2,8 @@ local IdByRole = {
     acu = 'uel0001',
     engineer = 'uel0105',
     land_factory = 'ueb0101',
+    air_factory = 'ueb0102',
+    land_factory_t2 = 'ueb0201',
     power_generator = 'ueb1101',
     hydrocarbon = 'ueb1102',
     mass_extractor = 'ueb1103',
@@ -10,6 +12,9 @@ local IdByRole = {
     anti_air = 'uel0104',
     lab = 'uel0106',
     tank = 'uel0201',
+    interceptor = 'uea0102',
+    t2_direct_fire = 'uel0202',
+    t2_anti_air = 'uel0205',
 }
 
 local RoleById = {}

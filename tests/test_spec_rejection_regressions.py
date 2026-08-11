@@ -932,7 +932,9 @@ def test_realistic_per_tick_surplus_scales_fourth_factory_using_requested_not_ca
     assert len(factory_growth) == 1
 
     execute_intents(harness, factory_growth, observation)
-    assert harness.controller.massSurplusTicks == 0
+    # Economy-first escalation keeps accepted capacity sticky so rejection or
+    # builder loss can retry without another 300-tick accumulation window.
+    assert harness.controller.massSurplusTicks == 300
     harness.brain.massRequested = 1.3
     harness.brain.massTrend = -0.1
     harness.brain.tick = 310

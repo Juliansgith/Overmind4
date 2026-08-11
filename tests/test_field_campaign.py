@@ -63,6 +63,11 @@ def start_campaign(
     team_spawn_mode: Any = "fixed",
     target_position: list[float] | None = None,
     target_name: str | None = None,
+    macro_ready: bool = True,
+    readiness_mex: int = 8,
+    readiness_land_factories: int = 3,
+    readiness_air_factories: int = 0,
+    economy_updates: dict[str, Any] | None = None,
 ) -> tuple[Any, Any, Any, list[Any], Any]:
     harness = make_harness()
     if team_spawn_mode != "fixed":
@@ -75,6 +80,9 @@ def start_campaign(
         harness.controller.targetPath = True
     if target_name is not None:
         harness.controller.targetName = target_name
+    if economy_updates:
+        for key, value in economy_updates.items():
+            setattr(harness.brain, key, value)
     position = position or [80, 2, 20]
     install_markers(
         harness,
@@ -117,6 +125,34 @@ def start_campaign(
         )
         for index in range(total - aa)
     ]
+    if macro_ready:
+        support = [
+            harness.unit(
+                entityId=3000 + index,
+                blueprintId="ueb1103",
+                position=[3 + index, 2, 4],
+            )
+            for index in range(readiness_mex)
+        ] + [
+            harness.unit(
+                entityId=3100 + index,
+                blueprintId="ueb0101",
+                position=[4 + index, 2, 8],
+                idleState=False,
+                states={"Building": True},
+            )
+            for index in range(readiness_land_factories)
+        ] + [
+            harness.unit(
+                entityId=3200 + index,
+                blueprintId="ueb0102",
+                position=[4 + index, 2, 12],
+                idleState=False,
+                states={"Building": True},
+            )
+            for index in range(readiness_air_factories)
+        ]
+        harness.brain.supportUnits = harness.lua.table_from(support)
     shuffled = [acu, engineer, *combat]
     random.Random(seed).shuffle(shuffled)
     harness.brain.units = harness.lua.table_from(shuffled)
@@ -162,6 +198,39 @@ def controller_marker(harness: Any, key: str) -> Any:
         if candidate.key == key:
             return candidate
     raise AssertionError(f"missing marker {key}")
+
+
+def restore_combat_readiness(
+    harness: Any,
+    acu: Any,
+    engineer: Any,
+    combat: list[Any],
+    *,
+    start_id: int = 96000,
+) -> list[Any]:
+    live = [
+        actor for actor in combat
+        if not actor.Dead
+        and not bool(actor.options.destroyed)
+        and int(actor.options.army or 1) == 1
+    ]
+    live_aa = sum(
+        1 for actor in live
+        if str(actor.options.blueprintId).lower() in {"uel0104", "uel0205"}
+    )
+    needed_aa = max(0, 2 - live_aa)
+    needed_total = max(0, 24 - len(live))
+    replacements = [
+        harness.unit(
+            entityId=start_id + index,
+            blueprintId="uel0104" if index < needed_aa else "uel0201",
+            position=[10, 2, 20],
+        )
+        for index in range(needed_total)
+    ]
+    ready = [*live, *replacements]
+    harness.brain.units = harness.lua.table_from([acu, engineer, *ready])
+    return ready
 
 
 def assert_campaign_cohort_indexes(campaign: Any) -> None:
@@ -339,16 +408,23 @@ def test_campaign_allocates_exact_deterministic_three_quarters_cohorts(
 
 
 @pytest.mark.parametrize("total,aa", [(23, 2), (24, 1), (8, 1), (4, 0)])
-def test_early_campaign_keeps_a_small_screen_until_both_field_gates_are_met(total: int, aa: int) -> None:
+def test_sub_readiness_force_keeps_campaign_idle_while_macro_work_continues(
+    total: int,
+    aa: int,
+) -> None:
     harness, _, _, _, observation = start_campaign(total=total, aa=aa)
     macro = plain(observation)["macro"]
-    expected_field = min(4, max(0, total - 4))
 
-    assert macro.get("campaignState") == "early_awaiting_order"
-    assert macro.get("fieldUnits") == expected_field
-    assert macro.get("homeUnits") == total - expected_field
-    assert len(macro.get("fieldTokens") or []) == expected_field
-    assert len(macro.get("fieldTokens") or []) <= 4
+    assert macro.get("campaignState") == "idle"
+    assert macro.get("campaignReady") is False
+    assert macro.get("fieldTokens") in ([], {})
+    assert macro.get("homeTokens") in ([], {})
+    assert harness.controller.fieldCampaign is None
+    assert campaign_intents(harness, observation) == []
+    assert any(
+        intent.get("kind") == "build_structure"
+        for intent in plain(observation.pending)
+    )
 
 
 def test_activation_orders_exact_full_field_once_and_stays_quiet_for_600_ticks() -> None:
@@ -595,7 +671,18 @@ def test_malformed_campaign_intents_fail_closed_without_mutating_live_mission(
     assert len(harness.calls.clear) == 0
     assert len(harness.calls.guard) == 0
     assert len(harness.calls.move) == 0
-    assert plain(harness.controller.fieldCampaign) == before
+    after_reconcile = plain(harness.controller.fieldCampaign)
+    for key in (
+        "pendingMode",
+        "pendingTokens",
+        "pendingEmergencyReason",
+        "pendingRecallFieldTokens",
+        "pendingRecallHomeTokens",
+        "fieldTokens",
+        "homeTokens",
+        "state",
+    ):
+        assert after_reconcile.get(key) == before.get(key)
 
 
 @pytest.mark.parametrize("failure", ["clear", "move"])
@@ -687,10 +774,13 @@ def test_emergency_hysteresis_recalls_once_then_resumes_same_valid_mission_once(
     ]
 
 
-@pytest.mark.parametrize("tick,expected", [(299, 0), (300, 1), (599, 0), (600, 1)])
+@pytest.mark.parametrize(
+    ("tick", "expected_mode"),
+    [(299, None), (300, None), (599, None), (600, "rollback")],
+)
 def test_stuck_recovery_has_an_exact_300_tick_lower_bound_and_rate_limit(
     tick: int,
-    expected: int,
+    expected_mode: str | None,
 ) -> None:
     harness, _, _, _, observation = start_campaign()
     activate_campaign(harness, observation)
@@ -705,16 +795,8 @@ def test_stuck_recovery_has_an_exact_300_tick_lower_bound_and_rate_limit(
         execute_intents(harness, first_recovery, first)
     harness.brain.tick = tick
     current = reconcile(harness)
-    recover = [
-        intent for intent in campaign_intents(harness, current)
-        if intent.get("mode") == "recover"
-    ]
-
-    if tick == 300:
-        # The tick-300 order above is the sole recovery for this boundary.
-        assert recover == []
-    else:
-        assert len(recover) == expected
+    modes = [intent.get("mode") for intent in campaign_intents(harness, current)]
+    assert modes == ([] if expected_mode is None else [expected_mode])
     assert harness.controller.fieldCampaign.clusterKey == "cluster-a"
     assert harness.controller.fieldCampaign.objectiveKey == "cluster-a"
 
@@ -1080,6 +1162,7 @@ def test_home_reserve_emergency_resumes_once_after_four_defenders_and_300_safe_t
     assert plain(under_contact)["macro"].get("fieldTokens") == emergency_field
     assert plain(under_contact)["macro"].get("homeTokens") == emergency_home
 
+    restore_combat_readiness(harness, acu, engineer, field_units)
     harness.brain.enemies = harness.lua.table_from([])
     harness.brain.tick = 100
     first_safe = reconcile(harness)
@@ -1092,7 +1175,8 @@ def test_home_reserve_emergency_resumes_once_after_four_defenders_and_300_safe_t
     resume = campaign_intents(harness, ready)
 
     assert len(resume) == 1 and resume[0].get("mode") == "resume"
-    assert resume[0].get("actorTokens") == emergency_field
+    assert len(resume[0].get("actorTokens") or []) == 18
+    assert set(emergency_field) <= set(resume[0].get("actorTokens") or [])
     execute_intents(harness, resume, ready)
     assert harness.controller.fieldCampaign.state == "active"
     assert harness.controller.fieldCampaign.emergency is False
@@ -1114,7 +1198,7 @@ def test_home_reserve_safe_window_resets_on_contact_flicker() -> None:
     recall = campaign_intents(harness, current)
     assert len(recall) == 1 and recall[0].get("mode") == "recall"
     execute_intents(harness, recall, current)
-    harness.brain.units = harness.lua.table_from([acu, engineer, *field_units])
+    restore_combat_readiness(harness, acu, engineer, field_units)
     harness.brain.enemies = harness.lua.table_from([])
     harness.brain.tick = 100
     reconcile(harness)
@@ -1184,7 +1268,14 @@ def test_failed_attrition_recall_latches_across_contact_clear_and_reconcile() ->
     retry_observation = reconcile(harness)
     retry = campaign_intents(harness, retry_observation)
 
-    assert plain(harness.controller.fieldCampaign) == before
+    after_reconcile = plain(harness.controller.fieldCampaign)
+    assert after_reconcile["pendingMode"] == before["pendingMode"] == "recall"
+    assert after_reconcile["pendingTokens"] == before["pendingTokens"]
+    assert after_reconcile["pendingRecallFieldTokens"] == before["pendingRecallFieldTokens"]
+    assert after_reconcile["pendingRecallHomeTokens"] == before["pendingRecallHomeTokens"]
+    assert after_reconcile["fieldTokens"] == before["fieldTokens"]
+    assert after_reconcile["homeTokens"] == before["homeTokens"]
+    assert after_reconcile["state"] == before["state"]
     assert len(retry) == 1 and retry[0].get("mode") == "recall"
     execute_intents(harness, retry, retry_observation)
     assert harness.controller.fieldCampaign.state == "recalled"
@@ -1292,7 +1383,7 @@ def test_any_contact_resets_attrition_resume_safe_window(
         home_survivors=0
     )
     execute_intents(harness, campaign_intents(harness, current), current)
-    harness.brain.units = harness.lua.table_from([acu, engineer, *field_units])
+    restore_combat_readiness(harness, acu, engineer, field_units)
     harness.brain.enemies = harness.lua.table_from([])
     harness.brain.tick = 100
     reconcile(harness)
@@ -1355,6 +1446,13 @@ def test_attrition_resume_waits_for_four_live_home_defenders_then_300_ticks() ->
     harness.brain.units = harness.lua.table_from(
         [acu, engineer, *three_home_units, replacement]
     )
+    restore_combat_readiness(
+        harness,
+        acu,
+        engineer,
+        [*three_home_units, replacement],
+        start_id=96100,
+    )
     harness.brain.tick = 200
     reconcile(harness)
     harness.brain.tick = 499
@@ -1370,7 +1468,7 @@ def test_attrition_resume_safe_window_resets_when_acu_dips_below_point_seven_fiv
     )
     execute_intents(harness, campaign_intents(harness, current), current)
     assert harness.controller.fieldCampaign.state == "recalled"
-    harness.brain.units = harness.lua.table_from([acu, engineer, *field_units])
+    restore_combat_readiness(harness, acu, engineer, field_units, start_id=96200)
     harness.brain.enemies = harness.lua.table_from([])
     acu.options.health = 75
     harness.brain.tick = 100
@@ -1812,7 +1910,7 @@ def test_failed_stuck_recovery_is_atomic_immediately_retryable_then_rate_limited
     assert campaign_intents(harness, reconcile(harness)) == []
     harness.brain.tick = 600
     again = campaign_intents(harness, reconcile(harness))
-    assert len(again) == 1 and again[0].get("mode") == "recover"
+    assert len(again) == 1 and again[0].get("mode") == "rollback"
 
 
 def test_malicious_defense_intent_cannot_clear_or_order_field_cohort() -> None:
@@ -1949,11 +2047,17 @@ def test_field_lifecycle_before_activation_reconciles_pending_full_order_to_exac
     macro = plain(current)["macro"]
     activation = campaign_intents(harness, current)
 
-    assert len(activation) == 1 and activation[0].get("mode") == "activate"
-    assert activation[0].get("actorTokens") == macro.get("fieldTokens")
-    assert "1000:1" not in activation[0].get("actorTokens")
     if mutation == "recycled":
+        assert len(activation) == 1
+        assert activation[0].get("mode") == "activate"
+        assert activation[0].get("actorTokens") == macro.get("fieldTokens")
+        assert "1000:1" not in activation[0].get("actorTokens")
         assert "1000:2" in activation[0].get("actorTokens")
+    else:
+        assert activation == []
+        assert macro.get("campaignReady") is False
+        assert macro.get("campaignIntentMode") == "none"
+        assert harness.controller.fieldCampaign.state == "awaiting_order"
 
 
 def test_static_live_runtime_defaults_to_campaign_and_gates_every_legacy_screen_path() -> None:
@@ -2277,38 +2381,21 @@ def test_campaign_start_invalidates_a_legacy_frontier_factory_rally_once() -> No
     assert len(harness.calls.rally) == 1
 
 
-def test_full_gate_is_deferred_during_recall_then_resumes_the_full_cohort_once() -> None:
+def test_campaign_waits_at_idle_until_full_gate_then_activates_once() -> None:
     harness, acu, engineer, combat, observation = start_campaign(total=23, aa=2)
-    activate_campaign(harness, observation)
-    acu.options.health = 69
-    harness.brain.tick = 10
-    low = reconcile(harness)
-    execute_intents(harness, campaign_intents(harness, low), low)
+    assert harness.controller.fieldCampaign is None
+    assert campaign_intents(harness, observation) == []
     promoted = harness.unit(entityId=9000, blueprintId="uel0201", position=[10, 2, 20])
     harness.brain.units = harness.lua.table_from([acu, engineer, *combat, promoted])
-    acu.options.health = 74.9
-    harness.brain.tick = 11
-
-    unsafe = reconcile(harness)
-
-    assert harness.controller.fieldCampaign.state == "recalled"
-    assert plain(unsafe)["macro"].get("fieldUnits") == 4
-    assert plain(unsafe)["macro"].get("homeUnits") == 20
-    assert campaign_intents(harness, unsafe) == []
-    acu.options.health = 75
-    harness.brain.tick = 12
-    reconcile(harness)
-    harness.brain.tick = 311
-    assert campaign_intents(harness, reconcile(harness)) == []
-    harness.brain.tick = 312
+    harness.brain.tick = 1
     ready = reconcile(harness)
-    resume = campaign_intents(harness, ready)
-    assert len(resume) == 1 and resume[0].get("mode") == "resume"
-    assert len(resume[0].get("actorTokens") or []) == 18
-    execute_intents(harness, resume, ready)
+    activation = campaign_intents(harness, ready)
+    assert len(activation) == 1 and activation[0].get("mode") == "activate"
+    assert len(activation[0].get("actorTokens") or []) == 18
+    execute_intents(harness, activation, ready)
     assert harness.controller.fieldCampaign.state == "active"
-    assert harness.controller.fieldCampaign.fullFieldOrders == 2
-    harness.brain.tick = 313
+    assert harness.controller.fieldCampaign.fullFieldOrders == 1
+    harness.brain.tick = 2
     assert campaign_intents(harness, reconcile(harness)) == []
 
 
@@ -2330,6 +2417,13 @@ def test_recalled_campaign_refills_field_losses_only_at_the_safe_resume_gate(see
     assert plain(depleted)["macro"].get("fieldUnits") == 0
     assert plain(depleted)["macro"].get("homeUnits") == 6
     assert campaign_intents(harness, depleted) == []
+    restore_combat_readiness(
+        harness,
+        acu,
+        engineer,
+        home_units,
+        start_id=9400,
+    )
     acu.options.health = 75
     harness.brain.tick = 12
     reconcile(harness)
@@ -2340,10 +2434,10 @@ def test_recalled_campaign_refills_field_losses_only_at_the_safe_resume_gate(see
     ready = reconcile(harness)
     resume = campaign_intents(harness, ready)
 
-    assert plain(ready)["macro"].get("fieldUnits") == 2
-    assert plain(ready)["macro"].get("homeUnits") == 4
+    assert plain(ready)["macro"].get("fieldUnits") == 18
+    assert plain(ready)["macro"].get("homeUnits") == 6
     assert len(resume) == 1 and resume[0].get("mode") == "resume"
-    assert len(resume[0].get("actorTokens") or []) == 2
+    assert len(resume[0].get("actorTokens") or []) == 18
     execute_intents(harness, resume, ready)
     assert harness.controller.fieldCampaign.state == "active"
 

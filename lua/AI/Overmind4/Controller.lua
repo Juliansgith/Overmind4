@@ -55,9 +55,14 @@ local TableInsert = table.insert
 local LiveOwnedActor
 
 local BUILD_ROLES = {
-    acu = { 'land_factory', 'power_generator', 'mass_extractor' },
-    engineer = { 'hydrocarbon', 'land_factory', 'mass_extractor', 'power_generator' },
-    land_factory = { 'anti_air', 'artillery', 'engineer', 'lab', 'scout', 'tank' },
+    acu = { 'air_factory', 'land_factory', 'power_generator', 'mass_extractor' },
+    engineer = { 'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor', 'power_generator' },
+    land_factory = {
+        'anti_air', 'artillery', 'engineer', 'lab', 'land_factory_t2',
+        'scout', 'tank',
+    },
+    air_factory = { 'interceptor' },
+    land_factory_t2 = { 't2_anti_air', 't2_direct_fire' },
 }
 
 local COMBAT_ROLES = {
@@ -65,11 +70,40 @@ local COMBAT_ROLES = {
     artillery = true,
     lab = true,
     tank = true,
+    t2_anti_air = true,
+    t2_direct_fire = true,
 }
 
-local PLACEMENT_FOUNDATION_ROLES = {
-    land_factory = true,
-    power_generator = true,
+local ESCALATION = {
+    MAX_PLACEMENT_PROBES = 96,
+    MAX_PLACEMENT_RADIUS = 64,
+    PLACEMENT_RESULTS_PER_ROLE = 13,
+    AIR_ENERGY_STORED = 0.5,
+    T2_STORED = 0.5,
+    FULL_STORAGE = 0.95,
+    CAMPAIGN_MIN_MEX = 8,
+    CAMPAIGN_MIN_FACTORIES = 3,
+    CAMPAIGN_MIN_LAND_FACTORIES = 2,
+    CAMPAIGN_ATTRITION_TICKS = 600,
+    CAMPAIGN_ATTRITION_RATIO = 0.25,
+    antiAirRoles = {
+        anti_air = true,
+        t2_anti_air = true,
+    },
+    placementFoundationRoles = {
+        air_factory = true,
+        land_factory = true,
+        land_factory_t2 = true,
+        power_generator = true,
+    },
+    factoryProducts = {
+        air_factory = { interceptor = true },
+        land_factory = {
+            anti_air = true, artillery = true, engineer = true,
+            lab = true, scout = true, tank = true,
+        },
+        land_factory_t2 = { t2_anti_air = true, t2_direct_fire = true },
+    },
 }
 
 local function SafeCall(defaultValue, fn, ...)
@@ -457,6 +491,7 @@ local function PendingArray(controller)
             actorToken = operation.actorToken,
             kind = operation.kind,
             buildRole = operation.buildRole,
+            upgradeRole = operation.upgradeRole,
             siteKey = operation.siteKey,
             placementKey = operation.placementKey,
             position = CopyPosition(operation.position),
@@ -585,6 +620,7 @@ local function NormalizeOwnUnit(controller, unit)
         assignedToWave = assigned,
         commanderEscort = assignment and assignment.commanderEscort == true or false,
         frontierEscort = frontierAssignment ~= nil,
+        airAssigned = controller.airAssignments[token] == true,
         fieldCohort = fieldCohort == true,
         homeCohort = homeCohort == true,
         campaignEngineer = campaignEngineer == true,
@@ -727,7 +763,7 @@ end
 local function FoundationSnapshot(controller, ownRecords)
     local foundations = {}
     for _, unit in ipairs(ownRecords or {}) do
-        if PLACEMENT_FOUNDATION_ROLES[unit.role] == true
+        if ESCALATION.placementFoundationRoles[unit.role] == true
             and unit.complete ~= true
             and type(unit.token) == 'string'
             and CopyPosition(unit.position)
@@ -1286,13 +1322,18 @@ local function StructureWorkKey(controller, operation)
         or ('Actor:' .. tostring(operation.actorToken))
 end
 
-local function MacroSnapshot(controller, units)
+local function MacroSnapshot(controller, units, economy)
     local rebuildJobs = 0
     local frontierJobs = 0
     local reclaimJobs = 0
     local structureJobs = 0
     local constructionWork = {}
     local factoryWork = {}
+    local factoryWorkByRole = {
+        air_factory = {},
+        land_factory = {},
+        land_factory_t2 = {},
+    }
     for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
         if site.complete ~= true
             and (site.lost == true or site.frontierSelected == true)
@@ -1303,7 +1344,10 @@ local function MacroSnapshot(controller, units)
     for _, foundation in ipairs(controller.currentFoundations or {}) do
         local key = foundation.placementKey or ('Foundation:' .. tostring(foundation.targetToken))
         constructionWork[key] = true
-        if foundation.role == 'land_factory' then factoryWork[key] = true end
+        if factoryWorkByRole[foundation.role] then
+            factoryWork[key] = true
+            factoryWorkByRole[foundation.role][key] = true
+        end
     end
     for _, operation in pairs(controller.pending or {}) do
         if StructureOperation(operation) then
@@ -1312,7 +1356,27 @@ local function MacroSnapshot(controller, units)
             if operation.reason == 'frontier_expansion' then frontierJobs = frontierJobs + 1 end
             local key = StructureWorkKey(controller, operation)
             constructionWork[key] = true
-            if operation.buildRole == 'land_factory' then factoryWork[key] = true end
+            if factoryWorkByRole[operation.buildRole] then
+                factoryWork[key] = true
+                factoryWorkByRole[operation.buildRole][key] = true
+            end
+        elseif operation.kind == 'factory_upgrade' then
+            local key = 'Upgrade:' .. tostring(operation.actorToken)
+            for _, foundation in ipairs(controller.currentFoundations or {}) do
+                if foundation.role == operation.upgradeRole
+                    and operation.position
+                    and DistanceSquared(foundation.position, operation.position)
+                        <= PLACEMENT_MATCH_DISTANCE * PLACEMENT_MATCH_DISTANCE
+                then
+                    key = foundation.placementKey
+                        or ('Foundation:' .. tostring(foundation.targetToken))
+                    break
+                end
+            end
+            factoryWork[key] = true
+            if factoryWorkByRole[operation.upgradeRole] then
+                factoryWorkByRole[operation.upgradeRole][key] = true
+            end
         elseif operation.kind == 'reclaim' then
             reclaimJobs = reclaimJobs + 1
         end
@@ -1325,10 +1389,70 @@ local function MacroSnapshot(controller, units)
     end
     local constructionBacklog = CountArray(constructionWork)
     local engineerDemand = math.max(2, 2 + math.floor((constructionBacklog + 1) / 2))
-    local factories = CountRole(units, 'land_factory') + CountArray(factoryWork)
-    local factoryDemand = math.max(2, factories)
+    economy = type(economy) == 'table' and economy or {}
+    local completedMex = CountRole(units, 'mass_extractor')
+    local completedLandT1 = CountRole(units, 'land_factory')
+    local completedLandT2 = CountRole(units, 'land_factory_t2')
+    local completedAirT1 = CountRole(units, 'air_factory')
+    local completedFactories = completedLandT1 + completedLandT2 + completedAirT1
+    local upgradeSourcesCompleted = 0
+    for token, operation in pairs(controller.pending or {}) do
+        if operation.kind == 'factory_upgrade' then
+            for _, unit in ipairs(units or {}) do
+                if unit.token == token
+                    and unit.role == 'land_factory'
+                    and unit.complete == true
+                then
+                    upgradeSourcesCompleted = upgradeSourcesCompleted + 1
+                    break
+                end
+            end
+        end
+    end
+    local factories = math.max(
+        completedFactories,
+        completedFactories + CountArray(factoryWork) - upgradeSourcesCompleted
+    )
+    local desiredCapacity = math.max(2, factories)
+    local income = tonumber(economy.massIncome)
+    local requested = tonumber(economy.massRequested)
+    local stored = tonumber(economy.massStoredRatio)
+    local trend = tonumber(economy.massTrend)
+    if income and requested and stored and trend
+        and income == income and requested == requested
+        and stored == stored and trend == trend
+        and math.abs(income) <= 1000000000
+        and math.abs(requested) <= 1000000000
+        and math.abs(stored) <= 1000000000
+        and math.abs(trend) <= 1000000000
+        and income >= 0
+        and requested >= 0
+        and requested <= income
+        and stored >= ESCALATION.FULL_STORAGE
+        and trend >= 0
+    then
+        desiredCapacity = math.max(desiredCapacity, math.min(
+            8,
+            math.floor(income / NEXT_FACTORY_SAFE_DRAIN_PER_TICK + 0.00001)
+        ))
+    end
+    controller.factoryTarget = math.max(
+        tonumber(controller.factoryTarget) or 2,
+        desiredCapacity
+    )
+    local factoryDemand = math.max(2, controller.factoryTarget, factories)
     if controller.massSurplusTicks >= MASS_SURPLUS_TICKS then
-        factoryDemand = factoryDemand + 1
+        factoryDemand = math.max(factoryDemand, factories + 1)
+    end
+    local combatCompleted = 0
+    local aaCompleted = 0
+    for _, unit in ipairs(units or {}) do
+        if COMBAT_ROLES[unit.role] and unit.complete == true then
+            combatCompleted = combatCompleted + 1
+            if unit.role == 'anti_air' or unit.role == 't2_anti_air' then
+                aaCompleted = aaCompleted + 1
+            end
+        end
     end
     local frontierScreen = 0
     local homeReserve = 0
@@ -1368,13 +1492,17 @@ local function MacroSnapshot(controller, units)
         and CopyArray(campaign.homeTokens)
         or {}
     local fieldAa = 0
+    local fieldCompleted = 0
     local homeAa = 0
     local fieldAtAnchor = 0
     local objectivePosition = campaign and campaign.anchorPosition or nil
     for _, unit in ipairs(units or {}) do
         if unit.complete == true and COMBAT_ROLES[unit.role] then
             if CampaignFieldContains(campaign, unit.token) then
-                if unit.role == 'anti_air' then fieldAa = fieldAa + 1 end
+                fieldCompleted = fieldCompleted + 1
+                if unit.role == 'anti_air' or unit.role == 't2_anti_air' then
+                    fieldAa = fieldAa + 1
+                end
                 if objectivePosition
                     and Distance(unit.position, objectivePosition)
                         <= FIELD_CAMPAIGN_ANCHOR_RADIUS
@@ -1382,11 +1510,75 @@ local function MacroSnapshot(controller, units)
                     fieldAtAnchor = fieldAtAnchor + 1
                 end
             elseif CampaignHomeContains(campaign, unit.token)
-                and unit.role == 'anti_air'
+                and (unit.role == 'anti_air' or unit.role == 't2_anti_air')
             then
                 homeAa = homeAa + 1
             end
         end
+    end
+    local homeReadyCount = math.max(0, combatCompleted - math.floor(3 * combatCompleted / 4))
+    if campaign then
+        homeReadyCount = math.max(0, combatCompleted - fieldCompleted)
+    end
+    local economyValid = type(economy.massIncome) == 'number'
+        and type(economy.massRequested) == 'number'
+        and type(economy.massStoredRatio) == 'number'
+        and type(economy.massTrend) == 'number'
+        and type(economy.energyIncome) == 'number'
+        and type(economy.energyStoredRatio) == 'number'
+        and type(economy.energyTrend) == 'number'
+        and economy.massIncome == economy.massIncome
+        and economy.massRequested == economy.massRequested
+        and economy.massStoredRatio == economy.massStoredRatio
+        and economy.massTrend == economy.massTrend
+        and economy.energyIncome == economy.energyIncome
+        and economy.energyStoredRatio == economy.energyStoredRatio
+        and economy.energyTrend == economy.energyTrend
+        and math.abs(economy.massIncome) <= 1000000000
+        and math.abs(economy.massRequested) <= 1000000000
+        and math.abs(economy.massStoredRatio) <= 1000000000
+        and math.abs(economy.massTrend) <= 1000000000
+        and math.abs(economy.energyIncome) <= 1000000000
+        and math.abs(economy.energyStoredRatio) <= 1000000000
+        and math.abs(economy.energyTrend) <= 1000000000
+        and economy.massIncome >= 0
+        and economy.massRequested >= 0
+        and economy.energyIncome >= 0
+        and economy.massStoredRatio >= 0
+        and economy.massStoredRatio <= 1
+        and economy.energyStoredRatio >= 0
+        and economy.energyStoredRatio <= 1
+    local readinessBlockers = {}
+    if completedMex < ESCALATION.CAMPAIGN_MIN_MEX then
+        TableInsert(readinessBlockers, 'mex')
+    end
+    if completedFactories < ESCALATION.CAMPAIGN_MIN_FACTORIES then
+        TableInsert(readinessBlockers, 'production_factory')
+    end
+    if completedLandT1 + completedLandT2 < ESCALATION.CAMPAIGN_MIN_LAND_FACTORIES then
+        TableInsert(readinessBlockers, 'land_factory')
+    end
+    if combatCompleted < FIELD_CAMPAIGN_MIN_COMBAT then
+        TableInsert(readinessBlockers, 'combat')
+    end
+    if aaCompleted < FIELD_CAMPAIGN_MIN_AA then
+        TableInsert(readinessBlockers, 'anti_air')
+    end
+    if homeReadyCount < HOME_RESERVE_MIN then
+        TableInsert(readinessBlockers, 'home_reserve')
+    end
+    if not economyValid then TableInsert(readinessBlockers, 'economy_invalid') end
+    local campaignReady = TableGetn(readinessBlockers) == 0
+    local economyStage = 'opening'
+    if completedMex >= 10
+        and completedLandT1 + completedLandT2 >= 3
+        and completedAirT1 >= 1
+    then
+        economyStage = completedLandT2 >= 1 and 't2' or 't2_ready'
+    elseif completedMex >= 6
+        and completedLandT1 + completedLandT2 >= 2
+    then
+        economyStage = completedAirT1 >= 1 and 'air_screen' or 'air_ready'
     end
     local tick = CurrentTick(controller)
     return {
@@ -1400,6 +1592,25 @@ local function MacroSnapshot(controller, units)
         frontierWork = frontierWork,
         engineerDemand = engineerDemand,
         factoryDemand = factoryDemand,
+        factoryTarget = controller.factoryTarget,
+        economyStage = economyStage,
+        completedMex = completedMex,
+        completedLandT1Factories = completedLandT1,
+        completedLandT2Factories = completedLandT2,
+        completedAirT1Factories = completedAirT1,
+        buildingLandT1Factories = CountArray(factoryWorkByRole.land_factory),
+        buildingLandT2Factories = CountArray(factoryWorkByRole.land_factory_t2),
+        buildingAirT1Factories = CountArray(factoryWorkByRole.air_factory),
+        placementCapacity = tonumber(controller.lastPlacementCapacity) or 0,
+        placementProbeCount = tonumber(controller.lastPlacementProbeCount) or 0,
+        upgradeState = controller.upgradeState or 'none',
+        airScreenCount = tonumber(controller.airScreenCount) or 0,
+        campaignReady = campaignReady,
+        campaignReadinessBlockers = readinessBlockers,
+        campaignReadinessBlocker = readinessBlockers[1] or 'none',
+        rollbackReason = campaign and campaign.rollbackReason or 'none',
+        fieldAttritionLost = campaign and (tonumber(campaign.attritionLost) or 0) or 0,
+        fieldAttritionWindow = campaign and (tonumber(campaign.attritionWindow) or 0) or 0,
         massSurplusTicks = controller.massSurplusTicks,
         selectedFrontierCluster = controller.selectedFrontierCluster or 'none',
         selectedFrontierSite = controller.selectedFrontierSite or 'none',
@@ -1476,6 +1687,9 @@ local function MacroSnapshot(controller, units)
             and (campaign.desiredKind or campaign.kind)
             or 'none',
         campaignIntentEngineer = 'none',
+        campaignIntentRollbackReason = campaign
+            and (campaign.pendingRollbackReason or campaign.rollbackReason)
+            or 'none',
         campaignIntentCluster = campaign
             and (campaign.desiredClusterKey or campaign.clusterKey)
             or 'none',
@@ -1483,7 +1697,9 @@ local function MacroSnapshot(controller, units)
             and (campaign.desiredAnchorKey or campaign.anchorKey)
             or 'none',
         campaignIntentPosition = campaign
-            and CopyPosition(campaign.desiredAnchorPosition
+            and CopyPosition(campaign.pendingMode == 'rollback'
+                and (campaign.lastSecuredAnchorPosition or controller.basePosition)
+                or campaign.desiredAnchorPosition
                 or campaign.anchorPosition)
             or nil,
         campaignSerial = campaign and campaign.serial or -1,
@@ -1491,17 +1707,73 @@ local function MacroSnapshot(controller, units)
 end
 
 local function PlacementSnapshot(controller)
-    local placements = { land_factory = {}, power_generator = {} }
-    for _, role in ipairs({ 'land_factory', 'power_generator' }) do
+    local placements = {
+        air_factory = {},
+        land_factory = {},
+        power_generator = {},
+    }
+    local claimed = {}
+    for _, foundation in ipairs(controller.currentFoundations or {}) do
+        if foundation.placementKey then claimed[foundation.placementKey] = true end
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.placementKey then claimed[operation.placementKey] = true end
+    end
+    local probes = 0
+    local roleProbeStart = 0
+    local function Consider(role, position)
+        if probes >= ESCALATION.MAX_PLACEMENT_PROBES
+            or probes - roleProbeStart >= ESCALATION.MAX_PLACEMENT_PROBES / 3
+            or TableGetn(placements[role]) >= ESCALATION.PLACEMENT_RESULTS_PER_ROLE
+        then
+            return
+        end
+        local candidate = TerrainPosition(position)
+        local key = candidate and PlacementKey(candidate) or nil
+        if not key or claimed[key] or SiteIsBlocked(controller, key) then return end
+        probes = probes + 1
         local blueprintId = Catalog.IdFor(role)
-        for _, seed in ipairs(controller.placementSeeds) do
-            if not SiteIsBlocked(controller, PlacementKey(seed))
-                and SafeCall(false, controller.brain.CanBuildStructureAt, controller.brain, blueprintId, seed) == true
-            then
-                TableInsert(placements[role], CopyPosition(seed))
-            end
+        if blueprintId
+            and SafeCall(false, controller.brain.CanBuildStructureAt,
+                controller.brain, blueprintId, candidate) == true
+        then
+            claimed[key] = true
+            TableInsert(placements[role], candidate)
         end
     end
+    local ringOffsets = {
+        { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 },
+        { 1, 1 }, { -1, 1 }, { -1, -1 }, { 1, -1 },
+    }
+    local sortedSeeds = CopyArray(controller.placementSeeds)
+    table.sort(sortedSeeds, function(a, b)
+        return tostring(PlacementKey(a) or '') < tostring(PlacementKey(b) or '')
+    end)
+    for _, role in ipairs({ 'power_generator', 'land_factory', 'air_factory' }) do
+        roleProbeStart = probes
+        for _, seed in ipairs(sortedSeeds) do
+            Consider(role, seed)
+        end
+        local radius = 28
+        while radius <= ESCALATION.MAX_PLACEMENT_RADIUS
+            and probes < ESCALATION.MAX_PLACEMENT_PROBES
+            and probes - roleProbeStart < ESCALATION.MAX_PLACEMENT_PROBES / 3
+            and TableGetn(placements[role]) < ESCALATION.PLACEMENT_RESULTS_PER_ROLE
+        do
+            for _, offset in ipairs(ringOffsets) do
+                Consider(role, {
+                    controller.basePosition[1] + offset[1] * radius,
+                    0,
+                    controller.basePosition[3] + offset[2] * radius,
+                })
+            end
+            radius = radius + 7
+        end
+    end
+    controller.lastPlacementProbeCount = probes
+    controller.lastPlacementCapacity = TableGetn(placements.land_factory)
+        + TableGetn(placements.air_factory)
+        + TableGetn(placements.power_generator)
     return placements
 end
 
@@ -1565,6 +1837,9 @@ local function ReleaseOperation(controller, token, reason)
     then
         BlockSite(controller, operation.siteKey or operation.placementKey, reason)
     end
+    if operation.kind == 'factory_upgrade' then
+        controller.upgradeState = reason and ('failed:' .. tostring(reason)) or 'completed'
+    end
     controller.pending[token] = nil
     if reason then
         Emit(controller, 'operation_released', {
@@ -1622,6 +1897,56 @@ local function OperationCompleted(controller, operation, observation, record)
             and freshness.covered == true
             and (freshness.state == 'absent' or freshness.state == 'depleted')
             or false
+    end
+    if operation.kind == 'factory_upgrade' then
+        if record
+            and record.role == operation.upgradeRole
+            and record.complete == true
+        then
+            return true
+        end
+        if not operation.upgradeTargetToken and record then
+            local actor = controller.unitRefs[operation.actorToken]
+            local focus = actor
+                and SafeCall(nil, actor.GetFocusUnit, actor)
+                or nil
+            if focus then
+                for _, token in ipairs(SortedKeys(controller.unitRefs or {})) do
+                    if controller.unitRefs[token] == focus then
+                        local target = nil
+                        for _, unit in ipairs(observation.units or {}) do
+                            if unit.token == token then target = unit break end
+                        end
+                        if target and target.role == operation.upgradeRole then
+                            operation.upgradeTargetToken = token
+                            operation.lastFraction = tonumber(target.fractionComplete) or 0
+                            return target.complete == true
+                        end
+                    end
+                end
+            end
+        end
+        if operation.upgradeTargetToken then
+            for _, unit in ipairs(observation.units or {}) do
+                if unit.token == operation.upgradeTargetToken then
+                    if unit.role ~= operation.upgradeRole then return false end
+                    operation.lastFraction = math.max(
+                        tonumber(operation.lastFraction) or 0,
+                        tonumber(unit.fractionComplete) or 0
+                    )
+                    if unit.complete == true then
+                        operation.completedToken = unit.token
+                        return true
+                    end
+                    return false
+                end
+            end
+            return false
+        end
+        -- An upgrade replacement is authoritative only after the live source
+        -- exposes it through GetFocusUnit. A nearby T2 foundation can belong
+        -- to another factory, so spatial matching is not a safe identity.
+        return false
     end
     return operation.kind == 'factory_build'
         and record
@@ -1805,13 +2130,16 @@ local function RecordPending(controller, intent, record)
         phase = 'building'
     elseif intent.kind == 'reclaim' and initialDistance <= 2 then
         phase = 'reclaiming'
-    elseif intent.kind == 'factory_build' then
+    elseif intent.kind == 'factory_build'
+        or intent.kind == 'factory_upgrade'
+    then
         phase = 'building'
     end
     local operation = {
         actorToken = intent.actorToken,
         kind = intent.kind,
         buildRole = intent.buildRole,
+        upgradeRole = intent.upgradeRole,
         siteKey = intent.siteKey,
         placementKey = placementKey,
         position = position,
@@ -1888,12 +2216,6 @@ local function ExecuteStructure(controller, intent, record)
         ReleaseOperation(controller, intent.actorToken, 'command_error')
         return false
     end
-    if intent.buildRole == 'land_factory'
-        and intent.reason == 'production_saturation'
-    then
-        controller.massSurplusSinceTick = nil
-        controller.massSurplusTicks = 0
-    end
     Emit(controller, 'order', {
         actor = intent.actorToken,
         command = 'build_structure',
@@ -1904,8 +2226,10 @@ local function ExecuteStructure(controller, intent, record)
 end
 
 local function ExecuteFactoryProduction(controller, intent, record)
+    local legal = ESCALATION.factoryProducts[record.role]
     if controller.pending[intent.actorToken]
-        or record.role ~= 'land_factory'
+        or not legal
+        or legal[intent.buildRole] ~= true
         or record.complete ~= true
         or record.idle ~= true
         or not record.canBuild
@@ -1926,6 +2250,115 @@ local function ExecuteFactoryProduction(controller, intent, record)
         actor = intent.actorToken,
         command = 'factory_build',
         role = intent.buildRole,
+    })
+    return true
+end
+
+ESCALATION.ExecuteUpgrade = function(controller, intent, record)
+    if controller.pending[intent.actorToken]
+        or record.role ~= 'land_factory'
+        or intent.upgradeRole ~= 'land_factory_t2'
+        or record.complete ~= true
+        or record.idle ~= true
+        or not record.canBuild
+        or record.canBuild.land_factory_t2 ~= true
+    then
+        return false
+    end
+    local blueprintId = Catalog.IdFor(intent.upgradeRole)
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'land_factory')
+    if not actor
+        or not blueprintId
+        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or SafeCall(false, actor.IsUnitState, actor, 'Upgrading') == true
+        or not CanUnitBuild(actor, blueprintId)
+    then
+        return false
+    end
+    intent.buildRole = intent.upgradeRole
+    intent.position = CopyPosition(record.position)
+    RecordPending(controller, intent, record)
+    local operation = controller.pending[intent.actorToken]
+    operation.deadlineTick = math.max(
+        tonumber(operation.deadlineTick) or 0,
+        CurrentTick(controller) + 3000
+    )
+    local ok = pcall(function() IssueUpgrade({ actor }, blueprintId) end)
+    if not ok then
+        ReleaseOperation(controller, intent.actorToken, 'command_error')
+        return false
+    end
+    controller.upgradeState = 'ordered'
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'factory_upgrade',
+        role = intent.upgradeRole,
+    })
+    return true
+end
+
+ESCALATION.ExecuteAirScreen = function(
+    controller,
+    intent,
+    records,
+    usedActors,
+    observation
+)
+    if type(intent.actorTokens) ~= 'table' then return false end
+    local position = TerrainPosition(intent.position)
+    local basePosition = observation
+        and TerrainPosition(observation.basePosition)
+        or nil
+    local fairPosition = position
+        and basePosition
+        and DistanceSquared(position, basePosition) <= 0.01
+    local campaign = controller.fieldCampaign
+    if not fairPosition
+        and campaign
+        and TerrainPosition(campaign.anchorPosition)
+        and DistanceSquared(position, TerrainPosition(campaign.anchorPosition)) <= 0.01
+    then
+        fairPosition = true
+    end
+    if not fairPosition then return false end
+    local actors = {}
+    local tokens = {}
+    local seen = {}
+    for _, token in ipairs(intent.actorTokens) do
+        local record = records[token]
+        if type(token) ~= 'string'
+            or seen[token]
+            or usedActors[token]
+            or controller.airAssignments[token]
+            or not record
+            or record.role ~= 'interceptor'
+            or record.complete ~= true
+            or record.idle ~= true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, 'interceptor')
+        if not actor then return false end
+        seen[token] = true
+        TableInsert(tokens, token)
+        TableInsert(actors, actor)
+    end
+    if TableGetn(actors) == 0 or not position then return false end
+    if not pcall(function() IssueClearCommands(actors) end) then return false end
+    if not pcall(function() IssuePatrol(actors, position) end) then
+        pcall(function() IssueClearCommands(actors) end)
+        return false
+    end
+    for _, token in ipairs(tokens) do
+        controller.airAssignments[token] = true
+        usedActors[token] = true
+    end
+    controller.airScreenCount = CountArray(controller.airAssignments)
+    Emit(controller, 'order', {
+        actor = 'air_screen',
+        command = 'patrol',
+        role = 'interceptor',
+        units = TableGetn(tokens),
     })
     return true
 end
@@ -2291,7 +2724,9 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
         TableInsert(actors, actor)
     end
     if rotation then
-        if not existingMission or recordByToken[tokens[1]].role ~= 'anti_air' then
+        if not existingMission
+            or ESCALATION.antiAirRoles[recordByToken[tokens[1]].role] ~= true
+        then
             return false
         end
         local missionTokens = {}
@@ -2317,9 +2752,9 @@ local function ExecuteFrontierScreen(controller, intent, recordByToken, usedActo
             end
             local actor = LiveOwnedActor(controller, token, record, record.role)
             if not actor then return false end
-            if record.role == 'anti_air' then screenHasAntiAir = true end
+            if ESCALATION.antiAirRoles[record.role] then screenHasAntiAir = true end
             if token == displacedToken then
-                if record.role == 'anti_air' then return false end
+                if ESCALATION.antiAirRoles[record.role] then return false end
                 displacedActor = actor
             end
             TableInsert(missionTokens, token)
@@ -2871,7 +3306,7 @@ local function CampaignTargetCounts(records)
     local total = TableGetn(records)
     local antiAir = 0
     for _, record in ipairs(records) do
-        if record.role == 'anti_air' then antiAir = antiAir + 1 end
+        if ESCALATION.antiAirRoles[record.role] then antiAir = antiAir + 1 end
     end
     local full = total >= FIELD_CAMPAIGN_MIN_COMBAT
         and antiAir >= FIELD_CAMPAIGN_MIN_AA
@@ -2894,7 +3329,7 @@ local function SelectCampaignField(records, fieldTarget, fieldAaTarget)
     local selected = {}
     local field = {}
     for _, record in ipairs(records) do
-        if record.role == 'anti_air'
+        if ESCALATION.antiAirRoles[record.role]
             and TableGetn(field) < fieldTarget
             and TableGetn(field) < fieldAaTarget
         then
@@ -2904,7 +3339,7 @@ local function SelectCampaignField(records, fieldTarget, fieldAaTarget)
     end
     for _, record in ipairs(records) do
         if TableGetn(field) < fieldTarget
-            and record.role ~= 'anti_air'
+            and not ESCALATION.antiAirRoles[record.role]
             and not selected[record.token]
         then
             selected[record.token] = true
@@ -2942,14 +3377,14 @@ local function ExpandCampaignField(records, existingField, fieldTarget, fieldAaT
     local fieldAa = 0
     for _, token in ipairs(field) do selected[token] = true end
     for _, record in ipairs(records) do
-        if selected[record.token] and record.role == 'anti_air' then
+        if selected[record.token] and ESCALATION.antiAirRoles[record.role] then
             fieldAa = fieldAa + 1
         end
     end
     for _, record in ipairs(records) do
         if TableGetn(field) < fieldTarget
             and fieldAa < fieldAaTarget
-            and record.role == 'anti_air'
+            and ESCALATION.antiAirRoles[record.role]
             and not selected[record.token]
         then
             selected[record.token] = true
@@ -2959,7 +3394,7 @@ local function ExpandCampaignField(records, existingField, fieldTarget, fieldAaT
     end
     for _, record in ipairs(records) do
         if TableGetn(field) < fieldTarget
-            and record.role ~= 'anti_air'
+            and not ESCALATION.antiAirRoles[record.role]
             and not selected[record.token]
         then
             selected[record.token] = true
@@ -3236,9 +3671,18 @@ local function StartFieldCampaign(controller, observation, operation)
         fullFieldOrders = 0,
         reinforcementOrders = 0,
         recoveryOrders = 0,
+        recoveryWindows = 0,
         modeSwitches = 0,
         transitionEvents = 0,
         assaultEvents = 0,
+        rollbackOrders = 0,
+        rollbackReason = nil,
+        lastSecuredAnchorKey = 'home',
+        lastSecuredAnchorPosition = CopyPosition(controller.basePosition),
+        attritionBaseline = TableGetn(field),
+        attritionWindowTick = tick,
+        attritionLost = 0,
+        attritionWindow = 0,
     }
     controller.fieldCampaign = campaign
     if TableGetn(field) > 0 then CampaignSetPending(campaign, 'activate', field) end
@@ -3332,12 +3776,14 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
         local fieldAa = 0
         for _, token in ipairs(field) do
             fieldSet[token] = true
-            if byToken[token].role == 'anti_air' then fieldAa = fieldAa + 1 end
+            if ESCALATION.antiAirRoles[byToken[token].role] then
+                fieldAa = fieldAa + 1
+            end
         end
         for _, record in ipairs(records) do
             if TableGetn(field) < fieldTarget
                 and fieldAa < fieldAaTarget
-                and record.role == 'anti_air'
+                and ESCALATION.antiAirRoles[record.role]
                 and not fieldSet[record.token]
             then
                 fieldSet[record.token] = true
@@ -3347,7 +3793,7 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
         end
         for _, record in ipairs(records) do
             if TableGetn(field) < fieldTarget
-                and record.role ~= 'anti_air'
+                and not ESCALATION.antiAirRoles[record.role]
                 and not fieldSet[record.token]
             then
                 fieldSet[record.token] = true
@@ -3397,7 +3843,9 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
     else
         local fieldAa = 0
         for _, token in ipairs(field) do
-            if byToken[token].role == 'anti_air' then fieldAa = fieldAa + 1 end
+            if ESCALATION.antiAirRoles[byToken[token].role] then
+                fieldAa = fieldAa + 1
+            end
         end
         for _, record in ipairs(records) do
             if not assigned[record.token] then
@@ -3405,7 +3853,7 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
                 local homeDeficit = (TableGetn(records) - fieldTarget) - TableGetn(home)
                 local chooseField = false
                 if campaign.state ~= 'recalled'
-                    and record.role == 'anti_air'
+                    and ESCALATION.antiAirRoles[record.role]
                     and fieldDeficit > 0
                     and fieldAa < fieldAaTarget
                 then
@@ -3417,7 +3865,9 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
                 end
                 if chooseField then
                     TableInsert(field, record.token)
-                    if record.role == 'anti_air' then fieldAa = fieldAa + 1 end
+                    if ESCALATION.antiAirRoles[record.role] then
+                        fieldAa = fieldAa + 1
+                    end
                 else
                     TableInsert(home, record.token)
                 end
@@ -3694,7 +4144,12 @@ local function UpdateFieldCampaign(controller, observation)
     local campaign = controller.fieldCampaign
     if not campaign then
         local candidate = CampaignCandidate(controller, observation)
-        if candidate then StartFieldCampaign(controller, observation, candidate) end
+        if candidate
+            and observation.macro
+            and observation.macro.campaignReady == true
+        then
+            StartFieldCampaign(controller, observation, candidate)
+        end
         campaign = controller.fieldCampaign
         ApplyCampaignFlags(controller, campaign, observation.units)
         return
@@ -3704,6 +4159,29 @@ local function UpdateFieldCampaign(controller, observation)
     local health = CampaignAcuHealth(observation)
     local immediateContact = observation.enemyContact ~= nil
         and observation.enemyContact.immediate == true
+    local observedByToken = RecordByToken(observation.units)
+    local liveBeforePrune = 0
+    for _, token in ipairs(campaign.fieldTokens or {}) do
+        local record = observedByToken[token]
+        if record and record.complete == true and COMBAT_ROLES[record.role] then
+            liveBeforePrune = liveBeforePrune + 1
+        end
+    end
+    local attritionBaseline = math.max(
+        0,
+        tonumber(campaign.attritionBaseline) or liveBeforePrune
+    )
+    local attritionStart = tonumber(campaign.attritionWindowTick) or tick
+    if tick - attritionStart > ESCALATION.CAMPAIGN_ATTRITION_TICKS then
+        campaign.attritionBaseline = liveBeforePrune
+        campaign.attritionWindowTick = tick
+        campaign.attritionLost = 0
+        campaign.attritionWindow = 0
+        attritionBaseline = liveBeforePrune
+    else
+        campaign.attritionLost = math.max(0, attritionBaseline - liveBeforePrune)
+        campaign.attritionWindow = tick - attritionStart
+    end
     CampaignPruneAndFill(campaign, observation.units, false)
     if campaign.pendingMode == 'recall' then
         if campaign.pendingEmergencyReason == 'home_reserve' then
@@ -3721,6 +4199,8 @@ local function UpdateFieldCampaign(controller, observation)
     local reserveSafe = observation.enemyContact == nil
         and TableGetn(campaign.homeTokens) >= HOME_RESERVE_MIN
     local allowRecalledUpgrade = campaign.state == 'recalled'
+        and observation.macro
+        and observation.macro.campaignReady == true
         and health ~= nil
         and health >= FIELD_CAMPAIGN_RESUME_HEALTH
         and reserveSafe
@@ -3731,11 +4211,15 @@ local function UpdateFieldCampaign(controller, observation)
     end
     ApplyCampaignFlags(controller, campaign, observation.units)
     UpdatePressureProgress(controller, observation, campaign)
+    local liveField = TableGetn(campaign.fieldTokens or {})
+    local readinessReady = observation.macro
+        and observation.macro.campaignReady == true
     if immediateContact
         and TableGetn(campaign.homeTokens) < HOME_RESERVE_MIN
         and TableGetn(campaign.fieldTokens) > 0
     then
         ClearDesiredCampaignObjective(campaign)
+        campaign.pendingRollbackReason = nil
         local emergencyField, emergencyHome = EmergencyCampaignCohorts(
             campaign,
             observation.units
@@ -3746,10 +4230,62 @@ local function UpdateFieldCampaign(controller, observation)
         CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
         return
     end
+    if campaign.state ~= 'recalled'
+        and health and health < FIELD_CAMPAIGN_RECALL_HEALTH
+        and TableGetn(campaign.fieldTokens) > 0
+    then
+        ClearDesiredCampaignObjective(campaign)
+        campaign.pendingRollbackReason = nil
+        campaign.pendingEmergencyReason = 'acu_health'
+        campaign.pendingRecallFieldTokens = nil
+        campaign.pendingRecallHomeTokens = nil
+        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
+        return
+    end
+    if not readinessReady
+        and (campaign.state == 'awaiting_order'
+            or campaign.state == 'early_awaiting_order')
+    then
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+        return
+    end
+    local rollbackReason = nil
+    if (campaign.state == 'active' or campaign.state == 'holding')
+        and attritionBaseline > 0
+        and campaign.attritionLost * 4 >= attritionBaseline
+    then
+        rollbackReason = 'field_attrition'
+    end
+    if campaign.state == 'rebuilding' then
+        if campaign.pendingMode == 'rollback' then return end
+        local canResume = readinessReady
+            and ((campaign.rollbackReason == 'field_attrition'
+                    and liveField >= attritionBaseline)
+                or (campaign.rollbackReason == 'repeated_no_progress'
+                    and CampaignClusterComplete(controller, campaign)))
+        if canResume and liveField > 0 then
+            CampaignSetPending(campaign, 'resume', campaign.fieldTokens)
+        end
+        return
+    end
+    if rollbackReason and campaign.pendingMode ~= 'recall' then
+        ClearDesiredCampaignObjective(campaign)
+        campaign.pendingRollbackReason = rollbackReason
+        if liveField > 0 then
+            CampaignSetPending(campaign, 'rollback', campaign.fieldTokens)
+        else
+            campaign.state = 'rebuilding'
+            campaign.rollbackReason = rollbackReason
+            campaign.pendingRollbackReason = nil
+        end
+        return
+    end
     if campaign.state == 'recalled' then
         if health
             and health >= FIELD_CAMPAIGN_RESUME_HEALTH
             and reserveSafe
+            and readinessReady
         then
             if campaign.healthySinceTick == nil then campaign.healthySinceTick = tick end
             if tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
@@ -3772,14 +4308,13 @@ local function UpdateFieldCampaign(controller, observation)
         end
         return
     end
-    if health and health < FIELD_CAMPAIGN_RECALL_HEALTH
-        and TableGetn(campaign.fieldTokens) > 0
+    if not readinessReady
+        and (campaign.pendingMode == 'transition'
+            or campaign.pendingMode == 'assault')
     then
         ClearDesiredCampaignObjective(campaign)
-        campaign.pendingEmergencyReason = 'acu_health'
-        campaign.pendingRecallFieldTokens = nil
-        campaign.pendingRecallHomeTokens = nil
-        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
         return
     end
     if campaign.pendingMode == 'transition'
@@ -3806,6 +4341,7 @@ local function UpdateFieldCampaign(controller, observation)
         or campaign.pendingMode == 'assault'
         or campaign.pendingMode == 'recover'
         or campaign.pendingMode == 'resume'
+        or campaign.pendingMode == 'rollback'
     then
         return
     end
@@ -3821,7 +4357,12 @@ local function UpdateFieldCampaign(controller, observation)
             >= FIELD_CAMPAIGN_STUCK_TICKS
         and TableGetn(campaign.fieldTokens) > 0
     then
-        CampaignSetPending(campaign, 'recover', campaign.fieldTokens)
+        if (tonumber(campaign.recoveryWindows) or 0) >= 1 then
+            campaign.pendingRollbackReason = 'repeated_no_progress'
+            CampaignSetPending(campaign, 'rollback', campaign.fieldTokens)
+        else
+            CampaignSetPending(campaign, 'recover', campaign.fieldTokens)
+        end
         return
     end
 
@@ -3832,7 +4373,10 @@ local function UpdateFieldCampaign(controller, observation)
             if tick - campaign.heldSinceTick >= FIELD_CAMPAIGN_HOLD_TICKS
                 and quorumArrived
                 and TableGetn(campaign.fieldTokens) > 0
+                and readinessReady
             then
+                campaign.lastSecuredAnchorKey = campaign.anchorKey
+                campaign.lastSecuredAnchorPosition = CopyPosition(campaign.anchorPosition)
                 local nextCluster = NextPressureCluster(controller, campaign)
                 if nextCluster then
                     StagePressureCluster(campaign, nextCluster)
@@ -3866,6 +4410,10 @@ end
 
 local function CampaignExpectedPosition(controller, campaign, mode)
     if mode == 'recall' then return CopyPosition(controller.basePosition) end
+    if mode == 'rollback' then
+        return CopyPosition(campaign.lastSecuredAnchorPosition
+            or controller.basePosition)
+    end
     return CopyPosition(campaign.desiredAnchorPosition or campaign.anchorPosition)
 end
 
@@ -3936,6 +4484,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         recover = true,
         recall = true,
         resume = true,
+        rollback = true,
     }
     local expectedKind = campaign
         and (campaign.desiredKind or campaign.kind)
@@ -4008,7 +4557,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         TableInsert(actors, actor)
     end
 
-    if intent.mode ~= 'recall' then
+    if intent.mode ~= 'recall' and intent.mode ~= 'rollback' then
         if expectedKind == 'strategic_assault' then
             local graph = BuildPressureGraph(controller)
             if not StrategicTargetValid(controller)
@@ -4030,7 +4579,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
     end
 
     local aggressivePosition = nil
-    if intent.mode ~= 'recall' then
+    if intent.mode ~= 'recall' and intent.mode ~= 'rollback' then
         local terrainOk = false
         terrainOk, aggressivePosition = pcall(TerrainPosition, expectedPosition)
         local height = terrainOk
@@ -4052,7 +4601,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         if not clearOk then return false end
     end
     local orderOk = false
-    if intent.mode == 'recall' then
+    if intent.mode == 'recall' or intent.mode == 'rollback' then
         orderOk = pcall(function() IssueMove(actors, expectedPosition) end)
     else
         orderOk = pcall(function()
@@ -4082,6 +4631,12 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.progressCohortSize = TableGetn(campaign.fieldTokens)
     elseif mode == 'reinforce' then
         campaign.reinforcementOrders = campaign.reinforcementOrders + 1
+        if TableGetn(campaign.fieldTokens) > (tonumber(campaign.attritionBaseline) or 0) then
+            campaign.attritionBaseline = TableGetn(campaign.fieldTokens)
+            campaign.attritionWindowTick = tick
+            campaign.attritionLost = 0
+            campaign.attritionWindow = 0
+        end
     elseif mode == 'transition' then
         local previousCluster = campaign.clusterKey
         campaign.kind = campaign.desiredKind
@@ -4136,6 +4691,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         })
     elseif mode == 'recover' then
         campaign.recoveryOrders = campaign.recoveryOrders + 1
+        campaign.recoveryWindows = (tonumber(campaign.recoveryWindows) or 0) + 1
         campaign.fullFieldOrders = campaign.fullFieldOrders + 1
         campaign.lastRecoveryAttemptTick = tick
     elseif mode == 'recall' then
@@ -4171,6 +4727,17 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.bestDistance = 1000000000000
         campaign.bestAtAnchor = 0
         campaign.progressCohortSize = -1
+        campaign.recoveryWindows = 0
+        campaign.attritionBaseline = TableGetn(campaign.fieldTokens)
+        campaign.attritionWindowTick = tick
+        campaign.attritionLost = 0
+        campaign.attritionWindow = 0
+    elseif mode == 'rollback' then
+        campaign.state = 'rebuilding'
+        campaign.rollbackReason = campaign.pendingRollbackReason or 'unknown'
+        campaign.pendingRollbackReason = nil
+        campaign.rollbackOrders = (tonumber(campaign.rollbackOrders) or 0) + 1
+        campaign.lastRollbackTick = tick
     else
         return false
     end
@@ -4243,6 +4810,12 @@ Controller.Create = function(brain)
         fieldCampaignEnabled = true,
         fieldCampaign = nil,
         fieldCampaignSerial = 0,
+        airAssignments = {},
+        airScreenCount = 0,
+        factoryTarget = 2,
+        upgradeState = 'none',
+        lastPlacementProbeCount = 0,
+        lastPlacementCapacity = 0,
         mexHistory = {},
         ownedMexCount = 0,
         lostMexCount = 0,
@@ -4302,14 +4875,14 @@ Controller.Observe = function(controller)
         categories.MOBILE, controller.basePosition, DEFENSE_RADIUS, 'Enemy'
     ) or {}
     local economy = {
-        energyTrend = SafeCall(0, controller.brain.GetEconomyTrend, controller.brain, 'ENERGY'),
-        energyStoredRatio = SafeCall(0, controller.brain.GetEconomyStoredRatio, controller.brain, 'ENERGY'),
-        energyIncome = SafeCall(0, controller.brain.GetEconomyIncome, controller.brain, 'ENERGY'),
-        energyUsage = SafeCall(0, controller.brain.GetEconomyUsage, controller.brain, 'ENERGY'),
-        massTrend = SafeCall(0, controller.brain.GetEconomyTrend, controller.brain, 'MASS'),
-        massStoredRatio = SafeCall(0, controller.brain.GetEconomyStoredRatio, controller.brain, 'MASS'),
-        massIncome = SafeCall(0, controller.brain.GetEconomyIncome, controller.brain, 'MASS'),
-        massUsage = SafeCall(0, controller.brain.GetEconomyUsage, controller.brain, 'MASS'),
+        energyTrend = SafeCall(nil, controller.brain.GetEconomyTrend, controller.brain, 'ENERGY'),
+        energyStoredRatio = SafeCall(nil, controller.brain.GetEconomyStoredRatio, controller.brain, 'ENERGY'),
+        energyIncome = SafeCall(nil, controller.brain.GetEconomyIncome, controller.brain, 'ENERGY'),
+        energyUsage = SafeCall(nil, controller.brain.GetEconomyUsage, controller.brain, 'ENERGY'),
+        massTrend = SafeCall(nil, controller.brain.GetEconomyTrend, controller.brain, 'MASS'),
+        massStoredRatio = SafeCall(nil, controller.brain.GetEconomyStoredRatio, controller.brain, 'MASS'),
+        massIncome = SafeCall(nil, controller.brain.GetEconomyIncome, controller.brain, 'MASS'),
+        massUsage = SafeCall(nil, controller.brain.GetEconomyUsage, controller.brain, 'MASS'),
     }
     economy.massRequested = SafeCall(economy.massUsage,
         controller.brain.GetEconomyRequested, controller.brain, 'MASS')
@@ -4348,7 +4921,7 @@ Controller.Observe = function(controller)
         pending = PendingArray(controller),
         state = StateSnapshot(controller),
     }
-    observation.macro = MacroSnapshot(controller, units)
+    observation.macro = MacroSnapshot(controller, units, economy)
     return observation
 end
 
@@ -4408,12 +4981,36 @@ end
 Controller.Reconcile = function(controller, observation)
     local records = RecordByToken(observation.units)
     local tick = CurrentTick(controller)
+    for token, _ in pairs(controller.airAssignments or {}) do
+        local record = records[token]
+        if not record or record.role ~= 'interceptor' or record.complete ~= true then
+            controller.airAssignments[token] = nil
+        end
+    end
+    controller.airScreenCount = CountArray(controller.airAssignments)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
         local record = records[token]
         local elapsed = tick - operation.issuedTick
         if OperationCompleted(controller, operation, observation, record) then
             ReleaseOperation(controller, token, nil)
+        elseif operation.kind == 'factory_upgrade' and not record then
+            local target = operation.upgradeTargetToken
+                and records[operation.upgradeTargetToken]
+                or nil
+            if not target or target.role ~= operation.upgradeRole then
+                ReleaseOperation(controller, token, 'actor_missing')
+            elseif tick >= (tonumber(operation.deadlineTick)
+                    or (operation.issuedTick + OPERATION_TIMEOUT_TICKS))
+            then
+                ReleaseOperation(controller, token, 'timeout')
+            elseif tonumber(target.fractionComplete)
+                and tonumber(target.fractionComplete)
+                    > (tonumber(operation.lastFraction) or 0) + 0.001
+            then
+                operation.lastFraction = tonumber(target.fractionComplete)
+                operation.lastProgressTick = tick
+            end
         elseif not record then
             ReleaseOperation(controller, token, 'actor_missing')
         elseif operation.phase == 'cancelling' then
@@ -4438,7 +5035,12 @@ Controller.Reconcile = function(controller, observation)
             ReleaseOperation(controller, token, 'target_missing')
         else
             OperationProgress(controller, operation, observation, record)
-            if StructureOperation(operation)
+            if operation.kind == 'factory_upgrade'
+                and record.idle == true
+                and elapsed > REJECT_TICKS
+            then
+                ReleaseOperation(controller, token, 'rejected')
+            elseif StructureOperation(operation)
                 and operation.accepted == true
                 and record.idle == true
                 and (tonumber(operation.lastFraction) or 0) <= 0
@@ -4585,7 +5187,7 @@ Controller.Reconcile = function(controller, observation)
 
     observation.pending = PendingArray(controller)
     observation.state = StateSnapshot(controller)
-    observation.macro = MacroSnapshot(controller, observation.units)
+    observation.macro = MacroSnapshot(controller, observation.units, observation.economy)
 end
 
 Controller.Execute = function(controller, intents, observation)
@@ -4606,6 +5208,14 @@ Controller.Execute = function(controller, intents, observation)
             and controller.fieldCampaignEnabled == true
         then
             ExecuteFieldCampaign(controller, intent, records, usedActors)
+        elseif intent.kind == 'air_screen' then
+            ESCALATION.ExecuteAirScreen(
+                controller,
+                intent,
+                records,
+                usedActors,
+                observation
+            )
         elseif intent.kind == 'frontier_screen'
             and controller.fieldCampaignEnabled ~= true
         then
@@ -4660,6 +5270,8 @@ Controller.Execute = function(controller, intents, observation)
                     issued = ExecuteAssistStructure(controller, intent, record, records)
                 elseif intent.kind == 'factory_build' then
                     issued = ExecuteFactoryProduction(controller, intent, record)
+                elseif intent.kind == 'factory_upgrade' then
+                    issued = ESCALATION.ExecuteUpgrade(controller, intent, record)
                 elseif intent.kind == 'rally' then
                     issued = ExecuteRally(controller, intent, record)
                 elseif intent.kind == 'reclaim' then
@@ -4717,7 +5329,9 @@ Controller.Step = function(controller)
                 acu = unit
             elseif COMBAT_ROLES[unit.role] and unit.complete == true then
                 combatTotal = combatTotal + 1
-                if unit.role == 'anti_air' then completedAa = completedAa + 1 end
+                if ESCALATION.antiAirRoles[unit.role] then
+                    completedAa = completedAa + 1
+                end
                 if unit.availableForWave == true then
                     combatAvailable = combatAvailable + 1
                 end
@@ -4738,19 +5352,31 @@ Controller.Step = function(controller)
                 end
             elseif COMBAT_ROLES[unit.role] then
                 buildingCombat = buildingCombat + 1
-                if unit.role == 'anti_air' then buildingAa = buildingAa + 1 end
+                if ESCALATION.antiAirRoles[unit.role] then
+                    buildingAa = buildingAa + 1
+                end
             end
         end
         for _, unit in ipairs(observation.units) do
             if unit.complete == true then
                 if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
-                if unit.role == 'land_factory' then completedFactories = completedFactories + 1 end
+                if unit.role == 'land_factory'
+                    or unit.role == 'land_factory_t2'
+                    or unit.role == 'air_factory'
+                then
+                    completedFactories = completedFactories + 1
+                end
                 if unit.role == 'engineer' then completedEngineers = completedEngineers + 1 end
                 if unit.role == 'power_generator' then completedPgen = completedPgen + 1 end
                 if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
             else
                 if unit.role == 'mass_extractor' then buildingMex = buildingMex + 1 end
-                if unit.role == 'land_factory' then buildingFactories = buildingFactories + 1 end
+                if unit.role == 'land_factory'
+                    or unit.role == 'land_factory_t2'
+                    or unit.role == 'air_factory'
+                then
+                    buildingFactories = buildingFactories + 1
+                end
                 if unit.role == 'engineer' then buildingEngineers = buildingEngineers + 1 end
                 if unit.role == 'power_generator' then buildingPgen = buildingPgen + 1 end
                 if unit.role == 'hydrocarbon' then buildingHydro = buildingHydro + 1 end
@@ -4863,6 +5489,26 @@ Controller.Step = function(controller)
             campaign_emergency = macro.campaignEmergency == true,
             engineer_demand = tonumber(macro.engineerDemand) or 0,
             factory_demand = tonumber(macro.factoryDemand) or 0,
+            economy_stage = tostring(macro.economyStage or 'opening'),
+            factory_target = tonumber(macro.factoryTarget) or 0,
+            land_t1_completed = tonumber(macro.completedLandT1Factories) or 0,
+            land_t1_building = tonumber(macro.buildingLandT1Factories) or 0,
+            air_t1_completed = tonumber(macro.completedAirT1Factories) or 0,
+            air_t1_building = tonumber(macro.buildingAirT1Factories) or 0,
+            land_t2_completed = tonumber(macro.completedLandT2Factories) or 0,
+            land_t2_building = tonumber(macro.buildingLandT2Factories) or 0,
+            placement_capacity = tonumber(macro.placementCapacity) or 0,
+            placement_probes = tonumber(macro.placementProbeCount) or 0,
+            upgrade_state = tostring(macro.upgradeState or 'none'),
+            air_screen = tonumber(macro.airScreenCount) or 0,
+            reclaim_candidate_value = tonumber(macro.reclaimValue) or -1,
+            campaign_ready = macro.campaignReady == true,
+            campaign_readiness_blockers = tostring(
+                macro.campaignReadinessBlocker or 'none'
+            ),
+            rollback_reason = tostring(macro.rollbackReason or 'none'),
+            field_attrition_lost = tonumber(macro.fieldAttritionLost) or 0,
+            field_attrition_window = tonumber(macro.fieldAttritionWindow) or 0,
             reclaim_target = tostring(macro.reclaimTarget or 'none'),
             reclaim_value = tonumber(macro.reclaimValue) or -1,
             oldest_job_actor = oldestActor,

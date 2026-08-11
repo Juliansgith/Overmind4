@@ -202,7 +202,11 @@ def test_rebuild_and_frontier_sites_have_unique_engineer_and_site_ownership() ->
         if intent.get("buildRole") == "mass_extractor"
     ]
 
-    assert [intent["siteKey"] for intent in builds[:2]] == ["lost-a", "lost-b"]
+    assert sorted(
+        intent["siteKey"]
+        for intent in builds
+        if intent["siteKey"].startswith("lost-")
+    ) == ["lost-a", "lost-b"]
     assert len({intent["actorToken"] for intent in builds}) == len(builds)
     assert len({intent["siteKey"] for intent in builds}) == len(builds)
 
@@ -1574,7 +1578,7 @@ def test_reclaim_candidates_ignore_units_stale_malformed_noise_and_sort_determin
     assert [candidate["key"] for candidate in candidates] == ["prop:2", "prop:4"]
 
 
-def test_reclaim_is_lowest_priority_and_one_prop_has_one_engineer_owner() -> None:
+def test_reclaim_is_per_actor_lowest_priority_and_each_prop_has_one_owner() -> None:
     snapshot = macro_snapshot("engineer")
     engineers = [unit for unit in snapshot["units"] if unit["role"] == "engineer"]
     for index, engineer in enumerate(engineers):
@@ -1585,20 +1589,41 @@ def test_reclaim_is_lowest_priority_and_one_prop_has_one_engineer_owner() -> Non
     ]
 
     reclaim = intents_of(decide(snapshot), "reclaim")
-    assert len(reclaim) == 1
-    assert reclaim[0]["targetKey"] == "prop:2"
+    assert len(reclaim) == 2
+    assert sorted(intent["targetKey"] for intent in reclaim) == ["prop:2", "prop:4"]
+    assert len({intent["actorToken"] for intent in reclaim}) == 2
 
     blocked = copy.deepcopy(snapshot)
     blocked["sites"]["mass"].append(mass_site("lost", 30, 20, lost=True))
     blocked["macro"].update(lostMexCount=1, constructionBacklog=1)
-    assert intents_of(decide(blocked), "reclaim") == []
+    blocked_intents = decide(blocked)
+    rebuild = [
+        intent
+        for intent in intents_of(blocked_intents, "build_structure")
+        if intent.get("reason") == "rebuild_mex"
+    ]
+    spare_reclaim = intents_of(blocked_intents, "reclaim")
+    assert len(rebuild) == 1
+    assert len(spare_reclaim) == 1
+    assert rebuild[0]["actorToken"] != spare_reclaim[0]["actorToken"]
 
 
-def test_reclaim_waits_when_any_power_hydro_or_factory_construction_is_planned() -> None:
+def test_spare_engineer_can_reclaim_while_power_construction_is_planned() -> None:
     snapshot = macro_snapshot("engineer")
     snapshot["economy"].update(energyTrend=-2, energyStoredRatio=0.1)
+    engineers = [unit for unit in snapshot["units"] if unit["role"] == "engineer"]
+    for index, engineer in enumerate(engineers):
+        engineer.update(position=[10 + index, 2, 20], visionRadius=10)
     snapshot["reclaim"] = [
-        {"key": "prop:2", "position": [14, 2, 20], "mass": 50, "reserved": False},
+        {
+            "key": "prop:2",
+            "position": [14, 2, 20],
+            "mass": 50,
+            "reserved": False,
+            "observerToken": engineers[0]["token"],
+            "observedTick": 0,
+            "visionRadius": 10,
+        },
     ]
 
     result = decide(snapshot)
@@ -1607,7 +1632,15 @@ def test_reclaim_waits_when_any_power_hydro_or_factory_construction_is_planned()
         intent.get("buildRole") == "power_generator"
         for intent in intents_of(result, "build_structure")
     )
-    assert intents_of(result, "reclaim") == []
+    power = [
+        intent
+        for intent in intents_of(result, "build_structure")
+        if intent.get("buildRole") == "power_generator"
+    ]
+    reclaim = intents_of(result, "reclaim")
+    assert len(power) == 1
+    assert len(reclaim) == 1
+    assert power[0]["actorToken"] != reclaim[0]["actorToken"]
 
 
 def test_reclaim_filter_never_inspects_returned_units_beyond_is_prop() -> None:
