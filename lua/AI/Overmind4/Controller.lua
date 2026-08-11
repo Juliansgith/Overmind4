@@ -9413,6 +9413,7 @@ ESCALATION.AvailableDirectorActor = function(controller, observation, role, buil
     for _, unit in ipairs(observation.units or {}) do
         if unit.role == role and unit.complete == true and unit.idle == true
             and not controller.pending[unit.token] and not reserved[unit.token]
+            and not ESCALATION.TransportTokenClaimed(controller, unit.token)
             and (not buildRole or (unit.canBuild and unit.canBuild[buildRole] == true))
         then
             return unit

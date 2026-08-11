@@ -2561,7 +2561,10 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
     assert len(harness.calls.transportLoad) == 0
 
 
-def test_unloading_airlift_keeps_cargo_engineer_out_of_policy_work() -> None:
+@pytest.mark.parametrize("work_source", ["policy", "director"])
+def test_unloading_airlift_keeps_cargo_engineer_out_of_other_work(
+    work_source: str,
+) -> None:
     harness = make_harness()
     drop = [300, 2, 300]
     cargo = harness.unit(
@@ -2592,11 +2595,37 @@ def test_unloading_airlift_keeps_cargo_engineer_out_of_policy_work() -> None:
             "retryCount": 0,
         },
     )
-    harness.lua.execute(
-        "Policy.Decide = function() return {{"
-        "kind = 'build_structure', actorToken = '32:1', buildRole = 'radar', "
-        "position = { 20, 2, 20 }, reason = 'policy_probe' }} end"
-    )
+    if work_source == "policy":
+        harness.lua.execute(
+            "Policy.Decide = function() return {{"
+            "kind = 'build_structure', actorToken = '32:1', buildRole = 'radar', "
+            "position = { 20, 2, 20 }, reason = 'policy_probe' }} end"
+        )
+    else:
+        harness.lua.execute("Policy.Decide = function() return {} end")
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": 1,
+                "lanes": {"mex_rebuild": {"admitted": True}},
+                "regions": [],
+                "intents": [],
+            },
+        )
+        _set_director_result(
+            harness,
+            "radarIntents",
+            [
+                {
+                    "kind": "build_structure",
+                    "buildRole": "radar",
+                    "regionKey": "front",
+                    "position": [20, 2, 20],
+                }
+            ],
+        )
 
     harness.lua.globals().Controller.Step(harness.controller)
 
