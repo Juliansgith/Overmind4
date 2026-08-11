@@ -173,6 +173,95 @@ local function SameArray(left, right)
     return true
 end
 
+local function ArrayIsSorted(values)
+    for index = 2, TableGetn(values or {}) do
+        if tostring(values[index - 1]) > tostring(values[index]) then
+            return false
+        end
+    end
+    return true
+end
+
+local function DenseTokenArray(values)
+    if type(values) ~= 'table' then return false end
+    local length = TableGetn(values)
+    if CountArray(values) ~= length then return false end
+    for index = 1, length do
+        if type(values[index]) ~= 'string' then return false end
+    end
+    return true
+end
+
+local function BuildTokenSet(values)
+    if not DenseTokenArray(values) then return nil end
+    local index = {}
+    for _, token in ipairs(values or {}) do
+        if type(token) ~= 'string' or index[token] == true then return nil end
+        index[token] = true
+    end
+    return index
+end
+
+local function TokenSetMatches(values, index)
+    if type(index) ~= 'table'
+        or CountArray(index) ~= TableGetn(values or {})
+    then
+        return false
+    end
+    for _, token in ipairs(values or {}) do
+        if index[token] ~= true then return false end
+    end
+    return true
+end
+
+local function CampaignFieldContains(campaign, token)
+    return campaign ~= nil
+        and type(campaign.fieldTokenSet) == 'table'
+        and campaign.fieldTokenSet[token] == true
+end
+
+local function CampaignHomeContains(campaign, token)
+    return campaign ~= nil
+        and type(campaign.homeTokenSet) == 'table'
+        and campaign.homeTokenSet[token] == true
+end
+
+local function CohortTokenSets(field, home)
+    if type(field) ~= 'table' or type(home) ~= 'table' then return nil, nil end
+    local fieldSet = BuildTokenSet(field)
+    local homeSet = BuildTokenSet(home)
+    if not fieldSet or not homeSet then return nil, nil end
+    for token, _ in pairs(fieldSet) do
+        if homeSet[token] == true then return nil, nil end
+    end
+    return fieldSet, homeSet
+end
+
+local function CommitCampaignCohorts(campaign, field, home)
+    if not campaign then return false end
+    local fieldSet, homeSet = CohortTokenSets(field, home)
+    if not fieldSet then return false end
+
+    if not ArrayIsSorted(field) then table.sort(field) end
+    if not ArrayIsSorted(home) then table.sort(home) end
+    local fieldChanged = not DenseTokenArray(campaign.fieldTokens)
+        or not SameArray(campaign.fieldTokens, field)
+    local homeChanged = not DenseTokenArray(campaign.homeTokens)
+        or not SameArray(campaign.homeTokens, home)
+    local fieldIndexChanged = not TokenSetMatches(field, campaign.fieldTokenSet)
+    local homeIndexChanged = not TokenSetMatches(home, campaign.homeTokenSet)
+
+    local nextField = fieldChanged and field or campaign.fieldTokens
+    local nextHome = homeChanged and home or campaign.homeTokens
+    local nextFieldSet = fieldIndexChanged and fieldSet or campaign.fieldTokenSet
+    local nextHomeSet = homeIndexChanged and homeSet or campaign.homeTokenSet
+    campaign.fieldTokens = nextField
+    campaign.homeTokens = nextHome
+    campaign.fieldTokenSet = nextFieldSet
+    campaign.homeTokenSet = nextHomeSet
+    return true
+end
+
 local function IsCampaignPosition(position)
     local copy = CopyPosition(position)
     if not copy then return false end
@@ -456,12 +545,8 @@ local function NormalizeOwnUnit(controller, unit)
     local assignment = controller.waveAssignments[token]
     local frontierAssignment = controller.frontierAssignments[token]
     local campaign = controller.fieldCampaign
-    local fieldCohort = campaign
-        and ArrayContains(campaign.fieldTokens, token)
-        or false
-    local homeCohort = campaign
-        and ArrayContains(campaign.homeTokens, token)
-        or false
+    local fieldCohort = CampaignFieldContains(campaign, token)
+    local homeCohort = CampaignHomeContains(campaign, token)
     local campaignEngineer = campaign
         and (campaign.engineerToken == token
             or campaign.desiredEngineerToken == token)
@@ -550,10 +635,25 @@ local function NormalizeEnemyContact(controller, enemies, ownRecords)
             break
         end
     end
+    local immediatePosition = nil
+    local immediateDistance = 1000000000000
+    for _, position in ipairs(positions) do
+        local distance = DistanceSquared(position, acuPosition)
+        if distance <= IMMEDIATE_DANGER_DISTANCE * IMMEDIATE_DANGER_DISTANCE
+            and (distance < immediateDistance
+                or (distance == immediateDistance
+                    and (not immediatePosition
+                        or position[1] < immediatePosition[1]
+                        or (position[1] == immediatePosition[1]
+                            and position[3] < immediatePosition[3]))))
+        then
+            immediatePosition = position
+            immediateDistance = distance
+        end
+    end
     return {
-        position = positions[1],
-        immediate = DistanceSquared(positions[1], acuPosition)
-            <= IMMEDIATE_DANGER_DISTANCE * IMMEDIATE_DANGER_DISTANCE,
+        position = immediatePosition or positions[1],
+        immediate = immediatePosition ~= nil,
     }
 end
 
@@ -1266,15 +1366,21 @@ local function MacroSnapshot(controller, units)
     local campaignState = campaign and campaign.state or 'idle'
     local campaignCluster = campaign and campaign.clusterKey or 'none'
     local campaignObjective = campaign and campaign.objectiveKey or 'none'
-    local fieldTokens = campaign and CopyArray(campaign.fieldTokens) or {}
-    local homeTokens = campaign and CopyArray(campaign.homeTokens) or {}
+    local fieldTokens = campaign
+        and type(campaign.fieldTokens) == 'table'
+        and CopyArray(campaign.fieldTokens)
+        or {}
+    local homeTokens = campaign
+        and type(campaign.homeTokens) == 'table'
+        and CopyArray(campaign.homeTokens)
+        or {}
     local fieldAa = 0
     local homeAa = 0
     local fieldAtAnchor = 0
     local objectivePosition = campaign and campaign.objectivePosition or nil
     for _, unit in ipairs(units or {}) do
         if unit.complete == true and COMBAT_ROLES[unit.role] then
-            if ArrayContains(fieldTokens, unit.token) then
+            if CampaignFieldContains(campaign, unit.token) then
                 if unit.role == 'anti_air' then fieldAa = fieldAa + 1 end
                 if objectivePosition
                     and Distance(unit.position, objectivePosition)
@@ -1282,7 +1388,7 @@ local function MacroSnapshot(controller, units)
                 then
                     fieldAtAnchor = fieldAtAnchor + 1
                 end
-            elseif ArrayContains(homeTokens, unit.token)
+            elseif CampaignHomeContains(campaign, unit.token)
                 and unit.role == 'anti_air'
             then
                 homeAa = homeAa + 1
@@ -2625,8 +2731,10 @@ local function ExecuteCombatGroup(controller, intent, recordByToken, usedActors)
     local tokens = {}
     for _, record in ipairs(records) do
         local actor = controller.unitRefs[record.token]
-        local fieldOwned = controller.fieldCampaign
-            and ArrayContains(controller.fieldCampaign.fieldTokens, record.token)
+        local fieldOwned = CampaignFieldContains(
+            controller.fieldCampaign,
+            record.token
+        )
         if actor
             and not fieldOwned
             and not controller.frontierAssignments[record.token]
@@ -2736,7 +2844,9 @@ local function CampaignCombatRecords(units)
             TableInsert(records, record)
         end
     end
-    table.sort(records, function(a, b) return a.token < b.token end)
+    -- Controller.Observe has already sorted every record by stable token.
+    -- Filtering that array preserves the deterministic order without a
+    -- second O(n log n) campaign sort every reconciliation.
     return records
 end
 
@@ -2763,11 +2873,9 @@ local function CampaignTargetCounts(records)
     return total, antiAir, field, fieldAntiAir, full
 end
 
-local function InitialCampaignCohorts(records)
-    local _, _, fieldTarget, fieldAaTarget, full = CampaignTargetCounts(records)
+local function SelectCampaignField(records, fieldTarget, fieldAaTarget)
     local selected = {}
     local field = {}
-    local home = {}
     for _, record in ipairs(records) do
         if record.role == 'anti_air'
             and TableGetn(field) < fieldTarget
@@ -2792,10 +2900,21 @@ local function InitialCampaignCohorts(records)
             TableInsert(field, record.token)
         end
     end
+    table.sort(field)
+    return field, selected
+end
+
+local function InitialCampaignCohorts(records)
+    local _, _, fieldTarget, fieldAaTarget, full = CampaignTargetCounts(records)
+    local field, selected = SelectCampaignField(
+        records,
+        fieldTarget,
+        fieldAaTarget
+    )
+    local home = {}
     for _, record in ipairs(records) do
         if not selected[record.token] then TableInsert(home, record.token) end
     end
-    table.sort(field)
     table.sort(home)
     return field, home, full
 end
@@ -2840,6 +2959,29 @@ local function ExpandCampaignField(records, existingField, fieldTarget, fieldAaT
     for _, record in ipairs(records) do
         if not selected[record.token] then TableInsert(home, record.token) end
     end
+    return field, home
+end
+
+local function EmergencyCampaignCohorts(campaign, units)
+    local records = CampaignCombatRecords(units)
+    local _, _, fieldTarget, fieldAaTarget = CampaignTargetCounts(records)
+    local currentField = {}
+    for _, record in ipairs(records) do
+        if CampaignFieldContains(campaign, record.token) then
+            TableInsert(currentField, record)
+        end
+    end
+    fieldTarget = math.min(fieldTarget, TableGetn(currentField))
+    local field, selected = SelectCampaignField(
+        currentField,
+        fieldTarget,
+        fieldAaTarget
+    )
+    local home = {}
+    for _, record in ipairs(records) do
+        if not selected[record.token] then TableInsert(home, record.token) end
+    end
+    table.sort(home)
     return field, home
 end
 
@@ -2961,6 +3103,8 @@ local function StartFieldCampaign(controller, observation, operation)
         memberKeys = CampaignMemberKeys(controller, clusterKey, operation.siteKey),
         fieldTokens = field,
         homeTokens = home,
+        fieldTokenSet = BuildTokenSet(field),
+        homeTokenSet = BuildTokenSet(home),
         orderedTokens = {},
         fullCohorts = full,
         startedTick = tick,
@@ -2970,6 +3114,7 @@ local function StartFieldCampaign(controller, observation, operation)
         heldSinceTick = nil,
         healthySinceTick = nil,
         emergency = false,
+        emergencyReason = nil,
         fullFieldOrders = 0,
         reinforcementOrders = 0,
         recoveryOrders = 0,
@@ -2985,16 +3130,68 @@ local function StartFieldCampaign(controller, observation, operation)
     })
 end
 
+local function CampaignCohortsStable(
+    campaign,
+    records,
+    fieldTarget,
+    full,
+    allowRecalledUpgrade
+)
+    local field = campaign.fieldTokens
+    local home = campaign.homeTokens
+    if not DenseTokenArray(field)
+        or not DenseTokenArray(home)
+        or not ArrayIsSorted(field)
+        or not ArrayIsSorted(home)
+        or not TokenSetMatches(field, campaign.fieldTokenSet)
+        or not TokenSetMatches(home, campaign.homeTokenSet)
+        or TableGetn(field) + TableGetn(home) ~= TableGetn(records)
+    then
+        return false
+    end
+    if full
+        and campaign.fullCohorts ~= true
+        and (campaign.state ~= 'recalled' or allowRecalledUpgrade == true)
+    then
+        return false
+    end
+    if campaign.state == 'recalled'
+        and allowRecalledUpgrade == true
+        and TableGetn(field) < fieldTarget
+    then
+        return false
+    end
+    for token, _ in pairs(campaign.fieldTokenSet) do
+        if campaign.homeTokenSet[token] == true then return false end
+    end
+    for _, record in ipairs(records) do
+        local fieldMember = campaign.fieldTokenSet[record.token] == true
+        local homeMember = campaign.homeTokenSet[record.token] == true
+        if fieldMember == homeMember then return false end
+    end
+    return true
+end
+
 local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
     local records = CampaignCombatRecords(units)
     local previousState = campaign.state
     local previousPendingMode = campaign.pendingMode
+    local _, _, fieldTarget, fieldAaTarget, full = CampaignTargetCounts(records)
+    if CampaignCohortsStable(
+        campaign,
+        records,
+        fieldTarget,
+        full,
+        allowRecalledUpgrade
+    ) then
+        return
+    end
     local byToken = RecordByToken(records)
     local field = {}
     local home = {}
     local assigned = {}
     for _, token in ipairs(campaign.fieldTokens or {}) do
-        if byToken[token] then
+        if byToken[token] and not assigned[token] then
             assigned[token] = true
             TableInsert(field, token)
         else
@@ -3007,7 +3204,6 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
             TableInsert(home, token)
         end
     end
-    local _, _, fieldTarget, fieldAaTarget, full = CampaignTargetCounts(records)
     if full
         and campaign.fullCohorts ~= true
         and (campaign.state ~= 'recalled' or allowRecalledUpgrade == true)
@@ -3112,10 +3308,9 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
             fieldAaTarget
         )
     end
-    table.sort(field)
-    table.sort(home)
-    campaign.fieldTokens = field
-    campaign.homeTokens = home
+    if not CommitCampaignCohorts(campaign, field, home) then return end
+    field = campaign.fieldTokens
+    home = campaign.homeTokens
     if campaign.pendingMode == 'activate'
         or campaign.pendingMode == 'retarget'
         or campaign.pendingMode == 'transition'
@@ -3133,20 +3328,30 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
     end
 end
 
-local function ApplyCampaignFlags(campaign, units)
+local function ApplyCampaignFlags(controller, campaign, units)
     for _, record in ipairs(units or {}) do
-        local field = campaign and ArrayContains(campaign.fieldTokens, record.token) or false
-        local home = campaign and ArrayContains(campaign.homeTokens, record.token) or false
+        local field = CampaignFieldContains(campaign, record.token)
+        local home = CampaignHomeContains(campaign, record.token)
+        local waveAssignment = controller.waveAssignments[record.token]
+        local frontierAssignment = controller.frontierAssignments[record.token]
+        local assigned = field == true
+            or waveAssignment ~= nil
+            or frontierAssignment ~= nil
         record.fieldCohort = field == true
         record.homeCohort = home == true
+        record.assignedToWave = assigned
+        record.commanderEscort = waveAssignment
+            and waveAssignment.commanderEscort == true
+            or false
+        record.frontierEscort = frontierAssignment ~= nil
+        record.availableForWave = COMBAT_ROLES[record.role] == true
+            and record.complete == true
+            and not assigned
+            and record.nearStaging == true
         record.campaignEngineer = campaign
             and (record.token == campaign.engineerToken
                 or record.token == campaign.desiredEngineerToken)
             or false
-        if field then
-            record.assignedToWave = true
-            record.availableForWave = false
-        end
     end
 end
 
@@ -3328,7 +3533,7 @@ end
 
 local function UpdateFieldCampaign(controller, observation)
     if controller.fieldCampaignEnabled ~= true then
-        ApplyCampaignFlags(nil, observation.units)
+        ApplyCampaignFlags(controller, nil, observation.units)
         return
     end
     local campaign = controller.fieldCampaign
@@ -3336,23 +3541,40 @@ local function UpdateFieldCampaign(controller, observation)
         local candidate = CampaignCandidate(controller, observation)
         if candidate then StartFieldCampaign(controller, observation, candidate) end
         campaign = controller.fieldCampaign
-        ApplyCampaignFlags(campaign, observation.units)
+        ApplyCampaignFlags(controller, campaign, observation.units)
         return
     end
 
     local tick = CurrentTick(controller)
     local health = CampaignAcuHealth(observation)
+    local immediateContact = observation.enemyContact ~= nil
+        and observation.enemyContact.immediate == true
+    CampaignPruneAndFill(campaign, observation.units, false)
+    if campaign.pendingMode == 'recall' then
+        if campaign.pendingEmergencyReason == 'home_reserve' then
+            local emergencyField, emergencyHome = EmergencyCampaignCohorts(
+                campaign,
+                observation.units
+            )
+            campaign.pendingRecallFieldTokens = emergencyField
+            campaign.pendingRecallHomeTokens = emergencyHome
+        end
+        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
+        ApplyCampaignFlags(controller, campaign, observation.units)
+        return
+    end
+    local reserveSafe = observation.enemyContact == nil
+        and TableGetn(campaign.homeTokens) >= HOME_RESERVE_MIN
     local allowRecalledUpgrade = campaign.state == 'recalled'
         and health ~= nil
         and health >= FIELD_CAMPAIGN_RESUME_HEALTH
+        and reserveSafe
         and campaign.healthySinceTick ~= nil
         and tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
-    CampaignPruneAndFill(
-        campaign,
-        observation.units,
-        allowRecalledUpgrade
-    )
-    ApplyCampaignFlags(campaign, observation.units)
+    if allowRecalledUpgrade then
+        CampaignPruneAndFill(campaign, observation.units, true)
+    end
+    ApplyCampaignFlags(controller, campaign, observation.units)
     if campaign.state == 'recalled' then
         if campaign.pendingMode == 'resume' then
             campaign.pendingMode = nil
@@ -3413,7 +3635,10 @@ local function UpdateFieldCampaign(controller, observation)
                 break
             end
         end
-        if health and health >= FIELD_CAMPAIGN_RESUME_HEALTH then
+        if health
+            and health >= FIELD_CAMPAIGN_RESUME_HEALTH
+            and reserveSafe
+        then
             if campaign.healthySinceTick == nil then campaign.healthySinceTick = tick end
             if tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
                 and TableGetn(campaign.fieldTokens) > 0
@@ -3430,9 +3655,26 @@ local function UpdateFieldCampaign(controller, observation)
         end
         return
     end
+    if immediateContact
+        and TableGetn(campaign.homeTokens) < HOME_RESERVE_MIN
+        and TableGetn(campaign.fieldTokens) > 0
+    then
+        local emergencyField, emergencyHome = EmergencyCampaignCohorts(
+            campaign,
+            observation.units
+        )
+        campaign.pendingEmergencyReason = 'home_reserve'
+        campaign.pendingRecallFieldTokens = emergencyField
+        campaign.pendingRecallHomeTokens = emergencyHome
+        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
+        return
+    end
     if health and health < FIELD_CAMPAIGN_RECALL_HEALTH
         and TableGetn(campaign.fieldTokens) > 0
     then
+        campaign.pendingEmergencyReason = 'acu_health'
+        campaign.pendingRecallFieldTokens = nil
+        campaign.pendingRecallHomeTokens = nil
         CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
         return
     end
@@ -3550,6 +3792,63 @@ local function CampaignExpectedPosition(controller, campaign, mode)
     return CopyPosition(campaign.desiredObjectivePosition or campaign.objectivePosition)
 end
 
+local function EmergencyRecallStagesLive(controller, campaign, recordByToken)
+    if campaign.pendingEmergencyReason ~= 'home_reserve' then return true end
+    local stagedField = campaign.pendingRecallFieldTokens
+    local stagedHome = campaign.pendingRecallHomeTokens
+    local stagedFieldSet, stagedHomeSet = CohortTokenSets(
+        stagedField,
+        stagedHome
+    )
+    local currentFieldSet, currentHomeSet = CohortTokenSets(
+        campaign.fieldTokens,
+        campaign.homeTokens
+    )
+    if not stagedFieldSet or not currentFieldSet
+        or TableGetn(stagedField) + TableGetn(stagedHome)
+            ~= TableGetn(campaign.fieldTokens) + TableGetn(campaign.homeTokens)
+    then
+        return false
+    end
+    for token, _ in pairs(currentFieldSet) do
+        if stagedFieldSet[token] ~= true and stagedHomeSet[token] ~= true then
+            return false
+        end
+    end
+    for token, _ in pairs(currentHomeSet) do
+        if stagedHomeSet[token] ~= true then return false end
+    end
+    for token, _ in pairs(stagedFieldSet) do
+        if currentFieldSet[token] ~= true then return false end
+    end
+    for token, _ in pairs(stagedHomeSet) do
+        if currentFieldSet[token] ~= true and currentHomeSet[token] ~= true then
+            return false
+        end
+    end
+    for _, token in ipairs(stagedField) do
+        local record = recordByToken[token]
+        if not record
+            or not COMBAT_ROLES[record.role]
+            or record.complete ~= true
+            or not LiveOwnedActor(controller, token, record, record.role)
+        then
+            return false
+        end
+    end
+    for _, token in ipairs(stagedHome) do
+        local record = recordByToken[token]
+        if not record
+            or not COMBAT_ROLES[record.role]
+            or record.complete ~= true
+            or not LiveOwnedActor(controller, token, record, record.role)
+        then
+            return false
+        end
+    end
+    return true
+end
+
 local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActors)
     local campaign = controller.fieldCampaign
     if controller.fieldCampaignEnabled ~= true
@@ -3585,6 +3884,12 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
     if not expectedPosition
         or not IsCampaignPosition(intent.position)
         or DistanceSquared(expectedPosition, intent.position) > 0.01
+        or (intent.mode == 'recall'
+            and not EmergencyRecallStagesLive(
+                controller,
+                campaign,
+                recordByToken
+            ))
     then
         return false
     end
@@ -3593,7 +3898,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
     for _, token in ipairs(tokens) do
         local record = recordByToken[token]
         if usedActors[token]
-            or not ArrayContains(campaign.fieldTokens, token)
+            or not CampaignFieldContains(campaign, token)
             or controller.pending[token]
             or controller.waveAssignments[token]
             or not record
@@ -3718,10 +4023,26 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.fullFieldOrders = campaign.fullFieldOrders + 1
         campaign.lastRecoveryAttemptTick = tick
     elseif mode == 'recall' then
+        local emergencyReason = campaign.pendingEmergencyReason or 'acu_health'
+        if emergencyReason == 'home_reserve' then
+            if not CommitCampaignCohorts(
+                campaign,
+                campaign.pendingRecallFieldTokens,
+                campaign.pendingRecallHomeTokens
+            ) then
+                return false
+            end
+            campaign.fullCohorts = false
+            campaign.orderedTokens = {}
+        end
         campaign.state = 'recalled'
         campaign.emergency = true
+        campaign.emergencyReason = emergencyReason
         campaign.healthySinceTick = nil
         campaign.modeSwitches = campaign.modeSwitches + 1
+        campaign.pendingEmergencyReason = nil
+        campaign.pendingRecallFieldTokens = nil
+        campaign.pendingRecallHomeTokens = nil
     elseif mode == 'resume' then
         if campaign.desiredObjectiveKey then
             if campaign.desiredReplacesCampaign == true
@@ -3741,6 +4062,7 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         end
         campaign.state = 'active'
         campaign.emergency = false
+        campaign.emergencyReason = nil
         campaign.healthySinceTick = nil
         campaign.modeSwitches = campaign.modeSwitches + 1
         campaign.fullFieldOrders = campaign.fullFieldOrders + 1
