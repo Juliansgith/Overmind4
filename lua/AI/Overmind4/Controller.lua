@@ -3306,7 +3306,11 @@ local function ExecuteStructure(controller, intent, record)
         if not blockKey and CopyPosition(intent.position) then
             blockKey = PlacementKey(intent.position)
         end
-        BlockSite(controller, blockKey, 'preflight')
+        -- A transport can briefly occupy its own freshly delivered mex site.
+        -- Keep that exact delivery reserved and retry after the aircraft leaves.
+        if intent.reason ~= 'airlift_mex' then
+            BlockSite(controller, blockKey, 'preflight')
+        end
         return false
     end
 
@@ -10348,6 +10352,14 @@ ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
     local site = nil
     local completedTransportSites = {}
     local ownedSites = {}
+    for deliveryKey, _ in pairs(controller.transportDeliveries or {}) do
+        completedTransportSites[deliveryKey] = true
+    end
+    for _, mission in pairs(controller.transportMissions or {}) do
+        if type(mission.siteKey) == 'string' then
+            completedTransportSites[mission.siteKey] = true
+        end
+    end
     for _, candidate in ipairs((observation.sites or {}).mass or {}) do
         if candidate.complete == true then ownedSites[candidate.key] = true end
     end
@@ -11310,6 +11322,9 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     if not transport or not position or not unloadPosition or not safe then return false end
     local ok = pcall(function() IssueTransportUnload({ transport }, unloadPosition) end)
     if not ok then return false end
+    if mission.requireLiveDropValidation == true then
+        pcall(function() IssueMove({ transport }, CopyPosition(controller.basePosition)) end)
+    end
     local cargoToken = (mission.cargoTokens or {})[1]
     local cargoRecord = cargoToken and records[cargoToken] or nil
     local cargoActor = nil

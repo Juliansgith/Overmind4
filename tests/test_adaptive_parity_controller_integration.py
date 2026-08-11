@@ -2643,6 +2643,12 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
         + (unload_position[2] - 300) ** 2
     ) ** 0.5
     assert 8 <= unload_distance <= 12
+    transport_moves = [
+        call
+        for call in harness.calls.move.values()
+        if call.units[1].options.entityId == 31
+    ]
+    assert len(transport_moves) == 1
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()
@@ -2656,6 +2662,64 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
     )
     mission = plain(harness.controller.transportMissions["airlift:front"])
     assert mission["siteKey"] == ("alternate" if retarget else "front")
+
+
+def test_airlift_delivery_retries_after_transport_clears_the_mex_footprint() -> None:
+    harness = make_harness()
+    drop = [300, 2, 300]
+    cargo = harness.unit(
+        entityId=32,
+        blueprintId="uel0105",
+        position=[290, 2, 300],
+        attached=False,
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([cargo])
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                "key": "front",
+                "name": "Front",
+                "kind": "mass",
+                "position": drop,
+                "distance": 200,
+                "localSite": False,
+                "reachable": True,
+                "engineerReachable": True,
+            }
+        ],
+    )
+    harness.controller.transportDeliveries["front"] = lua_value(
+        harness.lua,
+        {
+            "actorToken": "32:1",
+            "missionId": "airlift:front",
+            "siteKey": "front",
+            "position": drop,
+            "completedTick": 100,
+        },
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    harness.lua.execute("brain.canBuildAt = function() return false end")
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 0
+    assert harness.controller.transportDeliveries["front"] is not None
+    assert harness.controller.blockedSites["front"] is None
+
+    harness.brain.tick = harness.brain.tick + 9
+    harness.lua.execute("brain.canBuildAt = function() return true end")
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    mex_orders = [
+        call
+        for call in harness.calls.buildMobile.values()
+        if call.blueprintId == "ueb1103"
+    ]
+    assert len(mex_orders) == 1
+    assert mex_orders[0].units[1].options.entityId == 32
 
 
 def test_airlift_skips_the_nearest_physically_unbuildable_mex() -> None:
