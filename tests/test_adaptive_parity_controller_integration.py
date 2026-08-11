@@ -2590,7 +2590,7 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
 
 
 @pytest.mark.parametrize("retarget", [False, True])
-def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
+def test_airlift_unload_reserves_the_exact_drop_mex_without_building_before_detach(
     retarget: bool,
 ) -> None:
     harness = make_harness()
@@ -2682,17 +2682,13 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
         for call in harness.calls.buildMobile.values()
         if call.blueprintId == "ueb1103"
     ]
-    assert len(mex_orders) == 1
-    assert mex_orders[0].units[1].options.entityId == 32
-    assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
-        expected_x,
-        300,
-    )
+    assert mex_orders == []
     mission = plain(harness.controller.transportMissions["airlift:front"])
     assert mission["siteKey"] == ("alternate" if retarget else "front")
+    assert mission["deliveryBuildQueued"] is False
 
 
-def test_airlift_delivery_builds_the_prevalidated_mex_despite_its_own_footprint() -> None:
+def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> None:
     harness = make_harness()
     drop = [300, 2, 300]
     cargo = harness.unit(
@@ -2741,6 +2737,17 @@ def test_airlift_delivery_builds_the_prevalidated_mex_despite_its_own_footprint(
     )
     cargo.options.position = lua_value(harness.lua, plain(cargo_move.position))
     harness.brain.tick = harness.brain.tick + 9
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert not [
+        call
+        for call in harness.calls.buildMobile.values()
+        if call.blueprintId == "ueb1103"
+    ]
+    assert harness.controller.transportDeliveries["front"] is not None
+
+    harness.lua.execute("brain.canBuildAt = function() return true end")
+    harness.brain.tick = harness.brain.tick + 1
     harness.lua.globals().Controller.Step(harness.controller)
 
     mex_orders = [

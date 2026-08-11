@@ -3294,9 +3294,8 @@ local function ExecuteStructure(controller, intent, record)
     for index, candidate in ipairs(candidates) do
         if index > 8 then break end
         local probe = TerrainPosition(candidate)
-        if probe and (intent.reason == 'airlift_mex'
-                or SafeCall(false, controller.brain.CanBuildStructureAt,
-                    controller.brain, blueprintId, probe) == true)
+        if probe and SafeCall(false, controller.brain.CanBuildStructureAt,
+                controller.brain, blueprintId, probe) == true
         then
             position = probe
             break
@@ -11458,11 +11457,11 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     local buildable = cargoActor and mexBlueprint and buildPosition
         and SafeCall(false, controller.brain.CanBuildStructureAt,
             controller.brain, mexBlueprint, buildPosition) == true
-    local buildQueued = cargoActor and mexBlueprint and buildPosition
-        and buildable
-        and pcall(function()
-            IssueBuildMobile({ cargoActor }, buildPosition, mexBlueprint, {})
-        end)
+    -- Do not queue construction while the engineer is still attached. In FAF,
+    -- that order can start a zero-progress foundation which the post-unload
+    -- clearance move abandons, making the mex footprint unbuildable. The
+    -- delivery state issues the build from a detached, observed engineer.
+    local buildQueued = false
     Emit(controller, 'airlift_build_queue', {
         actor = cargoToken or 'none',
         actor_live = cargoActor ~= nil,
@@ -11472,14 +11471,6 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
         queued = buildQueued == true,
         site = mission.siteKey or 'none',
     })
-    if buildQueued then
-        Emit(controller, 'order', {
-            actor = cargoToken,
-            command = 'build_structure',
-            role = 'mass_extractor',
-            site = mission.siteKey,
-        })
-    end
     mission = ESCALATION.directors.intelligence.AdvanceTransport(
         ESCALATION.DeepCopy(mission),
         { kind = 'unload_ordered', tick = CurrentTick(controller) }
