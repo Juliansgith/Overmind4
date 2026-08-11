@@ -637,7 +637,7 @@ def test_engineer_demand_scales_with_real_backlog_beyond_old_fixed_cap() -> None
     assert next(intent for intent in production if intent["buildRole"] == "engineer")["reason"] == "construction_capacity"
 
 
-def test_mass_stall_funds_one_engineer_when_it_unlocks_profitable_mex_work() -> None:
+def test_mass_stall_reserves_one_funded_combat_queue_before_another_unlock_engineer() -> None:
     snapshot = macro_snapshot("engineer", "engineer")
     snapshot["macro"].update(
         allocatorEnabled=True,
@@ -668,8 +668,8 @@ def test_mass_stall_funds_one_engineer_when_it_unlocks_profitable_mex_work() -> 
 
     production = intents_of(decide(snapshot), "factory_build")
 
-    assert [intent["buildRole"] for intent in production] == ["engineer"]
-    assert production[0]["reason"] == "unlock_profitable_expansion"
+    assert [intent["buildRole"] for intent in production] == ["tank"]
+    assert production[0]["reason"] == "continuous_land_production"
 
 
 def test_multiple_idle_factories_admit_only_one_engineer_increment_per_decision() -> None:

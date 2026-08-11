@@ -425,7 +425,7 @@ def test_structure_order_revalidates_exact_live_actor_after_observe(mutation: st
     assert plain(harness.controller.reservations) == {}
 
 
-def test_frontier_backlog_counts_site_once_across_pending_foundation_and_completion() -> None:
+def test_frontier_backlog_counts_site_once_without_raw_backlog_engineer_ratchet() -> None:
     harness = make_harness()
     install_markers(harness, [marker("frontier", 40, 20)])
     engineer = harness.unit(
@@ -439,7 +439,7 @@ def test_frontier_backlog_counts_site_once_across_pending_foundation_and_complet
     site = initial_plain["sites"]["mass"][0]
     assert initial_plain["macro"]["constructionBacklog"] == 1
     outstanding_demand = initial_plain["macro"]["engineerDemand"]
-    assert outstanding_demand >= 3
+    assert outstanding_demand == 2
 
     execute_intents(
         harness,
@@ -460,7 +460,7 @@ def test_frontier_backlog_counts_site_once_across_pending_foundation_and_complet
     pending = plain(harness.observe())
     assert pending["macro"]["constructionBacklog"] == 1
     active_demand = pending["macro"]["engineerDemand"]
-    assert 3 <= active_demand <= outstanding_demand
+    assert active_demand == 2
 
     engineer.options.idleState = False
     engineer.options.states = lua_value(harness.lua, {"Building": True})

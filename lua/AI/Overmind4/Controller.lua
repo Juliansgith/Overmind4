@@ -99,6 +99,8 @@ local ESCALATION = {
     MIN_FACTORY_TARGET = 2,
     MASS_EXPANSION_RESERVE = 0.3,
     ENERGY_EXPANSION_RESERVE = 3,
+    LAND_COMBAT_MASS_RESERVE = 0.373333,
+    LAND_COMBAT_ENERGY_RESERVE = 1.773333,
     requestLanes = {
         air_factory = 'air',
         hydrocarbon = 'energy',
@@ -1749,10 +1751,8 @@ local function MacroSnapshot(controller, units, economy)
             expansionOpportunities = expansionOpportunities + 1
         end
     end
-    local reclaimOpportunityCount = TableGetn(controller.reclaimCandidates or {})
-    local engineerTarget = math.max(2, math.min(12,
-        2 + math.ceil(math.sqrt(expansionOpportunities
-            + constructionBacklog + reclaimOpportunityCount))))
+    local engineerTarget = 2
+    local unlockingEngineerNeeded = false
     local completedEngineers = CountRole(units, 'engineer')
     local records = RecordByToken(units)
     local committed = {
@@ -1769,11 +1769,15 @@ local function MacroSnapshot(controller, units, economy)
     local reservedFutureMassDrain = 0
     local reservedFutureEnergyDrain = 0
     local currentCommitments = {}
+    local fundedBuilderWork = {}
     local expansionScheduled = 0
     for _, token in ipairs(SortedKeys(controller.pending or {})) do
         local operation = controller.pending[token]
         local budget = ESCALATION.OperationBudget(controller, operation, records)
         local commitmentKey = ESCALATION.CommitmentKey(controller, operation)
+        if budget and commitmentKey and StructureOperation(operation) then
+            fundedBuilderWork[commitmentKey] = true
+        end
         if commitmentKey then
             local commitment = currentCommitments[commitmentKey]
             if not commitment then
@@ -1916,6 +1920,18 @@ local function MacroSnapshot(controller, units, economy)
         expansionAvailableMass - requiredMassReserve)
     local availableEnergy = math.max(0,
         expansionAvailableEnergy - requiredEnergyReserve)
+    local postCombatExpansionFunded = expansionOpportunities > expansionScheduled
+        and expansionAvailableMass + 0.000001
+            >= ESCALATION.LAND_COMBAT_MASS_RESERVE
+                + ESCALATION.MASS_EXPANSION_RESERVE
+        and expansionAvailableEnergy + 0.000001
+            >= ESCALATION.LAND_COMBAT_ENERGY_RESERVE
+                + ESCALATION.ENERGY_EXPANSION_RESERVE
+    engineerTarget = math.max(2, math.min(12,
+        CountArray(fundedBuilderWork)
+            + (postCombatExpansionFunded and 1 or 0)))
+    unlockingEngineerNeeded = postCombatExpansionFunded
+        and completedEngineers < engineerTarget
     local supportedFactories = ESCALATION.MIN_FACTORY_TARGET
     if allocatorValid then
         supportedFactories = math.max(ESCALATION.MIN_FACTORY_TARGET,
@@ -1941,9 +1957,11 @@ local function MacroSnapshot(controller, units, economy)
     if allocatorValid then
         for _, unit in ipairs(units or {}) do
             local requestMass = unit.role == 'air_factory' and 0.2
-                or (unit.role == 'land_factory_t2' and 0.9 or 0.5)
+                or (unit.role == 'land_factory_t2' and 0.9
+                    or ESCALATION.LAND_COMBAT_MASS_RESERVE)
             local requestEnergy = unit.role == 'air_factory' and 9
-                or (unit.role == 'land_factory_t2' and 4.5 or 2.5)
+                or (unit.role == 'land_factory_t2' and 4.5
+                    or ESCALATION.LAND_COMBAT_ENERGY_RESERVE)
             if (unit.role == 'land_factory'
                     or unit.role == 'land_factory_t2'
                     or unit.role == 'air_factory')
@@ -2197,8 +2215,7 @@ local function MacroSnapshot(controller, units, economy)
         expansionOpportunityCount = expansionOpportunities,
         expansionScheduledCount = expansionScheduled,
         engineerTarget = engineerTarget,
-        unlockingEngineerNeeded = expansionOpportunities > 0
-            and completedEngineers < engineerTarget,
+        unlockingEngineerNeeded = unlockingEngineerNeeded,
         engineerDemand = engineerTarget,
         factoryDemand = factoryDemand,
         factoryTarget = controller.factoryTarget,

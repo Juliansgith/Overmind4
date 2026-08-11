@@ -529,6 +529,8 @@ def test_positive_payback_mex_preempts_unfunded_combat_queue() -> None:
     snapshot["macro"].update(
         availableRecurringMass=0.35,
         availableRecurringEnergy=3.1,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
         expansionOpportunityCount=1,
         factoryFundedCount=1,
     )
@@ -668,10 +670,10 @@ def test_40km_corner_opportunity_remains_backlog_but_exceeds_funded_roi_horizon(
 
 def test_zero_bank_stall_denies_remote_mex_but_bank_funds_exactly_one_recovery_lane() -> None:
     snapshot = _policy_allocator_snapshot("engineer", "engineer")
-    snapshot["sites"]["mass"] = [
+    snapshot["sites"]["mass"].extend([
         mass_site("near", 30, 20, frontier=True),
         mass_site("remote", 1000, 20, frontier=True),
-    ]
+    ])
     snapshot["macro"].update(
         expansionOpportunityCount=2,
         availableRecurringMass=0,
@@ -921,10 +923,10 @@ def test_hundred_markers_do_not_create_fifty_engineer_requests() -> None:
     _set_economy(harness, mass_income=1.9, mass_requested=1.0)
     observation = _sample(harness, 4)
     assert observation.macro.expansionOpportunityCount == 100
-    assert 6 <= observation.macro.engineerTarget <= 12
+    assert observation.macro.engineerTarget == 2
 
 
-def test_stalled_economy_funds_one_engineer_that_unlocks_profitable_mex_and_yields_combat() -> None:
+def test_stalled_backlog_does_not_displace_a_funded_combat_queue_after_engineer_floor() -> None:
     snapshot = _policy_allocator_snapshot("engineer", "land_factory")
     snapshot["sites"]["mass"].append(mass_site("remote", 300, 20, frontier=True))
     snapshot["economy"].update(
@@ -947,7 +949,7 @@ def test_stalled_economy_funds_one_engineer_that_unlocks_profitable_mex_and_yiel
     result = decide(snapshot)
     factory = intents_of(result, "factory_build")
     assert [(intent["buildRole"], intent["reason"]) for intent in factory] == [
-        ("engineer", "unlock_profitable_expansion")
+        ("tank", "continuous_land_production")
     ]
 
 
@@ -1060,6 +1062,8 @@ def test_energy_recovery_is_budgeted_before_factory_queue_and_tech() -> None:
         recurringEnergyIncome=10,
         rollingEnergyRequested=12,
         availableRecurringEnergy=3,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
         techAdmission="admitted",
         factoryFundedCount=2,
     )
@@ -1317,7 +1321,7 @@ def test_partial_roster_rebuilding_new_actor_lifecycle_never_mutates_field(
     assert campaign.fullCohorts is False
 
 
-def test_artifact_tick8569_state_idles_excess_factories_and_expands_engineer_target() -> None:
+def test_artifact_tick8569_state_idles_excess_factories_without_marker_driven_engineers() -> None:
     harness = make_harness()
     harness.controller.fieldCampaignEnabled = False
     units = [
@@ -1350,7 +1354,7 @@ def test_artifact_tick8569_state_idles_excess_factories_and_expands_engineer_tar
     assert observation.macro.factoryFundedCount == 0
     assert observation.macro.factoryIdleCount == 11
     assert observation.macro.expansionOpportunityCount == 12
-    assert observation.macro.engineerTarget > 5
+    assert observation.macro.engineerTarget == 2
     assert observation.macro.techAdmission != "admitted"
 
 
