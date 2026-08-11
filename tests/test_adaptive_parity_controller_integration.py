@@ -2676,7 +2676,7 @@ def test_airlift_unload_reserves_the_exact_drop_mex_without_building_before_deta
         for call in harness.calls.move.values()
         if call.units[1].options.entityId == 31
     ]
-    assert len(transport_moves) == 1
+    assert transport_moves == []
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()

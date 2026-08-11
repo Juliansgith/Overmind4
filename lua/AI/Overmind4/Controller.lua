@@ -11439,9 +11439,6 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     if not transport or not position or not unloadPosition or not safe then return false end
     local ok = pcall(function() IssueTransportUnload({ transport }, unloadPosition) end)
     if not ok then return false end
-    if mission.requireLiveDropValidation == true then
-        pcall(function() IssueMove({ transport }, CopyPosition(controller.basePosition)) end)
-    end
     local cargoToken = (mission.cargoTokens or {})[1]
     local cargoRecord = cargoToken and records[cargoToken] or nil
     local cargoActor = nil
