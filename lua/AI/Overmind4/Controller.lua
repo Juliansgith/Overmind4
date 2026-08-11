@@ -11290,8 +11290,25 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
             end
         end
     end
-    if not transport or not position or not safe then return false end
-    local ok = pcall(function() IssueTransportUnload({ transport }, position) end)
+    local unloadPosition = CopyPosition(position)
+    if mission.requireLiveDropValidation == true and unloadPosition then
+        local dx = controller.basePosition[1] - unloadPosition[1]
+        local dz = controller.basePosition[3] - unloadPosition[3]
+        local length = math.sqrt(dx * dx + dz * dz)
+        if length > 0.01 then
+            unloadPosition = TerrainPosition({
+                unloadPosition[1] + dx * 10 / length,
+                0,
+                unloadPosition[3] + dz * 10 / length,
+            })
+        else
+            unloadPosition = TerrainPosition({
+                unloadPosition[1] + 10, 0, unloadPosition[3],
+            })
+        end
+    end
+    if not transport or not position or not unloadPosition or not safe then return false end
+    local ok = pcall(function() IssueTransportUnload({ transport }, unloadPosition) end)
     if not ok then return false end
     local cargoToken = (mission.cargoTokens or {})[1]
     local cargoRecord = cargoToken and records[cargoToken] or nil

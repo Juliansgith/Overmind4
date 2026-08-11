@@ -2636,6 +2636,13 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.transportUnload) == 1
+    unload_position = plain(harness.calls.transportUnload[1].position)
+    expected_x = 320 if retarget else 300
+    unload_distance = (
+        (unload_position[0] - expected_x) ** 2
+        + (unload_position[2] - 300) ** 2
+    ) ** 0.5
+    assert 8 <= unload_distance <= 12
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()
@@ -2643,7 +2650,6 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
     ]
     assert len(mex_orders) == 1
     assert mex_orders[0].units[1].options.entityId == 32
-    expected_x = 320 if retarget else 300
     assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
         expected_x,
         300,
