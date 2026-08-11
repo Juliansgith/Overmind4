@@ -689,11 +689,18 @@ def test_one_home_engineer_patrols_completed_local_mexes_for_reclaim(
         assert actor["role"] == "engineer"
 
 
-def test_home_reclaim_patrol_issues_one_persistent_public_mex_loop() -> None:
+@pytest.mark.parametrize(
+    ("blueprint_id", "expected_role"),
+    [("uel0105", "engineer"), ("uel0001", "acu")],
+)
+def test_home_reclaim_patrol_issues_one_persistent_public_mex_loop(
+    blueprint_id: str,
+    expected_role: str,
+) -> None:
     harness = make_harness()
     engineer = harness.unit(
         entityId=70,
-        blueprintId="uel0105",
+        blueprintId=blueprint_id,
         position=[10, 2, 20],
     )
     positions = [[12 + index * 4, 2, 20] for index in range(4)]
@@ -736,10 +743,44 @@ def test_home_reclaim_patrol_issues_one_persistent_public_mex_loop() -> None:
 
     assert len(harness.calls.clear) == 1
     assert len(harness.calls.patrol) == 4
+    actor_record = next(
+        record for record in plain(observation.units) if record["token"] == "70:1"
+    )
+    assert actor_record["role"] == expected_role
     assert [plain(call.position) for call in harness.calls.patrol.values()] == [
         [position[0], position[0] + position[2] / 100, position[2]]
         for position in positions
     ]
+
+
+@pytest.mark.parametrize("under_contact", [False, True])
+def test_idle_post_opening_acu_falls_back_to_home_reclaim_patrol(
+    under_contact: bool,
+) -> None:
+    snapshot = _policy_allocator_snapshot("engineer", "engineer", "engineer")
+    for site in snapshot["sites"]["mass"]:
+        site["complete"] = True
+    for engineer in (unit for unit in snapshot["units"] if unit["role"] == "engineer"):
+        engineer["idle"] = False
+    pgen = next(unit for unit in snapshot["units"] if unit["role"] == "power_generator")
+    for token in ("90:1", "91:1"):
+        extra = copy.deepcopy(pgen)
+        extra["token"] = token
+        snapshot["units"].append(extra)
+    air_factory = copy.deepcopy(
+        next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
+    )
+    air_factory.update(token="92:1", role="air_factory")
+    snapshot["units"].append(air_factory)
+    if under_contact:
+        snapshot["enemyContact"] = {"position": [12, 2, 12], "immediate": True}
+
+    patrols = intents_of(decide(snapshot), "reclaim_patrol")
+
+    assert len(patrols) == (0 if under_contact else 1)
+    if not under_contact:
+        acu = next(unit for unit in snapshot["units"] if unit["role"] == "acu")
+        assert patrols[0]["actorToken"] == acu["token"]
 
 
 def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:

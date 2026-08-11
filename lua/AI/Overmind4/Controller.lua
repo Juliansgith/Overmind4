@@ -3580,7 +3580,7 @@ ESCALATION.ExecuteReclaimPatrol = function(
     end
     local record = records[token]
     if not record
-        or record.role ~= 'engineer'
+        or (record.role ~= 'engineer' and record.role ~= 'acu')
         or record.complete ~= true
         or record.idle ~= true
     then
@@ -3608,7 +3608,7 @@ ESCALATION.ExecuteReclaimPatrol = function(
         if not position then return false end
         TableInsert(positions, position)
     end
-    local actor = LiveOwnedActor(controller, token, record, 'engineer')
+    local actor = LiveOwnedActor(controller, token, record, record.role)
     if not actor or SafeCall(false, actor.IsIdleState, actor) ~= true then
         return false
     end
@@ -3624,7 +3624,7 @@ ESCALATION.ExecuteReclaimPatrol = function(
     Emit(controller, 'order', {
         actor = token,
         command = 'patrol',
-        role = 'engineer',
+        role = record.role,
         reason = 'home_reclaim_patrol',
         waypoints = count,
     })
@@ -8088,7 +8088,10 @@ Controller.Reconcile = function(controller, observation)
     controller.airScoutCount = CountArray(controller.airScoutAssignments)
     for token, _ in pairs(controller.reclaimPatrolAssignments or {}) do
         local record = records[token]
-        if not record or record.role ~= 'engineer' or record.complete ~= true then
+        if not record
+            or (record.role ~= 'engineer' and record.role ~= 'acu')
+            or record.complete ~= true
+        then
             controller.reclaimPatrolAssignments[token] = nil
         end
     end

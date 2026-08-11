@@ -817,9 +817,18 @@ end
 local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors, underContact, allowPlacement, intents)
     local engineers = {}
     local reclaimPatrolActive = false
+    local reclaimPatrolAcu = nil
     for _, unit in ipairs(units) do
-        if unit.role == 'engineer' and unit.reclaimPatrolAssigned == true then
+        if unit.reclaimPatrolAssigned == true then
             reclaimPatrolActive = true
+        end
+        if unit.role == 'acu'
+            and unit.complete == true
+            and unit.idle == true
+            and not pendingActors[unit.token]
+            and unit.reclaimPatrolAssigned ~= true
+        then
+            reclaimPatrolAcu = unit
         end
         if unit.role == 'engineer'
             and unit.complete == true
@@ -1266,7 +1275,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and not reclaimPatrolActive
         and activeReclaimJobs == 0
         and completedMex >= 4
-        and TableGetn(engineers) >= 4
+        and (TableGetn(engineers) >= 4 or reclaimPatrolAcu ~= nil)
     then
         local siteKeys = {}
         local waypoints = {}
@@ -1288,24 +1297,36 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         if TableGetn(siteKeys) >= 2 then
             local best = nil
             local bestDistance = nil
-            for _, engineer in ipairs(engineers) do
-                if not assignedEngineers[engineer.token]
-                    and engineer.campaignEngineer ~= true
-                    and IsUsablePosition(engineer.position)
-                then
-                    local distance = PositionDistanceSquared(
-                        engineer.position,
-                        snapshot.basePosition
-                    )
-                    if not best
-                        or distance < bestDistance
-                        or (distance == bestDistance
-                            and tostring(engineer.token) < tostring(best.token))
+            if TableGetn(engineers) >= 4 then
+                for _, engineer in ipairs(engineers) do
+                    if not assignedEngineers[engineer.token]
+                        and engineer.campaignEngineer ~= true
+                        and IsUsablePosition(engineer.position)
                     then
-                        best = engineer
-                        bestDistance = distance
+                        local distance = PositionDistanceSquared(
+                            engineer.position,
+                            snapshot.basePosition
+                        )
+                        if not best
+                            or distance < bestDistance
+                            or (distance == bestDistance
+                                and tostring(engineer.token) < tostring(best.token))
+                        then
+                            best = engineer
+                            bestDistance = distance
+                        end
                     end
                 end
+            end
+            if not best and reclaimPatrolAcu then
+                local claimed = false
+                for _, existing in ipairs(intents) do
+                    if existing.actorToken == reclaimPatrolAcu.token then
+                        claimed = true
+                        break
+                    end
+                end
+                if not claimed then best = reclaimPatrolAcu end
             end
             if best then
                 assignedEngineers[best.token] = true
@@ -1313,6 +1334,16 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     siteKeys = siteKeys,
                     waypoints = waypoints,
                 }
+                if best.role == 'acu' then
+                    AddIntent(intents, {
+                        kind = 'reclaim_patrol',
+                        actorToken = best.token,
+                        siteKeys = siteKeys,
+                        waypoints = waypoints,
+                        priority = 49,
+                        reason = 'home_reclaim_patrol',
+                    })
+                end
             end
         end
     end
