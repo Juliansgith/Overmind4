@@ -1223,7 +1223,7 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
     opening_economy = [
         *[
             harness.unit(entityId=30 + index, blueprintId="ueb1101")
-            for index in range(2)
+            for index in range(4)
         ],
         *[
             harness.unit(entityId=40 + index, blueprintId="ueb1103")
@@ -1264,13 +1264,51 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
 
 def test_acu_finishes_local_power_and_mex_before_starting_first_air() -> None:
     harness = make_harness()
+    mass_positions = [[12 + index * 4, 2, 20] for index in range(4)]
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                "key": f"Mass:local:{index}",
+                "name": f"Local {index}",
+                "kind": "mass",
+                "position": position,
+                "distance": 2 + index * 4,
+                "localSite": True,
+                "reachable": True,
+                "engineerReachable": True,
+                "landReachable": True,
+            }
+            for index, position in enumerate(mass_positions)
+        ],
+    )
     acu = harness.unit(
         entityId=1,
         blueprintId="uel0001",
         canBuild={"ueb0102": True, "ueb1101": True, "ueb1103": True},
     )
     land_factory = harness.unit(entityId=20, blueprintId="ueb0101")
-    harness.brain.units = harness.lua.table_from([acu, land_factory])
+    opening_economy = [
+        *[
+            harness.unit(
+                entityId=30 + index,
+                blueprintId="ueb1101",
+                position=[4 + index * 4, 2, 34],
+            )
+            for index in range(2)
+        ],
+        *[
+            harness.unit(
+                entityId=40 + index,
+                blueprintId="ueb1103",
+                position=mass_positions[index],
+            )
+            for index in range(4)
+        ],
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [acu, land_factory, *opening_economy]
+    )
     _set_director_result(
         harness,
         "macroPlan",

@@ -782,6 +782,20 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
         return nil
     end
 
+    if CountClaimedLocalSites(massSites, virtualReserved) >= 4
+        and powerCount < 4 and CanBuild(acu, 'power_generator')
+    then
+        return BuildAtPlacement(
+            acu,
+            'power_generator',
+            ReservePlacement(
+                snapshot, 'power_generator', powerCount + 1, virtualPlacements
+            ),
+            12,
+            'opening_air_power'
+        )
+    end
+
     if (counts.land_factory or 0) < 2 and CanBuild(acu, 'land_factory') then
         return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 2, virtualPlacements), 13, 'opening_second_factory')
     end
