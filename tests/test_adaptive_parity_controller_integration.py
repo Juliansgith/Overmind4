@@ -1250,6 +1250,41 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
     assert order.units[1].options.entityId == 1
 
 
+def test_acu_completes_first_land_factory_before_starting_first_air() -> None:
+    harness = make_harness()
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        canBuild={"ueb0101": True, "ueb0102": True},
+    )
+    harness.brain.units = harness.lua.table_from([acu])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 1,
+            "airFactoryTarget": 1,
+            "lanes": {"factory_growth": {"admitted": True}},
+            "grants": [
+                {
+                    "requestId": "factory-1",
+                    "lane": "factory_growth",
+                    "source": "bank",
+                }
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb0101"
+
+
 def test_single_t2_lane_uses_completed_and_pending_deficits_to_build_tank_then_aa() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
