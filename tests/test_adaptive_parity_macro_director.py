@@ -177,6 +177,32 @@ class TestFundedPortfolio:
             "tech",
         }
 
+    def test_live_nine_mex_state_prioritizes_factory_growth_and_caps_engineers(self) -> None:
+        snapshot = portfolio_snapshot()
+        snapshot["economy"].update(
+            {
+                "massIncome": 0.1,
+                "massRequested": 0,
+                "energyIncome": 2,
+                "energyRequested": 0,
+                "massStored": 400,
+                "energyStored": 3000,
+            }
+        )
+        snapshot["counts"].update(
+            {"engineers": 16, "mexT1": 9, "mexT2": 0, "mexT3": 0}
+        )
+        snapshot["opportunities"].update(
+            {"fundableBuilderJobs": 56, "constructionBacklog": 56}
+        )
+
+        plan = build_portfolio(snapshot)
+
+        assert plan["engineerTarget"] == 7
+        grant_ids = [grant["requestId"] for grant in plan["grants"]]
+        assert "factory_growth-1" in grant_ids
+        assert "engineers-1" not in grant_ids
+
     @pytest.mark.parametrize(
         ("available_mass", "admitted"),
         [(0.279999, False), (0.28, True)],
