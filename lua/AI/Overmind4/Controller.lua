@@ -10059,7 +10059,7 @@ ESCALATION.AdaptTransportIntent = function(
             local record = records[delivery.actorToken]
             if not record or record.role ~= 'engineer' or record.complete ~= true then
                 controller.transportDeliveries[siteKey] = nil
-            elseif controller.pending[delivery.actorToken] then
+            elseif controller.pending[delivery.actorToken] or record.idle ~= true then
                 return
             else
                 ESCALATION.AppendDirectorIntent(intents, {
@@ -11204,10 +11204,33 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     if not transport or not position or not safe then return false end
     local ok = pcall(function() IssueTransportUnload({ transport }, position) end)
     if not ok then return false end
+    local cargoToken = (mission.cargoTokens or {})[1]
+    local cargoRecord = cargoToken and records[cargoToken] or nil
+    local cargoActor = cargoRecord
+        and LiveOwnedActor(controller, cargoToken, cargoRecord, 'engineer')
+        or nil
+    local mexBlueprint = Catalog.IdFor('mass_extractor')
+    local buildPosition = site and TerrainPosition(site.position) or nil
+    local buildQueued = cargoActor and mexBlueprint and buildPosition
+        and CanUnitBuild(cargoActor, mexBlueprint)
+        and SafeCall(false, controller.brain.CanBuildStructureAt,
+            controller.brain, mexBlueprint, buildPosition) == true
+        and pcall(function()
+            IssueBuildMobile({ cargoActor }, buildPosition, mexBlueprint, {})
+        end)
+    if buildQueued then
+        Emit(controller, 'order', {
+            actor = cargoToken,
+            command = 'build_structure',
+            role = 'mass_extractor',
+            site = mission.siteKey,
+        })
+    end
     mission = ESCALATION.directors.intelligence.AdvanceTransport(
         ESCALATION.DeepCopy(mission),
         { kind = 'unload_ordered', tick = CurrentTick(controller) }
     ) or mission
+    mission.deliveryBuildQueued = buildQueued == true
     controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
     usedActors[intent.transportToken] = true
     return true

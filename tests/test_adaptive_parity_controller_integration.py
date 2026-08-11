@@ -2561,6 +2561,71 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
     assert len(harness.calls.transportLoad) == 0
 
 
+def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
+    harness = make_harness()
+    drop = [300, 2, 300]
+    cargo = harness.unit(
+        entityId=32,
+        blueprintId="uel0105",
+        position=[10, 2, 22],
+        attached=True,
+        canBuild={"ueb1103": True},
+    )
+    transport = harness.unit(
+        entityId=31,
+        blueprintId="uea0107",
+        position=[10, 20, 22],
+        cargo=[cargo],
+    )
+    harness.brain.units = harness.lua.table_from([transport, cargo])
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                "key": "front",
+                "name": "Front",
+                "kind": "mass",
+                "position": drop,
+                "distance": 200,
+                "localSite": False,
+                "reachable": True,
+                "engineerReachable": True,
+            }
+        ],
+    )
+    harness.controller.transportMissions["airlift:front"] = lua_value(
+        harness.lua,
+        {
+            "missionId": "airlift:front",
+            "state": "loaded",
+            "transportToken": "31:1",
+            "cargoTokens": ["32:1"],
+            "siteKey": "front",
+            "dropPosition": drop,
+            "dropTolerance": 20,
+            "deadlineTick": 900,
+            "retryCount": 0,
+            "requireLiveDropValidation": True,
+        },
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.transportUnload) == 1
+    mex_orders = [
+        call
+        for call in harness.calls.buildMobile.values()
+        if call.blueprintId == "ueb1103"
+    ]
+    assert len(mex_orders) == 1
+    assert mex_orders[0].units[1].options.entityId == 32
+    assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
+        300,
+        300,
+    )
+
+
 @pytest.mark.parametrize("work_source", ["policy", "director"])
 def test_unloading_airlift_keeps_cargo_engineer_out_of_other_work(
     work_source: str,
