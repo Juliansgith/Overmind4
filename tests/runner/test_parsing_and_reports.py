@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,17 @@ from tools.overmind4_runner.parsing import (
     parse_log,
 )
 from tools.overmind4_runner.reporting import render_json, render_markdown
+
+
+STOCK_WARNING_CODE = "faf-stock-platoon-disband-nil"
+STOCK_PLATOON_DISBAND_WARNING = (
+    "warning: Error running lua script: "
+    "...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363): "
+    "attempt to call method `PlatoonDisband' (a nil value)\n"
+    "         stack traceback:\n"
+    "         \t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363): "
+    "in function <...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua:2210>\n"
+)
 
 
 def _result_line(result: str, *, army: int = 1, sim: int = 123) -> str:
@@ -136,6 +148,141 @@ def test_corroborated_win_outranks_late_engine_error_and_reports_it_as_warning()
     document = json.loads(render_json(outcome, run_id="run-1"))
     assert document["warnings"] == ["lua-error"]
     assert "- Warnings: lua-error" in render_markdown(outcome, run_id="run-1")
+
+
+def test_exact_stock_platoon_warning_before_result_allows_a_later_valid_win() -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + STOCK_PLATOON_DISBAND_WARNING
+        + _terminal_line("victory")
+        + _result_line("victory 10", sim=647)
+        + 'debug: GpgNetSend JsonStats {"stats":[]}\n'
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=34.7),
+    )
+
+    assert outcome.state == "win"
+    assert outcome.failure_reason is None
+    assert outcome.warnings == (STOCK_WARNING_CODE,)
+    assert len(outcome.warning_details) == 1
+    assert outcome.warning_details[0].code == STOCK_WARNING_CODE
+    assert outcome.warning_details[0].source == "FAF stock"
+    assert outcome.warning_details[0].archive == "gamedata/lua.nx2"
+    assert outcome.warning_details[0].path == "lua/platoon.lua"
+    assert outcome.warning_details[0].line == 2363
+    assert outcome.warning_details[0].method == "PlatoonDisband"
+    assert outcome.warning_details[0].occurrences == 1
+
+    document = json.loads(render_json(outcome, run_id="run-1"))
+    assert document["warnings"] == [STOCK_WARNING_CODE]
+    assert document["warning_details"] == [
+        {
+            "archive": "gamedata/lua.nx2",
+            "code": STOCK_WARNING_CODE,
+            "line": 2363,
+            "method": "PlatoonDisband",
+            "occurrences": 1,
+            "path": "lua/platoon.lua",
+            "source": "FAF stock",
+        }
+    ]
+
+
+def test_duplicate_exact_stock_warning_is_deduplicated_with_occurrence_count() -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + STOCK_PLATOON_DISBAND_WARNING
+        + STOCK_PLATOON_DISBAND_WARNING
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=0, wall_seconds=4),
+    )
+
+    assert outcome.warnings == (STOCK_WARNING_CODE,)
+    assert len(outcome.warning_details) == 1
+    assert outcome.warning_details[0].occurrences == 2
+
+
+def test_exact_live_artifact_excerpt_replays_as_one_structured_nonfatal_warning() -> None:
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "om4-20260811T014534Z-ca8eafb4-stock-warning.log"
+    ).read_text(encoding="utf-8")
+    telemetry = parse_log(
+        fixture,
+        "om4-20260811T014534Z-ca8eafb4",
+        our_slot=1,
+    )
+
+    assert telemetry.lifecycle.valid is True
+    assert telemetry.failure_reason is None
+    assert telemetry.engine_diagnostics == ()
+    assert len(telemetry.warning_details) == 1
+    assert telemetry.warning_details[0].code == STOCK_WARNING_CODE
+    assert telemetry.warning_details[0].occurrences == 2
+
+
+@pytest.mark.parametrize(
+    "near_miss",
+    [
+        STOCK_PLATOON_DISBAND_WARNING.replace("platoon.lua(2363)", "platoon.lua(2364)", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace("PlatoonDisband", "DisbandPlatoon", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace(
+            "\t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363)",
+            "\tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99)",
+        ),
+    ],
+    ids=("header-line", "method", "om4-stack"),
+)
+def test_pre_result_stock_warning_near_misses_remain_fatal_even_if_results_follow(
+    near_miss: str,
+) -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + near_miss
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.warnings == ()
+    assert outcome.warning_details == ()
+
+
+def test_exact_stock_warning_before_completed_startup_remains_a_load_error() -> None:
+    text = (
+        "OM4HARNESS|v=1|kind=start|run=run-1|map=SCMP_007\n"
+        + STOCK_PLATOON_DISBAND_WARNING
+        + "OM4|v=1|kind=lifecycle|army=1|event=created|plan=none\n"
+        + "OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+        + "OM4HARNESS|v=1|kind=speed|run=run-1|requested=25|sim=1\n"
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.warnings == ()
+    assert outcome.warning_details == ()
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,25 @@ from tools.overmind4_runner.process import Monitor, detect_fail_fast, terminate_
 from tools.overmind4_runner.runner import MapDiscoveryError, Runner, RunnerDependencies
 
 
+STOCK_PLATOON_DISBAND_WARNING = (
+    "warning: Error running lua script: "
+    "...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363): "
+    "attempt to call method `PlatoonDisband' (a nil value)\n"
+    "         stack traceback:\n"
+    "         \t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363): "
+    "in function <...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua:2210>\n"
+)
+
+
+def _completed_lifecycle(run_id: str = "run-1") -> str:
+    return (
+        f"info: OM4HARNESS|v=1|kind=start|run={run_id}|map=SCMP_006\n"
+        "info: OM4|v=1|kind=lifecycle|army=1|event=created|plan=\n"
+        "info: OM4|v=1|kind=lifecycle|army=1|event=begin_session\n"
+        f"info: OM4HARNESS|v=1|kind=speed|run={run_id}|requested=25|sim=1\n"
+    )
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.value = 100.0
@@ -114,6 +133,172 @@ def test_fail_fast_recognizes_live_faf_onframe_lua_error_format() -> None:
     )
 
     assert detect_fail_fast(line, run_id="run-1") == "lua-error"
+
+
+def test_fail_fast_allows_only_the_exact_pinned_stock_platoon_warning_after_startup() -> None:
+    text = (
+        _completed_lifecycle()
+        + STOCK_PLATOON_DISBAND_WARNING
+        + "info: simulation continued\n"
+    )
+
+    assert detect_fail_fast(text, run_id="run-1", our_slot=1) is None
+
+
+@pytest.mark.parametrize(
+    "near_miss",
+    [
+        STOCK_PLATOON_DISBAND_WARNING.replace(
+            "...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua",
+            "C:\\mods\\overmind4\\lua\\platoon.lua",
+            1,
+        ),
+        STOCK_PLATOON_DISBAND_WARNING.replace("platoon.lua(2363)", "platoon.lua(2364)", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace("PlatoonDisband", "DisbandPlatoon", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace(
+            "\t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363)",
+            "\tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99)",
+        ),
+        STOCK_PLATOON_DISBAND_WARNING.replace("platoon.lua:2210", "platoon.lua:2211"),
+    ],
+    ids=("om4-header-path", "header-line", "method", "om4-stack", "stack-line"),
+)
+def test_fail_fast_rejects_every_near_miss_of_the_stock_warning(near_miss: str) -> None:
+    text = _completed_lifecycle() + near_miss + "info: simulation continued\n"
+
+    assert detect_fail_fast(text, run_id="run-1", our_slot=1) == "lua-error"
+
+
+def test_fail_fast_rejects_an_incomplete_stock_warning_trace() -> None:
+    header_only = STOCK_PLATOON_DISBAND_WARNING.split("         stack traceback:", 1)[0]
+
+    assert (
+        detect_fail_fast(
+            _completed_lifecycle() + header_only,
+            run_id="run-1",
+            our_slot=1,
+        )
+        == "lua-error"
+    )
+
+
+def test_fail_fast_keeps_the_exact_stock_warning_fatal_before_startup_completion() -> None:
+    text = STOCK_PLATOON_DISBAND_WARNING + _completed_lifecycle()
+
+    assert detect_fail_fast(text, run_id="run-1", our_slot=1) == "lua-error"
+
+
+def test_fail_fast_deduplicates_repeated_exact_stock_warning_blocks() -> None:
+    text = (
+        _completed_lifecycle()
+        + STOCK_PLATOON_DISBAND_WARNING
+        + STOCK_PLATOON_DISBAND_WARNING
+        + "info: simulation continued\n"
+    )
+
+    assert detect_fail_fast(text, run_id="run-1", our_slot=1) is None
+
+
+def test_monitor_defers_a_split_exact_stock_trace_and_allows_the_process_to_continue(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None, None, None, None, 0], pid=7070)
+    terminated: list[int] = []
+    warning_lines = STOCK_PLATOON_DISBAND_WARNING.splitlines(keepends=True)
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [
+                _completed_lifecycle(),
+                warning_lines[0],
+                "".join(warning_lines[1:]),
+                "info: simulation continued\n",
+            ]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+        our_slot=1,
+    )
+
+    assert observation.exit_code == 0
+    assert observation.fail_fast_reason is None
+    assert terminated == []
+
+
+def test_monitor_preserves_a_stock_warning_when_a_crlf_pair_is_split_between_reads(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None, None, None, 0], pid=7072)
+    terminated: list[int] = []
+    warning = STOCK_PLATOON_DISBAND_WARNING.replace("\n", "\r\n")
+    header_end = warning.index("\r\n") + 1
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [
+                _completed_lifecycle().replace("\n", "\r\n") + warning[:header_end],
+                warning[header_end:] + "info: simulation continued\r\n",
+            ]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+        our_slot=1,
+    )
+
+    assert observation.exit_code == 0
+    assert observation.fail_fast_reason is None
+    assert terminated == []
+
+
+def test_monitor_fails_fast_when_a_split_candidate_trace_reaches_an_om4_frame(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None] * 10, pid=7071)
+    terminated: list[int] = []
+    warning_lines = STOCK_PLATOON_DISBAND_WARNING.splitlines(keepends=True)
+    om4_frame = warning_lines[2].replace(
+        "\t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363)",
+        "\tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99)",
+    )
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [_completed_lifecycle(), warning_lines[0], warning_lines[1] + om4_frame]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+        our_slot=1,
+    )
+
+    assert observation.fail_fast_reason == "lua-error"
+    assert terminated == [7071]
 
 
 def test_monitor_terminates_only_the_spawned_pid_tree_on_wall_timeout(tmp_path: Path) -> None:

@@ -1,0 +1,12 @@
+info: OM4HARNESS|v=1|kind=start|run=om4-20260811T014534Z-ca8eafb4|map=/maps/SCMP_006/SCMP_006_scenario.lua|seed=7777|speed=25|maxtime=1800|ais=1:overmind4:1:1,2:adaptive:1:2
+info: OM4|v=1|kind=lifecycle|army=1|event=created|plan=
+info: OM4|v=1|kind=lifecycle|army=1|event=begin_session
+info: OM4HARNESS|v=1|kind=speed|run=om4-20260811T014534Z-ca8eafb4|requested=25|sim=0.10000000149012
+info: OM4|v=1|kind=controller|actor=46:1|army=1|command=factory_build|event=order|role=tank|tick=4231
+warning: Error running lua script: ...ogramdata\faforever\gamedata\lua.nx2\lua\platoon.lua(2363): attempt to call method `PlatoonDisband' (a nil value)
+         stack traceback:
+          ...ogramdata\faforever\gamedata\lua.nx2\lua\platoon.lua(2363): in function <...ogramdata\faforever\gamedata\lua.nx2\lua\platoon.lua:2210>
+warning: Error running lua script: ...ogramdata\faforever\gamedata\lua.nx2\lua\platoon.lua(2363): attempt to call method `PlatoonDisband' (a nil value)
+         stack traceback:
+          ...ogramdata\faforever\gamedata\lua.nx2\lua\platoon.lua(2363): in function <...ogramdata\faforever\gamedata\lua.nx2\lua\platoon.lua:2210>
+info: OM4|v=1|kind=controller|army=1|command=reinforce|event=campaign_order|tick=4285|units=1

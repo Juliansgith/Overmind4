@@ -7,7 +7,16 @@ import subprocess
 import time
 from typing import Callable, Protocol
 
-from .parsing import ProcessObservation, detect_engine_failure, harness_marker_fields
+from .parsing import (
+    ProcessObservation,
+    detect_engine_failure,
+    harness_marker_fields,
+    is_stock_platoon_trace_frame,
+    is_stock_platoon_traceback_label,
+    is_stock_platoon_warning_header,
+    is_trace_continuation,
+    overmind_marker_fields,
+)
 
 
 class ProcessHandle(Protocol):
@@ -34,36 +43,149 @@ class IncrementalTail:
         return data.decode("utf-8", errors="replace")
 
 
-def detect_fail_fast(chunk: str, *, run_id: str | None = None) -> str | None:
-    for line in chunk.splitlines():
+class _FailFastScanner:
+    def __init__(self, *, run_id: str | None, our_slot: int | None) -> None:
+        self.run_id = run_id
+        self.our_slot = our_slot
+        self.fragment = ""
+        self.stock_warning_candidate: list[str] | None = None
+        self.failure_reason: str | None = None
+        self.sim_timeout = False
+        self.lifecycle_stage = 0
+
+    @property
+    def startup_complete(self) -> bool:
+        return self.lifecycle_stage == 4
+
+    def _matching_harness_fields(self, line: str) -> dict[str, str] | None:
         fields = harness_marker_fields(line)
         if (
-            fields
-            and run_id is not None
-            and fields.get("v") == "1"
-            and fields.get("run") == run_id
-            and fields.get("kind") == "failure"
+            not fields
+            or self.run_id is None
+            or fields.get("v") != "1"
+            or fields.get("run") != self.run_id
         ):
-            return fields.get("reason") or "harness-failure"
+            return None
+        return fields
+
+    def _advance_lifecycle(self, line: str) -> None:
+        harness_fields = self._matching_harness_fields(line)
+        if harness_fields:
+            kind = harness_fields.get("kind")
+            if kind == "start" and self.lifecycle_stage == 0:
+                self.lifecycle_stage = 1
+            elif kind == "speed" and self.lifecycle_stage == 3:
+                self.lifecycle_stage = 4
+
+        brain_fields = overmind_marker_fields(line)
+        if (
+            not brain_fields
+            or brain_fields.get("v") != "1"
+            or brain_fields.get("kind") != "lifecycle"
+            or self.our_slot is None
+        ):
+            return
+        try:
+            army = int(brain_fields.get("army", ""))
+        except ValueError:
+            return
+        if army != self.our_slot:
+            return
+        event = brain_fields.get("event")
+        if event == "created" and self.lifecycle_stage == 1:
+            self.lifecycle_stage = 2
+        elif event == "begin_session" and self.lifecycle_stage == 2:
+            self.lifecycle_stage = 3
+
+    def _process_regular_line(self, line: str) -> None:
+        self._advance_lifecycle(line)
+        fields = self._matching_harness_fields(line)
+        if fields and fields.get("kind") == "failure":
+            self.failure_reason = fields.get("reason") or "harness-failure"
+            return
+        if fields and fields.get("kind") == "timeout":
+            self.sim_timeout = True
+            return
+
+        if is_stock_platoon_warning_header(line):
+            if self.startup_complete:
+                self.stock_warning_candidate = [line]
+            else:
+                self.failure_reason = "lua-error"
+            return
+
         engine_failure = detect_engine_failure(line)
         if engine_failure:
-            return engine_failure
-    return None
+            self.failure_reason = engine_failure
+
+    def _process_line(self, line: str) -> None:
+        if self.failure_reason:
+            return
+        candidate = self.stock_warning_candidate
+        if candidate is None:
+            self._process_regular_line(line)
+            return
+        if len(candidate) == 1:
+            if is_stock_platoon_traceback_label(line):
+                candidate.append(line)
+            else:
+                self.failure_reason = "lua-error"
+            return
+        if len(candidate) == 2:
+            if is_stock_platoon_trace_frame(line):
+                candidate.append(line)
+            else:
+                self.failure_reason = "lua-error"
+            return
+        if is_trace_continuation(line):
+            self.failure_reason = "lua-error"
+            return
+        self.stock_warning_candidate = None
+        self._process_regular_line(line)
+
+    def feed(self, chunk: str) -> str | None:
+        if self.failure_reason or not chunk:
+            return self.failure_reason
+        buffer = self.fragment + chunk
+        trailing_cr = buffer.endswith("\r")
+        if trailing_cr:
+            buffer = buffer[:-1]
+        parts = buffer.splitlines(keepends=True)
+        self.fragment = ""
+        if parts and not parts[-1].endswith(("\n", "\r")):
+            self.fragment = parts.pop()
+        if trailing_cr:
+            self.fragment += "\r"
+        for part in parts:
+            self._process_line(part.rstrip("\r\n"))
+            if self.failure_reason:
+                break
+        return self.failure_reason
+
+    def finish(self) -> str | None:
+        if self.failure_reason:
+            return self.failure_reason
+        if self.fragment:
+            fragment = self.fragment
+            self.fragment = ""
+            self._process_line(fragment)
+        if self.failure_reason:
+            return self.failure_reason
+        if self.stock_warning_candidate is not None:
+            if len(self.stock_warning_candidate) != 3:
+                self.failure_reason = "lua-error"
+            self.stock_warning_candidate = None
+        return self.failure_reason
 
 
-def _has_structured_sim_timeout(chunk: str, run_id: str | None) -> bool:
-    if run_id is None:
-        return False
-    for line in chunk.splitlines():
-        fields = harness_marker_fields(line)
-        if (
-            fields
-            and fields.get("v") == "1"
-            and fields.get("run") == run_id
-            and fields.get("kind") == "timeout"
-        ):
-            return True
-    return False
+def detect_fail_fast(
+    chunk: str,
+    *,
+    run_id: str | None = None,
+    our_slot: int | None = None,
+) -> str | None:
+    scanner = _FailFastScanner(run_id=run_id, our_slot=our_slot)
+    return scanner.feed(chunk) or scanner.finish()
 
 
 def spawn_owned(argv: list[str], cwd: Path) -> subprocess.Popen[bytes]:
@@ -131,29 +253,27 @@ class Monitor:
         wall_timeout: float,
         *,
         run_id: str | None = None,
+        our_slot: int | None = None,
     ) -> ProcessObservation:
         started: float | None = None
         timeout = False
         sim_timeout = False
         fail_fast_reason: str | None = None
         exit_code: int | None = None
-        pending_line = ""
 
         try:
             started = self._now()
             tail = self._tail_factory(owned_log_path)
+            scanner = _FailFastScanner(run_id=run_id, our_slot=our_slot)
             while True:
-                scan_text = pending_line + tail.read_new()
-                last_newline = max(scan_text.rfind("\n"), scan_text.rfind("\r"))
-                pending_line = scan_text[last_newline + 1 :] if last_newline >= 0 else scan_text
-                fail_fast_reason = detect_fail_fast(scan_text, run_id=run_id)
+                fail_fast_reason = scanner.feed(tail.read_new())
                 if fail_fast_reason:
                     exit_code, cleanup_failed = self.stop_owned(process)
                     if cleanup_failed:
                         fail_fast_reason = "termination-failure"
                     break
 
-                if _has_structured_sim_timeout(scan_text, run_id):
+                if scanner.sim_timeout:
                     sim_timeout = True
                     exit_code, cleanup_failed = self.stop_owned(process)
                     if cleanup_failed:
@@ -162,10 +282,12 @@ class Monitor:
 
                 exit_code = process.poll()
                 if exit_code is not None:
+                    fail_fast_reason = scanner.finish()
                     break
 
                 if self._now() - started >= wall_timeout:
-                    timeout = True
+                    fail_fast_reason = scanner.finish()
+                    timeout = fail_fast_reason is None
                     exit_code, cleanup_failed = self.stop_owned(process)
                     if cleanup_failed:
                         fail_fast_reason = "termination-failure"

@@ -28,6 +28,17 @@ class ProcessObservation:
 
 
 @dataclass(frozen=True)
+class WarningDetail:
+    code: str
+    source: str
+    archive: str
+    path: str
+    line: int
+    method: str
+    occurrences: int
+
+
+@dataclass(frozen=True)
 class LifecycleStatus:
     valid: bool
     reason: str | None
@@ -52,8 +63,10 @@ class LogTelemetry:
     lifecycle: LifecycleStatus
     engine_diagnostics: tuple[str, ...] = ()
     engine_diagnostic_before_lifecycle: bool = False
+    engine_diagnostic_before_result: bool = False
     result_integrity_reason: str | None = None
     harness_failure_reason: str | None = None
+    warning_details: tuple[WarningDetail, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +83,7 @@ class Outcome:
     json_stats: dict[str, Any] | None
     lifecycle: LifecycleStatus
     warnings: tuple[str, ...] = ()
+    warning_details: tuple[WarningDetail, ...] = ()
 
 
 def _balanced_json_object(text: str, start: int) -> tuple[str | None, int]:
@@ -123,6 +137,25 @@ def extract_json_stats(text: str) -> JsonStatsResult:
 
 
 _LOG_PREFIX = re.compile(r"^\s*(?:(?:debug|info|warning|error):\s*)?", re.IGNORECASE)
+FAF_STOCK_PLATOON_DISBAND_WARNING = "faf-stock-platoon-disband-nil"
+_STOCK_PLATOON_PATH_PATTERN = (
+    r"\.\.\.ogramdata\\faforever\\gamedata\\lua\.nx2\\lua\\platoon\.lua"
+)
+_STOCK_PLATOON_WARNING_HEADER = re.compile(
+    r"^\s*warning:\s*Error running lua script:\s+"
+    + _STOCK_PLATOON_PATH_PATTERN
+    + r"\(2363\): attempt to call method `PlatoonDisband' \(a nil value\)\s*$",
+    re.IGNORECASE,
+)
+_STOCK_PLATOON_TRACEBACK_LABEL = re.compile(r"^\s+stack traceback:\s*$", re.IGNORECASE)
+_STOCK_PLATOON_TRACE_FRAME = re.compile(
+    r"^\s+"
+    + _STOCK_PLATOON_PATH_PATTERN
+    + r"\(2363\): in function <"
+    + _STOCK_PLATOON_PATH_PATTERN
+    + r":2210>\s*$",
+    re.IGNORECASE,
+)
 _ENGINE_FAILURES = (
     (re.compile(r"LUA ERROR(?=\s|:|$)", re.IGNORECASE), "lua-error"),
     (
@@ -144,6 +177,40 @@ _ENGINE_FAILURES = (
         "engine-crash",
     ),
 )
+
+
+def is_stock_platoon_warning_header(line: str) -> bool:
+    return _STOCK_PLATOON_WARNING_HEADER.fullmatch(line) is not None
+
+
+def is_stock_platoon_traceback_label(line: str) -> bool:
+    return _STOCK_PLATOON_TRACEBACK_LABEL.fullmatch(line) is not None
+
+
+def is_stock_platoon_trace_frame(line: str) -> bool:
+    return _STOCK_PLATOON_TRACE_FRAME.fullmatch(line) is not None
+
+
+def is_trace_continuation(line: str) -> bool:
+    return bool(line) and line[0].isspace()
+
+
+def _stock_platoon_warning_ranges(lines: list[str]) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    for index, line in enumerate(lines):
+        if not is_stock_platoon_warning_header(line):
+            continue
+        trace_end = index + 3
+        if trace_end > len(lines):
+            continue
+        if not is_stock_platoon_traceback_label(lines[index + 1]):
+            continue
+        if not is_stock_platoon_trace_frame(lines[index + 2]):
+            continue
+        if trace_end < len(lines) and is_trace_continuation(lines[trace_end]):
+            continue
+        ranges.append((index, trace_end))
+    return tuple(ranges)
 
 
 def _fields_at_prefix(line: str, prefix: str) -> dict[str, str] | None:
@@ -169,6 +236,10 @@ def harness_marker_fields(line: str) -> dict[str, str] | None:
 
 def _overmind_fields(line: str) -> dict[str, str] | None:
     return _fields_at_prefix(line, OVERMIND_PREFIX)
+
+
+def overmind_marker_fields(line: str) -> dict[str, str] | None:
+    return _overmind_fields(line)
 
 
 def _number(value: str | None) -> float | None:
@@ -203,9 +274,16 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
     official_results: list[str] = []
     brain_terminal_results: list[str] = []
     engine_diagnostics_with_lines: list[tuple[int, str]] = []
+    lines = text.splitlines()
+    stock_warning_ranges = _stock_platoon_warning_ranges(lines)
+    stock_warning_headers = {start for start, _ in stock_warning_ranges}
 
-    for line_number, line in enumerate(text.splitlines()):
-        engine_diagnostic = detect_engine_failure(line)
+    for line_number, line in enumerate(lines):
+        engine_diagnostic = (
+            None
+            if line_number in stock_warning_headers
+            else detect_engine_failure(line)
+        )
         if engine_diagnostic:
             engine_diagnostics_with_lines.append((line_number, engine_diagnostic))
 
@@ -258,12 +336,14 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         elif kind == "failure":
             harness_failure_reason = fields.get("reason") or "harness-failure"
         elif kind == "result":
+            result = fields.get("result")
+            result_kind = (result or "").split(" ", 1)[0].lower()
+            if result_kind in TERMINAL_RESULTS and "first_harness_result" not in positions:
+                positions["first_harness_result"] = line_number
             try:
                 army = int(fields.get("army", ""))
             except ValueError:
                 continue
-            result = fields.get("result")
-            result_kind = (result or "").split(" ", 1)[0].lower()
             if army == our_slot and result_kind in TERMINAL_RESULTS:
                 official_results.append(result or result_kind)
                 if official_result is None:
@@ -311,6 +391,35 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         events=tuple(events),
     )
 
+    accepted_stock_warning_count = 0
+    lifecycle_completion_line = positions.get("harness_speed")
+    for warning_line, _ in stock_warning_ranges:
+        if (
+            lifecycle.valid
+            and lifecycle_completion_line is not None
+            and warning_line > lifecycle_completion_line
+        ):
+            accepted_stock_warning_count += 1
+        else:
+            engine_diagnostics_with_lines.append((warning_line, "lua-error"))
+
+    engine_diagnostics_with_lines.sort(key=lambda item: item[0])
+    warning_details = (
+        (
+            WarningDetail(
+                code=FAF_STOCK_PLATOON_DISBAND_WARNING,
+                source="FAF stock",
+                archive="gamedata/lua.nx2",
+                path="lua/platoon.lua",
+                line=2363,
+                method="PlatoonDisband",
+                occurrences=accepted_stock_warning_count,
+            ),
+        )
+        if accepted_stock_warning_count
+        else ()
+    )
+
     if len(official_results) > 1:
         official_kinds = {
             result.lower().split(" ", 1)[0] for result in official_results
@@ -345,6 +454,14 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         harness_speed_line is None
         or any(line_number < harness_speed_line for line_number, _ in engine_diagnostics_with_lines)
     )
+    first_harness_result_line = positions.get("first_harness_result")
+    engine_diagnostic_before_result = bool(engine_diagnostics_with_lines) and (
+        first_harness_result_line is None
+        or any(
+            line_number < first_harness_result_line
+            for line_number, _ in engine_diagnostics_with_lines
+        )
+    )
     failure_reason = harness_failure_reason or (
         engine_diagnostics[0] if engine_diagnostics else None
     )
@@ -362,8 +479,10 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         lifecycle=lifecycle,
         engine_diagnostics=engine_diagnostics,
         engine_diagnostic_before_lifecycle=engine_diagnostic_before_lifecycle,
+        engine_diagnostic_before_result=engine_diagnostic_before_result,
         result_integrity_reason=result_integrity_reason,
         harness_failure_reason=harness_failure_reason,
+        warning_details=warning_details,
     )
 
 
@@ -411,8 +530,24 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
         and telemetry_failure_is_engine_diagnostic
         and process_failure_is_same_engine_diagnostic
         and not telemetry.engine_diagnostic_before_lifecycle
+        and not telemetry.engine_diagnostic_before_result
     )
-    warnings = telemetry.engine_diagnostics if recoverable_engine_diagnostic else ()
+    structured_warning_codes = tuple(
+        warning.code for warning in telemetry.warning_details
+    )
+    warnings = tuple(
+        dict.fromkeys(
+            structured_warning_codes
+            + (telemetry.engine_diagnostics if recoverable_engine_diagnostic else ())
+        )
+    )
+    structured_warning_corroborates_exit = (
+        corroborated_result
+        and bool(telemetry.warning_details)
+        and telemetry.harness_failure_reason is None
+        and telemetry.failure_reason is None
+        and process_reason is None
+    )
 
     if safety_failure:
         failure_reason = process_reason
@@ -433,12 +568,17 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
             state = "sim-timeout"
     elif process.wall_timeout:
         state = "wall-timeout"
-    elif process.exit_code not in (0, None) and not recoverable_engine_diagnostic:
+    elif (
+        process.exit_code not in (0, None)
+        and not recoverable_engine_diagnostic
+        and not structured_warning_corroborates_exit
+    ):
         state = "crash"
     elif (
         process.exit_code is None
         and not telemetry.sim_timeout
         and not recoverable_engine_diagnostic
+        and not structured_warning_corroborates_exit
     ):
         state = "crash"
     elif not telemetry.lifecycle.valid:
@@ -478,4 +618,5 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
         json_stats=telemetry.json_stats,
         lifecycle=telemetry.lifecycle,
         warnings=warnings,
+        warning_details=telemetry.warning_details,
     )

@@ -367,6 +367,7 @@ class Runner:
                         paths.log_path,
                         config.wall_time_limit,
                         run_id=run_id,
+                        our_slot=config.our_slot,
                     )
                 except Exception as error:
                     exit_code, cleanup_failed = deps.monitor.stop_owned(process)
