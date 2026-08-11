@@ -11208,16 +11208,85 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     for _, candidate in ipairs((observation.sites or {}).mass or {}) do
         if candidate.key == mission.siteKey then site = candidate end
     end
-    local safe = mission.requireLiveDropValidation ~= true
-    if mission.requireLiveDropValidation == true then
-        safe = site ~= nil and site.complete ~= true and site.buildable ~= false
-            and (site.reachable == true or site.engineerReachable == true)
-            and DistanceSquared(site.position, position) <= 0.01
+    local mexBlueprint = Catalog.IdFor('mass_extractor')
+    local function SiteIsSafe(candidate, candidatePosition)
+        if not candidate or not candidatePosition or candidate.complete == true
+            or candidate.buildable == false
+            or (candidate.reachable ~= true and candidate.engineerReachable ~= true)
+        then
+            return false
+        end
         for _, contact in pairs((controller.intelState or {}).contacts or {}) do
             if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) < 300
-                and Distance(contact.position, position) <= 80
+                and Distance(contact.position, candidatePosition) <= 80
             then
-                safe = false
+                return false
+            end
+        end
+        return true
+    end
+    local function SiteIsPhysicallyBuildable(candidate, candidatePosition)
+        return SiteIsSafe(candidate, candidatePosition)
+            and mexBlueprint ~= nil
+            and SafeCall(false, controller.brain.CanBuildStructureAt,
+                controller.brain, mexBlueprint, candidatePosition) == true
+    end
+    local safe = mission.requireLiveDropValidation ~= true
+    if mission.requireLiveDropValidation == true then
+        local livePosition = site and TerrainPosition(site.position) or nil
+        safe = livePosition ~= nil
+            and DistanceSquared(site.position, position) <= 0.01
+            and SiteIsPhysicallyBuildable(site, livePosition)
+        if not safe then
+            if site and not SiteIsPhysicallyBuildable(site, livePosition) then
+                BlockSite(controller, site.key, 'airlift_unload_preflight')
+            end
+            local alternatives = {}
+            for _, candidate in ipairs((observation.sites or {}).mass or {}) do
+                local reservation = controller.reservations[candidate.key]
+                if candidate.key ~= mission.siteKey
+                    and candidate.complete ~= true and candidate.buildable ~= false
+                    and (not reservation or reservation.missionId == intent.missionId)
+                    and Distance(candidate.position, controller.basePosition) > 60
+                then
+                    TableInsert(alternatives, candidate)
+                end
+            end
+            table.sort(alternatives, function(a, b)
+                local ad = DistanceSquared(a.position, controller.basePosition)
+                local bd = DistanceSquared(b.position, controller.basePosition)
+                if ad == bd then return a.key < b.key end
+                return ad < bd
+            end)
+            local replacement = nil
+            local replacementPosition = nil
+            for index, candidate in ipairs(alternatives) do
+                if index > 8 then break end
+                local candidatePosition = TerrainPosition(candidate.position)
+                if SiteIsPhysicallyBuildable(candidate, candidatePosition) then
+                    replacement = candidate
+                    replacementPosition = candidatePosition
+                    break
+                end
+                if SiteIsSafe(candidate, candidatePosition) then
+                    BlockSite(controller, candidate.key, 'airlift_unload_preflight')
+                end
+            end
+            if replacement then
+                local oldReservation = controller.reservations[mission.siteKey]
+                if oldReservation and oldReservation.missionId == intent.missionId then
+                    controller.reservations[mission.siteKey] = nil
+                end
+                mission.siteKey = replacement.key
+                mission.dropPosition = CopyPosition(replacementPosition)
+                position = CopyPosition(replacementPosition)
+                site = replacement
+                controller.reservations[replacement.key] = {
+                    actorToken = (mission.cargoTokens or {})[1],
+                    missionId = intent.missionId,
+                    issuedTick = CurrentTick(controller),
+                }
+                safe = true
             end
         end
     end
@@ -11235,7 +11304,6 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
             ((controller.transportCargoRefs or {})[intent.missionId] or {})[cargoToken]
         )
     end
-    local mexBlueprint = Catalog.IdFor('mass_extractor')
     local buildPosition = site and TerrainPosition(site.position) or nil
     local buildable = cargoActor and mexBlueprint and buildPosition
         and SafeCall(false, controller.brain.CanBuildStructureAt,

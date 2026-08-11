@@ -2561,7 +2561,10 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
     assert len(harness.calls.transportLoad) == 0
 
 
-def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
+@pytest.mark.parametrize("retarget", [False, True])
+def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
+    retarget: bool,
+) -> None:
     harness = make_harness()
     drop = [300, 2, 300]
     cargo = harness.unit(
@@ -2580,21 +2583,36 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
     harness.brain.units = harness.lua.table_from([transport, cargo])
     harness.observe()
     harness.brain.units = harness.lua.table_from([transport])
-    harness.controller.markers.mass = lua_value(
-        harness.lua,
-        [
+    markers = [
+        {
+            "key": "front",
+            "name": "Front",
+            "kind": "mass",
+            "position": drop,
+            "distance": 200,
+            "localSite": False,
+            "reachable": True,
+            "engineerReachable": True,
+        }
+    ]
+    if retarget:
+        markers.append(
             {
-                "key": "front",
-                "name": "Front",
+                "key": "alternate",
+                "name": "Alternate",
                 "kind": "mass",
-                "position": drop,
-                "distance": 200,
+                "position": [320, 2, 300],
+                "distance": 220,
                 "localSite": False,
                 "reachable": True,
                 "engineerReachable": True,
             }
-        ],
-    )
+        )
+        harness.lua.execute(
+            "brain.canBuildAt = function(blueprintId, position) "
+            "return blueprintId ~= 'ueb1103' or position[1] >= 320 end"
+        )
+    harness.controller.markers.mass = lua_value(harness.lua, markers)
     harness.controller.transportMissions["airlift:front"] = lua_value(
         harness.lua,
         {
@@ -2625,10 +2643,13 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
     ]
     assert len(mex_orders) == 1
     assert mex_orders[0].units[1].options.entityId == 32
+    expected_x = 320 if retarget else 300
     assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
-        300,
+        expected_x,
         300,
     )
+    mission = plain(harness.controller.transportMissions["airlift:front"])
+    assert mission["siteKey"] == ("alternate" if retarget else "front")
 
 
 def test_airlift_skips_the_nearest_physically_unbuildable_mex() -> None:
