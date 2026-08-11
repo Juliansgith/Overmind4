@@ -185,6 +185,23 @@ def test_safe_acu_builds_first_air_factory_after_local_opening() -> None:
     )
 
 
+def test_blocked_optional_fourth_power_does_not_freeze_acu_air_opening() -> None:
+    snapshot = post_opening_snapshot("power_generator", "hydrocarbon")
+    snapshot["units"][0]["canBuild"]["air_factory"] = True
+    snapshot["placements"]["power_generator"] = []
+    snapshot["placements"]["air_factory"] = [[14, 2, 22]]
+
+    acu_builds = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent["actorToken"] == "1:1"
+    ]
+
+    assert [(intent["buildRole"], intent["reason"]) for intent in acu_builds] == [
+        ("air_factory", "opening_air_factory")
+    ]
+
+
 def test_malformed_occupied_reserved_and_unreachable_sites_are_ignored() -> None:
     sites = [
         {"key": "missing-position", "name": "A", "distance": 1, "localSite": True, "reachable": True, "occupied": False, "reserved": False},
