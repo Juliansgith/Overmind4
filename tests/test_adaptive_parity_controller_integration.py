@@ -94,6 +94,34 @@ def _same_lua_reference(harness: Any, left: Any, right: Any) -> bool:
     return bool(harness.lua.eval("function(a, b) return a == b end")(left, right))
 
 
+def test_real_portfolio_funds_opening_factory_before_future_factory_queues() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute("MacroDirectorStub.BuildPortfolio = MacroDirector.BuildPortfolio")
+    harness.brain.units = harness.lua.table_from([
+        harness.unit(
+            entityId=1,
+            blueprintId="uel0001",
+            canBuild={"ueb0101": True},
+        )
+    ])
+    harness.brain.massIncome = 0.1
+    harness.brain.massRequested = 0
+    harness.brain.massUsage = 0
+    harness.brain.massTrend = 0.1
+    harness.brain.massStored = 650
+    harness.brain.energyIncome = 2
+    harness.brain.energyRequested = 0
+    harness.brain.energyUsage = 0
+    harness.brain.energyTrend = 2
+    harness.brain.energyStored = 4000
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb0101"
+
+
 def test_controller_assembles_director_snapshot_in_dependency_order_and_persists_state() -> None:
     harness = make_harness()
     _set_director_result(

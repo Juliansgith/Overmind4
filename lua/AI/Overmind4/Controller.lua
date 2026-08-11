@@ -8530,18 +8530,32 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             energyDrain = 3, massCost = 36, energyCost = 360, required = true },
         { id = 'reclaim-1', lane = 'reclaim', massDrain = 0,
             energyDrain = 0, massCost = 0, energyCost = 0, required = true },
-        { id = 'engineer-1', lane = 'engineers', massDrain = 0.2,
-            energyDrain = 2, massCost = 52, energyCost = 260 },
-        { id = 'land-1', lane = 'land_production', massDrain = 0.28,
-            energyDrain = 3, massCost = 56, energyCost = 600, required = true },
-        { id = 'air-1', lane = 'air_production', massDrain = 0.2,
-            energyDrain = 9, massCost = 50, energyCost = 2250, required = true },
-        { id = 'factory-1', lane = 'factory_growth', massDrain = 0.35,
-            energyDrain = 4, massCost = 210, energyCost = 2400, optional = true },
-        { id = 'tech-1', lane = 'tech', massDrain = 1.017391,
-            energyDrain = 7.913043, massCost = 1170, energyCost = 9100,
-            durationTicks = 1150, optional = true },
     }
+    TableInsert(requests, {
+        id = 'factory-1', lane = 'factory_growth', massDrain = 0.4,
+        energyDrain = 3.5, massCost = 240, energyCost = 2100,
+        required = counts.landFactoriesT1 + counts.landFactoriesT2 < 1,
+        optional = counts.landFactoriesT1 + counts.landFactoriesT2 >= 1,
+    })
+    if counts.landFactoriesT1 + counts.landFactoriesT2 > 0 then
+        TableInsert(requests, { id = 'engineer-1', lane = 'engineers',
+            massDrain = 0.2, energyDrain = 2, massCost = 52,
+            energyCost = 260 })
+        TableInsert(requests, { id = 'land-1', lane = 'land_production',
+            massDrain = 0.28, energyDrain = 3, massCost = 56,
+            energyCost = 600, required = true })
+    end
+    if counts.airFactoriesT1 > 0 then
+        TableInsert(requests, { id = 'air-1', lane = 'air_production',
+            massDrain = 0.2, energyDrain = 9, massCost = 50,
+            energyCost = 2250, required = true })
+    end
+    if completedMex >= 10 and counts.landFactoriesT1 >= 2 then
+        TableInsert(requests, { id = 'tech-1', lane = 'tech',
+            massDrain = 1.017391, energyDrain = 7.913043,
+            massCost = 1170, energyCost = 9100, durationTicks = 1150,
+            optional = true })
+    end
     local commitments = {}
     local records = RecordByToken(observation.units or {})
     for _, operation in pairs(controller.pending or {}) do
