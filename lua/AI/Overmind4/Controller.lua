@@ -8607,7 +8607,52 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     }
 end
 
-ESCALATION.DirectorExpansionInput = function(controller, observation, macroPlan)
+ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroPlan)
+    local energyLane = ((macroPlan or {}).lanes or {}).energy_recovery
+    if not energyLane
+        or (energyLane.admitted ~= true and energyLane.preserved ~= true)
+    then
+        return nil
+    end
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'hydrocarbon' then return nil end
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.buildRole == 'hydrocarbon' then return nil end
+    end
+    local site = nil
+    for _, candidate in ipairs((observation.sites or {}).hydro or {}) do
+        if candidate.complete ~= true and candidate.occupied ~= true
+            and candidate.reserved ~= true and candidate.buildable ~= false
+            and candidate.engineerReachable == true
+        then
+            site = candidate
+            break
+        end
+    end
+    if not site then return nil end
+    local best = nil
+    local bestDistance = nil
+    for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+        if unit.role == 'engineer' and unit.available == true
+            and (unit.canBuild or {}).hydrocarbon == true
+        then
+            local distance = DistanceSquared(unit.position, site.position)
+            if not best or distance < bestDistance
+                or (distance == bestDistance
+                    and tostring(unit.token) < tostring(best.token))
+            then
+                best = unit
+                bestDistance = distance
+            end
+        end
+    end
+    return best and best.token or nil
+end
+
+ESCALATION.DirectorExpansionInput = function(
+    controller, observation, macroPlan, strategicBuilderToken
+)
     local regions = macroPlan.regions or {}
     local regionByMember = {}
     for _, region in ipairs(regions) do
@@ -8630,7 +8675,9 @@ ESCALATION.DirectorExpansionInput = function(controller, observation, macroPlan)
     local engineers = {}
     local escorts = {}
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-        if unit.role == 'engineer' then TableInsert(engineers, unit) end
+        if unit.role == 'engineer' and unit.token ~= strategicBuilderToken then
+            TableInsert(engineers, unit)
+        end
         if COMBAT_ROLES[unit.role] then TableInsert(escorts, unit) end
     end
     return {
@@ -10459,8 +10506,13 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     macroPlan.intents = macroPlan.intents or {}
     ESCALATION.PrepareFundingGrants(controller, macroPlan)
 
+    local strategicBuilderToken = ESCALATION.StrategicHydroBuilderToken(
+        controller, observation, macroPlan
+    )
     local expansionPlan = ESCALATION.directors.macro.PlanExpansion(
-        ESCALATION.DirectorExpansionInput(controller, observation, macroPlan)
+        ESCALATION.DirectorExpansionInput(
+            controller, observation, macroPlan, strategicBuilderToken
+        )
     ) or { jobs = {}, denials = {} }
     expansionPlan = ESCALATION.DeepCopy(expansionPlan)
     local expansionJobs = {}
@@ -10629,6 +10681,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
 
     local intents = {}
     local reserved = {}
+    if strategicBuilderToken then reserved[strategicBuilderToken] = true end
     for _, intent in ipairs(macroPlan.intents or {}) do
         ESCALATION.AppendDirectorIntent(intents, intent)
     end

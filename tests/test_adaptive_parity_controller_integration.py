@@ -122,6 +122,38 @@ def test_real_portfolio_funds_opening_factory_before_future_factory_queues() -> 
     assert harness.calls.buildMobile[1].blueprintId == "ueb0101"
 
 
+def test_funded_mex_expansion_does_not_claim_the_missing_hydro_builder() -> None:
+    harness = make_harness()
+    _use_real_macro_expansion_and_job_ledger(harness)
+    engineer = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1102": True, "ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {
+                "energy_recovery": {"admitted": True},
+                "mex_rebuild": {"admitted": True},
+            },
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1102"
+
+
 def test_controller_assembles_director_snapshot_in_dependency_order_and_persists_state() -> None:
     harness = make_harness()
     _set_director_result(
