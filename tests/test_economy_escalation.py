@@ -1375,7 +1375,7 @@ def test_readiness_loss_cancels_staged_forward_advancement_until_restored(mode: 
     harness.brain.tick += 1
     restored = reconcile(harness)
     forward = campaign_intents(harness, restored)
-    assert len(forward) == 1 and forward[0]["mode"] == mode
+    assert len(forward) == 1 and forward[0]["mode"] == "route_probe"
 
 
 @pytest.mark.parametrize(("lost", "should_rollback"), [(24, False), (25, True)])

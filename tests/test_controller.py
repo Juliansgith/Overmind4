@@ -32,7 +32,7 @@ def make_harness() -> ControllerHarness:
         categories = { ALLUNITS = 'ALLUNITS', MOBILE = 'MOBILE' }
         ScenarioInfo = { Options = { TeamSpawn = 'fixed' } }
         calls = {
-            own = {}, enemy = {}, nav = {}, canBuild = {}, terrain = {},
+            own = {}, enemy = {}, nav = {}, navLabel = {}, navPath = {}, canBuild = {}, terrain = {},
             buildMobile = {}, buildFactory = {}, rally = {}, aggressive = {},
             guard = {}, move = {}, clear = {}, reclaim = {}, reclaimQuery = {},
             upgrade = {}, patrol = {},
@@ -272,7 +272,34 @@ def make_harness() -> ControllerHarness:
             Generate = function() NavUtils.generated = true; NavUtils.generateCalls = (NavUtils.generateCalls or 0) + 1 end,
             CanPathTo = function(layer, origin, destination)
                 table.insert(calls.nav, { layer, {origin[1], origin[2], origin[3]}, {destination[1], destination[2], destination[3]} })
+                if calls.failCanPath then error('can path failed') end
+                if calls.canPathMode == 'nil' then return nil, calls.canPathReason or 'SystemError' end
+                if calls.canPathMode == 'false' then return false, calls.canPathReason or 'Unpathable' end
+                if calls.canPathMode == 'true' then return true end
                 return destination[1] ~= 999
+            end,
+            GetLabel = function(layer, position)
+                table.insert(calls.navLabel, { layer, {position[1], position[2], position[3]} })
+                if calls.failGetLabel then error('label failed') end
+                local positionKey = tostring(position[1]) .. ':' .. tostring(position[3])
+                if calls.labelByPosition and calls.labelByPosition[positionKey] ~= nil then
+                    return calls.labelByPosition[positionKey]
+                end
+                local index = table.getn(calls.navLabel)
+                if calls.labelValues then return calls.labelValues[index] end
+                return 1
+            end,
+            PathTo = function(layer, origin, destination)
+                table.insert(calls.navPath, { layer, {origin[1], origin[2], origin[3]}, {destination[1], destination[2], destination[3]} })
+                if calls.failPath then error('path failed') end
+                if calls.pathError then return nil, calls.pathError end
+                if calls.pathReturnNil then return nil, calls.pathCount, calls.pathLength end
+                if calls.pathWaypoints ~= nil then
+                    return calls.pathWaypoints, calls.pathCount, calls.pathLength
+                end
+                local dx = destination[1] - origin[1]
+                local dz = destination[3] - origin[3]
+                return { {destination[1], destination[2], destination[3]} }, 1, math.sqrt(dx * dx + dz * dz)
             end,
         }
 
@@ -346,7 +373,9 @@ def make_harness() -> ControllerHarness:
         function IssueAggressiveMove(units, position)
             table.insert(calls.sequence, 'aggressive')
             table.insert(calls.aggressive, { units = units, position = position })
-            if calls.failAggressive then error('aggressive failed') end
+            if calls.failAggressive
+                or tonumber(calls.failAggressiveAt) == table.getn(calls.aggressive)
+            then error('aggressive failed') end
             return { kind = 'aggressive' }
         end
         function IssueGuard(units, target)
@@ -362,7 +391,9 @@ def make_harness() -> ControllerHarness:
         function IssueMove(units, position)
             table.insert(calls.sequence, 'move')
             table.insert(calls.move, { units = units, position = position })
-            if calls.failMove then error('move failed') end
+            if calls.failMove
+                or tonumber(calls.failMoveAt) == table.getn(calls.move)
+            then error('move failed') end
             return { kind = 'move' }
         end
         function IssueClearCommands(units)

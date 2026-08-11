@@ -1014,7 +1014,7 @@ def test_injected_resume_inside_rollback_cooldown_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("terminal", ["transition", "assault"])
-def test_new_objective_resets_recovery_epoch_before_second_window_rollback(
+def test_proven_objective_resets_recovery_epoch_and_bulk_stall_restores_secured_snapshot(
     terminal: str,
 ) -> None:
     if terminal == "transition":
@@ -1037,25 +1037,48 @@ def test_new_objective_resets_recovery_epoch_before_second_window_rollback(
     assert old_recovery["mode"] == "recover"
     execute_intents(harness, [old_recovery], old_recovery_observation)
     assert campaign_state(harness)["recoveryWindows"] == 1
+    secured = campaign_state(harness)
 
     hold_cluster(harness, acu, engineer, combat, completed, start_tick=310)
     harness.brain.tick = 460
     forward_observation = reconcile(harness)
     forward = only(campaign_intents(harness, forward_observation), "field_campaign")
-    assert forward["mode"] == terminal
+    assert forward["mode"] == "route_probe"
     execute_intents(harness, [forward], forward_observation)
+
+    route = campaign_state(harness)["routeAttempt"]
+    for token in route["probeTokens"][: route["probeQuorum"]]:
+        harness.controller.unitRefs[token].options.position = lua_value(
+            harness.lua,
+            route["destination"],
+        )
+    harness.brain.tick = 461
+    proven_observation = reconcile(harness)
+    commit = only(campaign_intents(harness, proven_observation), "field_campaign")
+    assert commit["mode"] == "route_commit"
+    assert route["candidateKind"] == (
+        "pressure_front" if terminal == "transition" else "strategic_assault"
+    )
+    execute_intents(harness, [commit], proven_observation)
     assert campaign_state(harness)["recoveryWindows"] == 0
 
-    harness.brain.tick = 461
+    harness.brain.tick = 462
     reconcile(harness)
-    harness.brain.tick = 761
-    first_new_stall = reconcile(harness)
-    first = only(campaign_intents(harness, first_new_stall), "field_campaign")
-    assert first["mode"] == "recover"
-    execute_intents(harness, [first], first_new_stall)
-    harness.brain.tick = 1061
-    second_new_stall = reconcile(harness)
-    assert only(campaign_intents(harness, second_new_stall), "field_campaign")["mode"] == "rollback"
+    harness.brain.tick = 762
+    stalled = reconcile(harness)
+    release = only(campaign_intents(harness, stalled), "field_campaign")
+    assert release["mode"] == "route_release"
+    execute_intents(harness, [release], stalled)
+
+    restored = campaign_state(harness)
+    assert restored["kind"] == secured["kind"]
+    assert restored["clusterKey"] == secured["clusterKey"]
+    assert restored["anchorKey"] == secured["anchorKey"]
+    assert restored["anchorPosition"] == secured["anchorPosition"]
+    assert restored["recoveryWindows"] == 0
+    assert restored.get("routeAttempt") is None
+    assert restored.get("routeRollback") is None
+    assert restored.get("routeBlockedCount", 0) >= 1
 
 
 def t2_ready_snapshot() -> dict[str, Any]:

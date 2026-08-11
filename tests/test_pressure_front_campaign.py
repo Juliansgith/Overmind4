@@ -78,6 +78,24 @@ def hold_cluster(
     return reconcile(harness)
 
 
+def complete_staged_route(harness: Any, observation: Any) -> Any:
+    """Physically prove a staged route, then execute its bulk commit."""
+    probe = campaign_intents(harness, observation)
+    assert len(probe) == 1 and probe[0]["mode"] == "route_probe"
+    execute_intents(harness, probe, observation)
+    route = campaign_state(harness)["routeAttempt"]
+    for token in route["probeTokens"][: route["probeQuorum"]]:
+        harness.controller.unitRefs[token].options.position = lua_value(
+            harness.lua, route["destination"]
+        )
+    harness.brain.tick += 1
+    proven = reconcile(harness)
+    commit = campaign_intents(harness, proven)
+    assert len(commit) == 1 and commit[0]["mode"] == "route_commit"
+    execute_intents(harness, commit, proven)
+    return proven
+
+
 @pytest.mark.parametrize("seed", range(4))
 def test_activation_snapshots_targetward_cluster_anchor_and_aggressive_moves_exact_field(seed: int) -> None:
     harness, _, engineer, _, observation = start_campaign(
@@ -466,7 +484,7 @@ def test_cluster_hold_requires_complete_150_continuous_ticks_and_half_field_quor
     at_150 = reconcile(harness)
     transition = campaign_intents(harness, at_150)
     assert len(transition) == 1
-    assert transition[0]["mode"] == "transition"
+    assert transition[0]["mode"] == "route_probe"
     assert transition[0]["clusterKey"] == "forward-near"
     assert transition[0]["objectiveKey"] == "forward-near-b"
 
@@ -493,7 +511,7 @@ def test_one_tick_cluster_loss_resets_both_ownership_hold_and_transition() -> No
     harness.brain.tick = 310
     assert campaign_intents(harness, reconcile(harness)) == []
     harness.brain.tick = 311
-    assert campaign_intents(harness, reconcile(harness))[0]["mode"] == "transition"
+    assert campaign_intents(harness, reconcile(harness))[0]["mode"] == "route_probe"
 
 
 def test_forward_graph_rejects_backward_lateral_and_unreachable_then_chooses_nearest_forward_cluster() -> None:
@@ -508,7 +526,7 @@ def test_forward_graph_rejects_backward_lateral_and_unreachable_then_chooses_nea
     current = reconcile(harness)
     intent = campaign_intents(harness, current)[0]
 
-    assert intent["mode"] == "transition"
+    assert intent["mode"] == "route_probe"
     assert intent["clusterKey"] == "forward-near"
     assert intent["objectiveKey"] == "forward-near-b"
     assert intent["position"] == [80, 2, 70]
@@ -531,7 +549,7 @@ def test_forward_cluster_has_no_euclidean_terminal_cutoff() -> None:
     transition = campaign_intents(harness, reconcile(harness))
 
     assert len(transition) == 1
-    assert transition[0]["mode"] == "transition"
+    assert transition[0]["mode"] == "route_probe"
     assert transition[0]["clusterKey"] == "forward-remote"
 
 
@@ -558,7 +576,7 @@ def test_permanent_graph_rejects_markers_without_explicit_layer_reachability(
     transition = campaign_intents(harness, reconcile(harness))
 
     assert len(transition) == 1
-    assert transition[0]["mode"] == "transition"
+    assert transition[0]["mode"] == "route_probe"
     assert transition[0]["clusterKey"] == "forward-valid"
 
 
@@ -598,9 +616,9 @@ def test_terminal_assault_requires_public_fixed_pathable_non_hidden_target(
         assert campaign_state(harness)["kind"] == "pressure_front"
         return
     assert len(intents) == 1
-    assert intents[0]["mode"] == "assault"
-    assert intents[0]["position"] == [110, 3, 120]
-    execute_intents(harness, intents, current)
+    assert intents[0]["mode"] == "route_probe"
+    assert campaign_state(harness)["kind"] == "pressure_front"
+    complete_staged_route(harness, current)
     state = campaign_state(harness)
     assert state["kind"] == "strategic_assault"
     assert state["anchorKey"] == "target:ARMY_2"
@@ -761,8 +779,8 @@ def test_ian_mass490_churn_stays_on_one_anchor_then_advances_forward_once() -> N
     harness.brain.tick = 250
     transition = campaign_intents(harness, reconcile(harness))
     assert len(transition) == 1
-    assert transition[0]["mode"] == "assault"
-    execute_intents(harness, transition, reconcile(harness))
+    assert transition[0]["mode"] == "route_probe"
+    complete_staged_route(harness, reconcile(harness))
     assert campaign_state(harness)["fullFieldOrders"] == 2
     assert campaign_state(harness)["anchorKey"] == "target:ARMY_2"
 
@@ -884,7 +902,7 @@ def setup_pressure_mode(mode: str) -> tuple[Any, Any, dict[str, Any]]:
     raise AssertionError(mode)
 
 
-@pytest.mark.parametrize("mode", ["transition", "recover", "resume", "assault"])
+@pytest.mark.parametrize("mode", ["recover", "resume"])
 @pytest.mark.parametrize("failure", ["clear", "aggressive"])
 def test_every_full_aggressive_mode_failure_is_atomic_and_immediately_retryable(
     mode: str,
@@ -963,7 +981,7 @@ def test_pressure_execution_rejects_missing_live_anchor_reachability_before_clea
     assert campaign_state(harness)["state"] == "active"
 
 
-def test_persistently_invalid_staged_transition_replans_to_next_valid_forward_cluster() -> None:
+def test_persistently_invalid_staged_route_blocks_cluster_and_replans_to_next_forward_cluster() -> None:
     harness, observation, intent = setup_pressure_mode("transition")
     anchor = next(
         harness.controller.markers.mass[index]
@@ -980,12 +998,12 @@ def test_persistently_invalid_staged_transition_replans_to_next_valid_forward_cl
     replanned = campaign_intents(harness, replanned_observation)
 
     assert len(replanned) == 1
-    assert replanned[0]["mode"] == "transition"
+    assert replanned[0]["mode"] == "route_probe"
     assert replanned[0]["clusterKey"] == "forward-far"
     assert replanned[0]["objectiveKey"] == "forward-far"
 
 
-def test_persistently_invalid_assault_path_clears_staging_until_path_is_valid_again() -> None:
+def test_persistently_invalid_assault_route_is_blocked_instead_of_immediately_retried() -> None:
     harness, observation, intent = setup_pressure_mode("assault")
     harness.controller.targetPath = False
     harness.observe()
@@ -1003,8 +1021,8 @@ def test_persistently_invalid_assault_path_clears_staging_until_path_is_valid_ag
     harness.controller.targetPath = True
     harness.brain.tick += 1
     restored = reconcile(harness)
-    retried = campaign_intents(harness, restored)
-    assert len(retried) == 1 and retried[0]["mode"] == "assault"
+    assert campaign_intents(harness, restored) == []
+    assert campaign_state(harness).get("routeBlockedCount", 0) >= 1
 
 
 def test_health_recall_without_mex_operation_resumes_same_pressure_anchor_once() -> None:
@@ -1035,9 +1053,18 @@ def test_health_recall_without_mex_operation_resumes_same_pressure_anchor_once()
 
 def test_committed_assault_recall_and_resume_needs_no_structure_operation() -> None:
     harness, ready, assault = setup_pressure_mode("assault")
-    execute_intents(harness, [assault], ready)
+    assert assault["mode"] == "route_probe"
+    complete_staged_route(harness, ready)
     state = campaign_state(harness)
     assert state["kind"] == "strategic_assault"
+    for token in state["fieldTokens"]:
+        harness.controller.unitRefs[token].options.position = lua_value(
+            harness.lua,
+            state["anchorPosition"],
+        )
+    harness.brain.tick += 1
+    reconcile(harness)
+    assert campaign_state(harness).get("routeRollback") is None
     harness.controller.pending = harness.lua.table_from({})
     acu = next(
         actor
@@ -1193,7 +1220,7 @@ def test_arrival_radius_is_inclusive_at_20_and_odd_live_field_uses_ceil_half(
     intents = campaign_intents(harness, current)
     assert bool(intents) is transition
     if transition:
-        assert intents[0]["mode"] == "assault"
+        assert intents[0]["mode"] == "route_probe"
 
 
 def test_zero_live_field_never_vacuously_transitions_or_recovers() -> None:
@@ -1391,9 +1418,10 @@ def test_stale_pending_reinforcement_cannot_freeze_campaign_progress(
         current = reconcile(harness)
         intents = campaign_intents(harness, current)
 
+    expected_mode = "route_probe" if next_mode in {"transition", "assault"} else next_mode
     assert len(intents) == 1
-    assert intents[0]["mode"] == next_mode
-    assert campaign_state(harness).get("pendingMode") == next_mode
+    assert intents[0]["mode"] == expected_mode
+    assert campaign_state(harness).get("pendingMode") == expected_mode
 
 
 @pytest.mark.parametrize("seed", range(3))
@@ -1492,10 +1520,10 @@ def test_audited_ian_five_marker_subset_advances_mass279_to_mass490_then_assault
     harness.brain.tick = 160
     first = reconcile(harness)
     transition = campaign_intents(harness, first)
-    assert transition[0]["mode"] == "transition"
+    assert transition[0]["mode"] == "route_probe"
     assert transition[0]["clusterKey"] == m490
     assert transition[0]["objectiveKey"] == m490
-    execute_intents(harness, transition, first)
+    complete_staged_route(harness, first)
     assert campaign_state(harness)["anchorKey"] == m490
     position_field_at(harness, combat, campaign_state(harness)["anchorPosition"])
     second_mexes = [
@@ -1508,4 +1536,4 @@ def test_audited_ian_five_marker_subset_advances_mass279_to_mass490_then_assault
     harness.brain.tick = 320
     last = reconcile(harness)
     assault = campaign_intents(harness, last)
-    assert len(assault) == 1 and assault[0]["mode"] == "assault"
+    assert len(assault) == 1 and assault[0]["mode"] == "route_probe"

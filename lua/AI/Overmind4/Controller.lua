@@ -87,6 +87,12 @@ local ESCALATION = {
     CAMPAIGN_ATTRITION_TICKS = 600,
     CAMPAIGN_ATTRITION_RATIO = 0.25,
     CAMPAIGN_ROLLBACK_COOLDOWN_TICKS = 600,
+    ROUTE_PROBE_MAX_ACTORS = 4,
+    ROUTE_PROBE_MAX_WAYPOINTS = 32,
+    ROUTE_PROBE_MAX_LENGTH = 100000,
+    ROUTE_PROBE_STUCK_TICKS = 300,
+    ROUTE_PROBE_RELEASE_TICKS = 600,
+    ROUTE_BLOCK_TICKS = 600,
     ECONOMY_LEDGER_SAMPLES = 30,
     ECONOMY_LEDGER_INTERVAL_TICKS = 10,
     ALLOCATOR_PLANNING_TICKS = 1200,
@@ -324,7 +330,7 @@ end
 local function IsCampaignPosition(position)
     local copy = CopyPosition(position)
     if not copy then return false end
-    for _, index in ipairs({ 1, 3 }) do
+    for _, index in ipairs({ 1, 2, 3 }) do
         local value = copy[index]
         if value ~= value or math.abs(value) > 10000000 then return false end
     end
@@ -2025,6 +2031,11 @@ local function MacroSnapshot(controller, units, economy)
         progress = controller.frontierOwned / controller.frontierTotal
     end
     local campaign = controller.fieldCampaign
+    local route = campaign
+        and type(campaign.routeAttempt) == 'table'
+        and campaign.routeAttempt
+        or nil
+    local routeRelease = route and route.state == 'releasing'
     local campaignState = campaign and campaign.state or 'idle'
     local campaignCluster = campaign and campaign.clusterKey or 'none'
     local campaignObjective = campaign and campaign.anchorKey or 'none'
@@ -2282,6 +2293,55 @@ local function MacroSnapshot(controller, units, economy)
             and (tonumber(campaign.modeSwitches) or 0)
             or 0,
         campaignEmergency = campaign and campaign.emergency == true or false,
+        campaignRouteState = route and tostring(route.state) or 'none',
+        campaignRouteSource = route
+            and tostring(route.sourceAnchorKey or 'none')
+            or 'none',
+        campaignRouteDestination = route
+            and tostring(route.candidateAnchorKey or 'none')
+            or 'none',
+        campaignRouteProbeUnits = route
+            and TableGetn(route.probeTokens or {})
+            or 0,
+        campaignRouteProbeQuorum = route
+            and (tonumber(route.probeQuorum) or 0)
+            or 0,
+        campaignRouteAtDestination = route
+            and (tonumber(route.atDestination) or 0)
+            or 0,
+        campaignRouteAge = route
+            and math.max(0, tick - (tonumber(route.stagedTick) or tick))
+            or -1,
+        campaignRouteLastProgressTick = route
+            and (tonumber(route.lastProgressTick) or -1)
+            or -1,
+        campaignRouteWaypointCount = route
+            and TableGetn(route.waypoints or {})
+            or 0,
+        campaignRouteLength = route
+            and (tonumber(route.routeLength) or -1)
+            or -1,
+        campaignRouteProgressAge = route
+            and math.max(0, tick - (tonumber(route.lastProgressTick) or tick))
+            or -1,
+        campaignRouteReleaseAge = route
+            and route.state == 'releasing'
+            and math.max(0, tick - (tonumber(route.releaseStartedTick) or tick))
+            or -1,
+        campaignRouteLastFailure = route
+            and tostring(route.lastFailure or 'none')
+            or 'none',
+        campaignRouteBlockedCount = campaign
+            and (tonumber(campaign.routeBlockedCount) or 0)
+            or 0,
+        campaignRouteEpoch = route and (tonumber(route.epoch) or -1) or -1,
+        campaignRouteKey = route and tostring(route.routeKey or 'none') or 'none',
+        campaignRouteFingerprint = route
+            and tostring(route.routeFingerprint or 'none')
+            or 'none',
+        campaignRouteSourceKey = route
+            and tostring(route.sourceAnchorKey or 'none')
+            or 'none',
         campaignIntentMode = campaign
             and controller.legacyFrontierRetirementPending ~= true
             and campaign.pendingMode
@@ -2291,23 +2351,40 @@ local function MacroSnapshot(controller, units, economy)
             and CopyArray(campaign.pendingTokens)
             or {},
         campaignIntentKind = campaign
-            and (campaign.desiredKind or campaign.kind)
+            and (route
+                and (routeRelease and route.source.kind or route.candidateKind)
+                or campaign.desiredKind
+                or campaign.kind)
             or 'none',
         campaignIntentEngineer = 'none',
         campaignIntentRollbackReason = campaign
             and (campaign.pendingRollbackReason or campaign.rollbackReason)
             or 'none',
         campaignIntentCluster = campaign
-            and (campaign.desiredClusterKey or campaign.clusterKey)
+            and (route
+                and (routeRelease
+                    and route.source.clusterKey
+                    or route.candidateClusterKey)
+                or campaign.desiredClusterKey
+                or campaign.clusterKey)
             or 'none',
         campaignIntentObjective = campaign
-            and (campaign.desiredAnchorKey or campaign.anchorKey)
+            and (route
+                and (routeRelease
+                    and route.source.anchorKey
+                    or route.candidateAnchorKey)
+                or campaign.desiredAnchorKey
+                or campaign.anchorKey)
             or 'none',
         campaignIntentPosition = campaign
-            and CopyPosition(campaign.pendingMode == 'rollback'
-                and (campaign.lastSecuredAnchorPosition or controller.basePosition)
-                or campaign.desiredAnchorPosition
-                or campaign.anchorPosition)
+            and CopyPosition(route
+                and (routeRelease
+                    and route.source.anchorPosition
+                    or route.candidateAnchorPosition)
+                or (campaign.pendingMode == 'rollback'
+                    and (campaign.lastSecuredAnchorPosition or controller.basePosition)
+                    or campaign.desiredAnchorPosition
+                    or campaign.anchorPosition))
             or nil,
         campaignSerial = campaign and campaign.serial or -1,
     }
@@ -4473,6 +4550,13 @@ local function StartFieldCampaign(controller, observation, operation)
         assaultEvents = 0,
         rollbackOrders = 0,
         rollbackReason = nil,
+        routeAttempt = nil,
+        routeRollback = nil,
+        routeBlocks = {},
+        routeBlockedCount = 0,
+        routeProbeOrders = 0,
+        routeBulkOrders = 0,
+        routeReleaseOrders = 0,
         lastSecuredAnchorKey = 'home',
         lastSecuredAnchorPosition = CopyPosition(controller.basePosition),
         attritionBaseline = TableGetn(field),
@@ -4773,6 +4857,855 @@ local function ClearDesiredCampaignObjective(campaign)
     campaign.desiredReplacesCampaign = nil
 end
 
+-- Route probing is table-scoped to preserve LuaPlus' chunk-local headroom.
+-- The campaign's committed area snapshot remains authoritative until a small,
+-- fixed probe cohort has physically proven this cached Land route.
+ESCALATION.RouteFinite = function(value, minimum, maximum)
+    return type(value) == 'number'
+        and value == value
+        and math.abs(value) <= 1000000000
+        and (minimum == nil or value >= minimum)
+        and (maximum == nil or value <= maximum)
+end
+
+ESCALATION.RouteSnapshot = function(campaign)
+    return {
+        kind = campaign.kind,
+        clusterKey = campaign.clusterKey,
+        memberKeys = CopyArray(campaign.memberKeys),
+        anchorKey = campaign.anchorKey,
+        anchorPosition = CopyPosition(campaign.anchorPosition),
+        anchorTargetDistanceSquared = campaign.anchorTargetDistanceSquared,
+        objectiveKey = campaign.objectiveKey,
+        objectivePosition = CopyPosition(campaign.objectivePosition),
+        objectiveReason = campaign.objectiveReason,
+        state = campaign.state,
+        heldSinceTick = campaign.heldSinceTick,
+        lastSecuredAnchorKey = campaign.lastSecuredAnchorKey,
+        lastSecuredAnchorPosition = CopyPosition(
+            campaign.lastSecuredAnchorPosition
+        ),
+    }
+end
+
+ESCALATION.RouteRestoreSnapshot = function(campaign, snapshot, tick)
+    if type(snapshot) ~= 'table'
+        or type(snapshot.kind) ~= 'string'
+        or type(snapshot.clusterKey) ~= 'string'
+        or type(snapshot.anchorKey) ~= 'string'
+        or not IsCampaignPosition(snapshot.anchorPosition)
+        or type(snapshot.memberKeys) ~= 'table'
+    then
+        return false
+    end
+    campaign.kind = snapshot.kind
+    campaign.clusterKey = snapshot.clusterKey
+    campaign.memberKeys = CopyArray(snapshot.memberKeys)
+    campaign.anchorKey = snapshot.anchorKey
+    campaign.anchorPosition = CopyPosition(snapshot.anchorPosition)
+    campaign.anchorTargetDistanceSquared = snapshot.anchorTargetDistanceSquared
+    campaign.objectiveKey = snapshot.objectiveKey or snapshot.anchorKey
+    campaign.objectivePosition = CopyPosition(
+        snapshot.objectivePosition or snapshot.anchorPosition
+    )
+    campaign.objectiveReason = snapshot.objectiveReason or snapshot.kind
+    campaign.state = snapshot.state == 'holding' and 'holding' or 'active'
+    campaign.heldSinceTick = snapshot.heldSinceTick
+    campaign.lastSecuredAnchorKey = snapshot.lastSecuredAnchorKey
+    campaign.lastSecuredAnchorPosition = CopyPosition(
+        snapshot.lastSecuredAnchorPosition
+    )
+    campaign.lastProgressTick = tick
+    campaign.bestDistance = 1000000000000
+    campaign.bestAtAnchor = 0
+    campaign.progressCohortSize = -1
+    campaign.recoveryWindows = 0
+    campaign.lastRecoveryAttemptTick = tick - FIELD_CAMPAIGN_STUCK_TICKS
+    return true
+end
+
+ESCALATION.RouteRestoreCommittedSource = function(controller, campaign, reason)
+    local rollback = campaign and campaign.routeRollback or nil
+    if type(rollback) ~= 'table' and campaign then
+        local release = campaign.routeAttempt
+        if type(release) == 'table'
+            and release.state == 'releasing'
+            and release.restoreOnRelease == true
+            and type(release.source) == 'table'
+        then
+            rollback = {
+                routeKey = release.routeKey,
+                source = release.source,
+            }
+        end
+    end
+    if type(rollback) ~= 'table' then
+        if campaign then campaign.routeRollback = nil end
+        return false
+    end
+    local restored = ESCALATION.RouteRestoreSnapshot(
+        campaign,
+        rollback.source,
+        CurrentTick(controller)
+    )
+    campaign.routeRollback = nil
+    if restored then
+        Emit(controller, 'campaign_route_restored', {
+            route = rollback.routeKey or 'none',
+            reason = tostring(reason or 'cancelled'),
+            source = campaign.anchorKey or 'none',
+        })
+    end
+    return restored
+end
+
+ESCALATION.RouteConfirmCommittedArrival = function(controller, campaign)
+    local rollback = campaign and campaign.routeRollback or nil
+    local quorum = campaign and tonumber(campaign.arrivalQuorum) or 0
+    local arrived = campaign and tonumber(campaign.fieldAtAnchor) or 0
+    if type(rollback) ~= 'table' or quorum <= 0 or arrived < quorum then
+        return false
+    end
+    campaign.routeRollback = nil
+    Emit(controller, 'campaign_route_arrived', {
+        route = rollback.routeKey or 'none',
+        epoch = tonumber(rollback.epoch) or -1,
+        fingerprint = rollback.routeFingerprint or 'none',
+        arrived = arrived,
+        quorum = quorum,
+    })
+    return true
+end
+
+ESCALATION.RouteBlockKey = function(sourceAnchorKey, kind, destinationKey)
+    if type(sourceAnchorKey) ~= 'string'
+        or type(kind) ~= 'string'
+        or type(destinationKey) ~= 'string'
+    then
+        return nil
+    end
+    return sourceAnchorKey .. '>' .. kind .. ':' .. destinationKey
+end
+
+ESCALATION.RouteBlockActive = function(campaign, key, tick)
+    if type(campaign.routeBlocks) ~= 'table' or type(key) ~= 'string' then
+        return false
+    end
+    local block = campaign.routeBlocks[key]
+    if type(block) ~= 'table' then return false end
+    local untilTick = tonumber(block.untilTick)
+    if untilTick == nil or tick >= untilTick then
+        campaign.routeBlocks[key] = nil
+        return false
+    end
+    return true
+end
+
+ESCALATION.RouteBlockedCount = function(campaign, tick)
+    local count = 0
+    if type(campaign.routeBlocks) ~= 'table' then return count end
+    for key, _ in pairs(campaign.routeBlocks) do
+        if ESCALATION.RouteBlockActive(campaign, key, tick) then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+ESCALATION.RouteAddBlock = function(controller, campaign, route, reason)
+    if type(route) ~= 'table' or type(route.blockKey) ~= 'string' then return end
+    local tick = CurrentTick(controller)
+    if type(campaign.routeBlocks) ~= 'table' then campaign.routeBlocks = {} end
+    campaign.routeBlocks[route.blockKey] = {
+        untilTick = tick + ESCALATION.ROUTE_BLOCK_TICKS,
+        reason = tostring(reason or 'route_failed'),
+    }
+    campaign.routeBlockedCount = ESCALATION.RouteBlockedCount(campaign, tick)
+    Emit(controller, 'campaign_route_blocked', {
+        route = route.routeKey or 'none',
+        epoch = tonumber(route.epoch) or -1,
+        fingerprint = route.routeFingerprint or 'none',
+        reason = tostring(reason or 'route_failed'),
+        age = math.max(0, tick - (tonumber(route.stagedTick) or tick)),
+        blocked = campaign.routeBlockedCount,
+    })
+end
+
+ESCALATION.RouteBoundedInsert = function(values, value, maximum)
+    local inserted = false
+    for index = 1, TableGetn(values) do
+        if tostring(value.token) < tostring(values[index].token) then
+            table.insert(values, index, value)
+            inserted = true
+            break
+        end
+    end
+    if not inserted then TableInsert(values, value) end
+    if TableGetn(values) > maximum then table.remove(values) end
+end
+
+ESCALATION.RouteProbeRecords = function(controller, observation, campaign)
+    local selected = {}
+    local selectedSet = {}
+    local bestAa = nil
+    for _, record in ipairs(observation.units or {}) do
+        if CampaignFieldContains(campaign, record.token)
+            and COMBAT_ROLES[record.role]
+            and record.complete == true
+            and Distance(record.position, campaign.anchorPosition)
+                <= FIELD_CAMPAIGN_ANCHOR_RADIUS
+            and LiveOwnedActor(controller, record.token, record, record.role)
+        then
+            ESCALATION.RouteBoundedInsert(
+                selected,
+                record,
+                ESCALATION.ROUTE_PROBE_MAX_ACTORS
+            )
+            if ESCALATION.antiAirRoles[record.role]
+                and (not bestAa
+                    or tostring(record.token) < tostring(bestAa.token))
+            then
+                bestAa = record
+            end
+        end
+    end
+    for _, record in ipairs(selected) do selectedSet[record.token] = true end
+    if bestAa and selectedSet[bestAa.token] ~= true then
+        if TableGetn(selected) >= ESCALATION.ROUTE_PROBE_MAX_ACTORS then
+            selectedSet[selected[TableGetn(selected)].token] = nil
+            table.remove(selected)
+        end
+        ESCALATION.RouteBoundedInsert(
+            selected,
+            bestAa,
+            ESCALATION.ROUTE_PROBE_MAX_ACTORS
+        )
+    end
+    local tokens = {}
+    for _, record in ipairs(selected) do TableInsert(tokens, record.token) end
+    table.sort(tokens)
+    return tokens
+end
+
+ESCALATION.RouteStrategicTargetValid = function(controller)
+    local graph = BuildPressureGraph(controller)
+    return graph ~= nil
+        and graph.fixedSpawns == true
+        and ScenarioUsesFixedSpawns()
+        and tonumber(controller.occupiedSpawns) == 2
+        and graph.targetPath == true
+        and controller.targetPath == true
+        and IsCampaignPosition(graph.targetPosition)
+        and IsCampaignPosition(controller.targetPosition)
+        and DistanceSquared(graph.targetPosition, controller.targetPosition) <= 0.01
+        and tostring(controller.targetName or 'none') == graph.targetName
+end
+
+ESCALATION.RouteCandidateLive = function(controller, route)
+    if type(route) ~= 'table'
+        or not IsCampaignPosition(route.candidateAnchorPosition)
+    then
+        return false
+    end
+    if route.candidateKind == 'strategic_assault' then
+        local graph = BuildPressureGraph(controller)
+        return ESCALATION.RouteStrategicTargetValid(controller)
+            and graph ~= nil
+            and route.candidateAnchorKey == 'target:' .. graph.targetName
+            and route.candidateClusterKey == 'strategic_assault'
+            and DistanceSquared(
+                route.candidateAnchorPosition,
+                graph.targetPosition
+            ) <= 0.01
+    end
+    if route.candidateKind ~= 'pressure_front' then return false end
+    local graph = BuildPressureGraph(controller)
+    if not graph then return false end
+    for _, cluster in ipairs(graph.clusters or {}) do
+        if cluster.key == route.candidateClusterKey
+            and cluster.anchorKey == route.candidateAnchorKey
+            and SameArray(cluster.memberKeys, route.candidateMemberKeys)
+            and DistanceSquared(
+                cluster.anchorPosition,
+                route.candidateAnchorPosition
+            ) <= 0.01
+            and PressureAnchorLive(
+                controller,
+                cluster.anchorKey,
+                cluster.anchorPosition
+            )
+        then
+            return true
+        end
+    end
+    return false
+end
+
+ESCALATION.RouteSourceAuthoritative = function(campaign, route)
+    local source = type(route) == 'table' and route.source or nil
+    return type(source) == 'table'
+        and campaign.kind == source.kind
+        and campaign.clusterKey == source.clusterKey
+        and campaign.anchorKey == source.anchorKey
+        and SameArray(campaign.memberKeys, source.memberKeys)
+        and DistanceSquared(campaign.anchorPosition, source.anchorPosition) <= 0.01
+end
+
+ESCALATION.RouteNormalizePath = function(sourcePosition, destination, path, count, length)
+    if type(path) ~= 'table'
+        or not ESCALATION.RouteFinite(count, 0, ESCALATION.ROUTE_PROBE_MAX_WAYPOINTS)
+        or count ~= math.floor(count)
+        or not ESCALATION.RouteFinite(length, 0, ESCALATION.ROUTE_PROBE_MAX_LENGTH)
+    then
+        return nil
+    end
+    local normalized = {}
+    if count == 0 then
+        local terminal = CopyPosition(path[0])
+        if not IsCampaignPosition(terminal) then return nil end
+        TableInsert(normalized, terminal)
+    else
+        for index = 1, count do
+            local waypoint = CopyPosition(path[index])
+            if not IsCampaignPosition(waypoint) then return nil end
+            TableInsert(normalized, waypoint)
+        end
+    end
+    if TableGetn(normalized) == 0
+        or DistanceSquared(normalized[TableGetn(normalized)], destination) > 0.01
+    then
+        return nil
+    end
+    local previous = sourcePosition
+    local actualLength = 0
+    for _, waypoint in ipairs(normalized) do
+        local segment = Distance(previous, waypoint)
+        if not ESCALATION.RouteFinite(segment, 0, ESCALATION.ROUTE_PROBE_MAX_LENGTH)
+        then
+            return nil
+        end
+        actualLength = actualLength + segment
+        previous = waypoint
+    end
+    if not ESCALATION.RouteFinite(
+        actualLength,
+        0,
+        ESCALATION.ROUTE_PROBE_MAX_LENGTH
+    ) then
+        return nil
+    end
+    return normalized, actualLength
+end
+
+ESCALATION.RouteFingerprint = function(route)
+    local source = type(route) == 'table' and route.source or nil
+    local release = type(route) == 'table' and route.state == 'releasing'
+    if type(source) ~= 'table'
+        or type(source.kind) ~= 'string'
+        or type(source.clusterKey) ~= 'string'
+        or type(source.anchorKey) ~= 'string'
+        or not DenseTokenArray(source.memberKeys)
+        or not ArrayIsSorted(source.memberKeys)
+        or not IsCampaignPosition(source.anchorPosition)
+        or not ESCALATION.RouteFinite(
+            source.anchorTargetDistanceSquared,
+            0,
+            1000000000000
+        )
+        or type(source.objectiveKey) ~= 'string'
+        or not IsCampaignPosition(source.objectivePosition)
+        or type(source.objectiveReason) ~= 'string'
+        or (source.state ~= 'active' and source.state ~= 'holding')
+        or (source.heldSinceTick ~= nil
+            and not ESCALATION.RouteFinite(
+                source.heldSinceTick,
+                0,
+                1000000000
+            ))
+        or type(source.lastSecuredAnchorKey) ~= 'string'
+        or not IsCampaignPosition(source.lastSecuredAnchorPosition)
+        or type(route.sourceAnchorKey) ~= 'string'
+        or route.sourceAnchorKey ~= source.anchorKey
+        or not IsCampaignPosition(route.sourcePosition)
+        or type(route.candidateKind) ~= 'string'
+        or type(route.candidateClusterKey) ~= 'string'
+        or type(route.candidateAnchorKey) ~= 'string'
+        or not DenseTokenArray(route.candidateMemberKeys)
+        or not ArrayIsSorted(route.candidateMemberKeys)
+        or not IsCampaignPosition(route.candidateAnchorPosition)
+        or not IsCampaignPosition(route.destination)
+        or not ESCALATION.RouteFinite(route.epoch, 1, 1000000000)
+        or route.epoch ~= math.floor(route.epoch)
+        or type(route.routeKey) ~= 'string'
+        or type(route.blockKey) ~= 'string'
+        or route.blockKey ~= ESCALATION.RouteBlockKey(
+            route.sourceAnchorKey,
+            route.candidateKind,
+            route.candidateClusterKey
+        )
+        or route.routeKey ~= route.blockKey .. ':' .. tostring(route.epoch)
+    then
+        return nil
+    end
+    local probeSet = BuildTokenSet(route.probeTokens)
+    if not probeSet
+        or not ArrayIsSorted(route.probeTokens)
+        or TableGetn(route.probeTokens) > ESCALATION.ROUTE_PROBE_MAX_ACTORS
+    then
+        return nil
+    end
+    local cleanupSet = nil
+    if route.cleanupTokens ~= nil then
+        cleanupSet = BuildTokenSet(route.cleanupTokens)
+        if not cleanupSet or not ArrayIsSorted(route.cleanupTokens) then
+            return nil
+        end
+        if not release then
+            for _, token in ipairs(route.probeTokens) do
+                if cleanupSet[token] ~= true then return nil end
+            end
+        end
+    end
+    if release then
+        if not BuildTokenSet(route.releaseTokens)
+            or not ArrayIsSorted(route.releaseTokens)
+            or cleanupSet == nil
+            or not SameArray(route.releaseTokens, route.cleanupTokens)
+            or not ESCALATION.RouteFinite(route.releaseDeadlineTick, 0, 1000000000)
+            or type(route.releaseReason) ~= 'string'
+        then
+            return nil
+        end
+    else
+        if route.releaseTokens ~= nil
+            or TableGetn(route.probeTokens) == 0
+            or route.probeQuorum ~= math.max(
+                1,
+                math.ceil(TableGetn(route.probeTokens) / 2)
+            )
+            or type(route.waypoints) ~= 'table'
+            or CountArray(route.waypoints) ~= TableGetn(route.waypoints)
+            or not ESCALATION.RouteFinite(
+                route.routeLength,
+                0,
+                ESCALATION.ROUTE_PROBE_MAX_LENGTH
+            )
+        then
+            return nil
+        end
+        local _, actualLength = ESCALATION.RouteNormalizePath(
+            route.sourcePosition,
+            route.destination,
+            route.waypoints,
+            TableGetn(route.waypoints),
+            route.routeLength
+        )
+        if not actualLength or math.abs(actualLength - route.routeLength) > 0.001 then
+            return nil
+        end
+    end
+
+    local hash = 216613626
+    local modulus = 2147483647
+    local function Mix(value)
+        local encoded = tostring(value)
+        for index = 1, string.len(encoded) do
+            hash = hash * 131 + string.byte(encoded, index)
+            hash = hash - math.floor(hash / modulus) * modulus
+        end
+        hash = hash * 131 + 124
+        hash = hash - math.floor(hash / modulus) * modulus
+    end
+    local function MixPosition(position)
+        Mix(position[1])
+        Mix(position[2])
+        Mix(position[3])
+    end
+    Mix(release and 'release' or 'route')
+    Mix(route.epoch)
+    Mix(route.routeKey)
+    Mix(route.blockKey)
+    Mix(source.kind)
+    Mix(source.clusterKey)
+    Mix(source.anchorKey)
+    MixPosition(source.anchorPosition)
+    Mix(source.anchorTargetDistanceSquared)
+    for _, key in ipairs(source.memberKeys) do Mix(key) end
+    Mix(source.objectiveKey)
+    MixPosition(source.objectivePosition)
+    Mix(source.objectiveReason)
+    Mix(source.state)
+    Mix(source.heldSinceTick == nil and 'none' or source.heldSinceTick)
+    Mix(source.lastSecuredAnchorKey)
+    MixPosition(source.lastSecuredAnchorPosition)
+    MixPosition(route.sourcePosition)
+    Mix(route.candidateKind)
+    Mix(route.candidateClusterKey)
+    Mix(route.candidateAnchorKey)
+    MixPosition(route.candidateAnchorPosition)
+    Mix(route.candidateAnchorTargetDistanceSquared)
+    for _, key in ipairs(route.candidateMemberKeys) do Mix(key) end
+    MixPosition(route.destination)
+    for _, token in ipairs(route.probeTokens) do Mix(token) end
+    Mix(cleanupSet and 'cleanup' or 'none')
+    if cleanupSet then
+        for _, token in ipairs(route.cleanupTokens) do Mix(token) end
+    end
+    if release then
+        Mix(route.releaseDeadlineTick)
+        Mix(route.releaseReason)
+        Mix(route.restoreOnRelease == true and 'restore' or 'retain')
+    else
+        Mix(route.probeQuorum)
+        Mix(route.routeLength)
+        for _, waypoint in ipairs(route.waypoints) do MixPosition(waypoint) end
+    end
+    return tostring(hash)
+end
+
+ESCALATION.RoutePlan = function(controller, campaign, observation, candidate)
+    local probeTokens = ESCALATION.RouteProbeRecords(
+        controller,
+        observation,
+        campaign
+    )
+    if TableGetn(probeTokens) == 0 then return nil, 'no_probe_actor' end
+    local sourcePosition = TerrainPosition(campaign.anchorPosition)
+    local destination = TerrainPosition(candidate.anchorPosition)
+    if not IsCampaignPosition(sourcePosition)
+        or not IsCampaignPosition(destination)
+    then
+        return nil, 'invalid_endpoint'
+    end
+    local sourceLabelOk, sourceLabel = pcall(function()
+        return NavUtils.GetLabel('Land', sourcePosition)
+    end)
+    local destinationLabelOk, destinationLabel = pcall(function()
+        return NavUtils.GetLabel('Land', destination)
+    end)
+    if not sourceLabelOk
+        or not destinationLabelOk
+        or not ESCALATION.RouteFinite(sourceLabel, 1, 1000000000)
+        or not ESCALATION.RouteFinite(destinationLabel, 1, 1000000000)
+        or sourceLabel ~= destinationLabel
+    then
+        return nil, 'invalid_label'
+    end
+    local canPathOk, canPath = pcall(function()
+        return NavUtils.CanPathTo('Land', sourcePosition, destination)
+    end)
+    if not canPathOk or canPath ~= true then return nil, 'unpathable' end
+    local pathOk, path, count, length = pcall(function()
+        return NavUtils.PathTo('Land', sourcePosition, destination)
+    end)
+    if not pathOk then return nil, 'path_error' end
+    local waypoints, actualLength = ESCALATION.RouteNormalizePath(
+        sourcePosition,
+        destination,
+        path,
+        count,
+        length
+    )
+    if not waypoints then return nil, 'invalid_path' end
+    local source = ESCALATION.RouteSnapshot(campaign)
+    local blockKey = ESCALATION.RouteBlockKey(
+        source.anchorKey,
+        candidate.kind,
+        candidate.clusterKey
+    )
+    if not blockKey then return nil, 'invalid_key' end
+    controller.routeAttemptSerial = (tonumber(controller.routeAttemptSerial) or 0) + 1
+    local tick = CurrentTick(controller)
+    local route = {
+        state = 'staged',
+        epoch = controller.routeAttemptSerial,
+        routeKey = blockKey .. ':' .. tostring(controller.routeAttemptSerial),
+        blockKey = blockKey,
+        source = source,
+        sourceAnchorKey = source.anchorKey,
+        sourcePosition = sourcePosition,
+        candidateKind = candidate.kind,
+        candidateClusterKey = candidate.clusterKey,
+        candidateMemberKeys = CopyArray(candidate.memberKeys or {}),
+        candidateAnchorKey = candidate.anchorKey,
+        candidateAnchorPosition = CopyPosition(candidate.anchorPosition),
+        candidateAnchorTargetDistanceSquared = candidate.anchorTargetDistanceSquared,
+        destination = destination,
+        waypoints = waypoints,
+        routeLength = actualLength,
+        probeTokens = probeTokens,
+        probeQuorum = math.max(1, math.ceil(TableGetn(probeTokens) / 2)),
+        atDestination = 0,
+        stagedTick = tick,
+        lastProgressTick = tick,
+        bestDistance = 1000000000000,
+        releaseDeadlineTick = tick + ESCALATION.ROUTE_PROBE_RELEASE_TICKS,
+    }
+    route.routeFingerprint = ESCALATION.RouteFingerprint(route)
+    if not route.routeFingerprint then return nil, 'invalid_route' end
+    return route, nil
+end
+
+ESCALATION.RouteStage = function(controller, observation, campaign, candidate)
+    local blockKey = ESCALATION.RouteBlockKey(
+        campaign.anchorKey,
+        candidate.kind,
+        candidate.clusterKey
+    )
+    local tick = CurrentTick(controller)
+    if not blockKey
+        or ESCALATION.RouteBlockActive(campaign, blockKey, tick)
+    then
+        return false
+    end
+    local route, reason = ESCALATION.RoutePlan(
+        controller,
+        campaign,
+        observation,
+        candidate
+    )
+    if not route then
+        if reason ~= 'no_probe_actor' then
+            ESCALATION.RouteAddBlock(controller, campaign, {
+                blockKey = blockKey,
+                routeKey = blockKey,
+            }, reason)
+        end
+        return false
+    end
+    controller.routeCleanupOwnership = nil
+    campaign.routeAttempt = route
+    if route.candidateKind == 'pressure_front' then
+        campaign.desiredKind = route.candidateKind
+        campaign.desiredClusterKey = route.candidateClusterKey
+        campaign.desiredMemberKeys = CopyArray(route.candidateMemberKeys)
+        campaign.desiredAnchorKey = route.candidateAnchorKey
+        campaign.desiredAnchorPosition = CopyPosition(route.candidateAnchorPosition)
+        campaign.desiredAnchorTargetDistanceSquared =
+            route.candidateAnchorTargetDistanceSquared
+    else
+        campaign.desiredKind = 'strategic_assault'
+        campaign.desiredClusterKey = 'strategic_assault'
+        campaign.desiredMemberKeys = {}
+        campaign.desiredAnchorKey = route.candidateAnchorKey
+        campaign.desiredAnchorPosition = CopyPosition(route.candidateAnchorPosition)
+        campaign.desiredAnchorTargetDistanceSquared = 0
+    end
+    CampaignSetPending(campaign, 'route_probe', route.probeTokens)
+    Emit(controller, 'campaign_route_staged', {
+        route = route.routeKey,
+        epoch = route.epoch,
+        fingerprint = route.routeFingerprint,
+        source = route.sourceAnchorKey,
+        destination = route.candidateAnchorKey,
+        waypoints = TableGetn(route.waypoints or {}),
+        route_length = tonumber(route.routeLength) or -1,
+        units = TableGetn(route.probeTokens),
+        quorum = route.probeQuorum,
+    })
+    return true
+end
+
+ESCALATION.RouteLiveRecords = function(controller, observation, tokens)
+    local byToken = RecordByToken(observation.units)
+    local live = {}
+    for _, token in ipairs(tokens or {}) do
+        local record = byToken[token]
+        if record
+            and COMBAT_ROLES[record.role]
+            and record.complete == true
+            and LiveOwnedActor(controller, token, record, record.role)
+        then
+            live[token] = record
+        end
+    end
+    return live
+end
+
+ESCALATION.RouteProbeMetrics = function(controller, observation, route)
+    local live = ESCALATION.RouteLiveRecords(
+        controller,
+        observation,
+        route.probeTokens
+    )
+    local distances = {}
+    local atDestination = 0
+    local liveCount = 0
+    for _, token in ipairs(route.probeTokens or {}) do
+        local record = live[token]
+        if record then
+            local actor = LiveOwnedActor(
+                controller,
+                token,
+                record,
+                record.role
+            )
+            local position = actor
+                and CopyPosition(SafeCall(nil, actor.GetPosition, actor))
+                or nil
+            if position then
+                liveCount = liveCount + 1
+                local distance = Distance(position, route.destination)
+                TableInsert(distances, distance)
+                if distance <= FIELD_CAMPAIGN_ANCHOR_RADIUS then
+                    atDestination = atDestination + 1
+                end
+            end
+        end
+    end
+    table.sort(distances)
+    local distance = TableGetn(distances) >= route.probeQuorum
+        and distances[route.probeQuorum]
+        or 1000000000000
+    return live, liveCount, atDestination, distance
+end
+
+ESCALATION.RouteClear = function(campaign)
+    campaign.routeAttempt = nil
+    campaign.pendingMode = nil
+    campaign.pendingTokens = {}
+    ClearDesiredCampaignObjective(campaign)
+end
+
+ESCALATION.RouteBeginRelease = function(
+    controller,
+    campaign,
+    route,
+    reason,
+    shouldBlock
+)
+    local tick = CurrentTick(controller)
+    local wasReleasing = route.state == 'releasing'
+    local ownership = controller.routeCleanupOwnership
+    local routeOwnershipValid = false
+    if not wasReleasing
+        and DenseTokenArray(route.cleanupTokens)
+        and ArrayIsSorted(route.cleanupTokens)
+    then
+        local candidate = {}
+        for key, value in pairs(route) do candidate[key] = value end
+        candidate.releaseTokens = nil
+        routeOwnershipValid = ESCALATION.RouteFingerprint(candidate)
+            == route.routeFingerprint
+    end
+    local recoveryOwnershipValid = type(ownership) == 'table'
+        and ownership.routeKey == route.routeKey
+        and ownership.epoch == route.epoch
+        and DenseTokenArray(ownership.tokens)
+        and ArrayIsSorted(ownership.tokens)
+        and ownership.routeFingerprint == route.routeFingerprint
+    if recoveryOwnershipValid and not wasReleasing then
+        local candidate = {}
+        for key, value in pairs(route) do candidate[key] = value end
+        candidate.cleanupTokens = CopyArray(ownership.tokens)
+        candidate.releaseTokens = nil
+        recoveryOwnershipValid = ESCALATION.RouteFingerprint(candidate)
+            == route.routeFingerprint
+    end
+    local releaseTokens = nil
+    if routeOwnershipValid then
+        releaseTokens = CopyArray(route.cleanupTokens)
+    elseif recoveryOwnershipValid then
+        releaseTokens = CopyArray(ownership.tokens)
+    elseif wasReleasing
+        and type(route.releaseTokens) == 'table'
+        and DenseTokenArray(route.releaseTokens)
+        and ArrayIsSorted(route.releaseTokens)
+    then
+        releaseTokens = CopyArray(route.releaseTokens)
+    else
+        releaseTokens = CopyArray(route.probeTokens)
+    end
+    route.state = 'releasing'
+    route.bulkTokens = nil
+    route.releaseReason = tostring(reason or 'route_failed')
+    route.releaseStartedTick = route.releaseStartedTick or tick
+    route.releaseDeadlineTick = math.min(
+        tonumber(route.releaseDeadlineTick)
+            or (tick + ESCALATION.ROUTE_PROBE_STUCK_TICKS),
+        tick + ESCALATION.ROUTE_PROBE_STUCK_TICKS
+    )
+    route.blockOnRelease = shouldBlock == true
+        and not routeOwnershipValid
+        and not recoveryOwnershipValid
+    if route.blockOnRelease then
+        ESCALATION.RouteAddBlock(controller, campaign, route, route.releaseReason)
+    end
+    route.cleanupTokens = CopyArray(releaseTokens)
+    route.releaseTokens = releaseTokens
+    route.routeFingerprint = ESCALATION.RouteFingerprint(route) or 'invalid'
+    campaign.routeAttempt = route
+    if TableGetn(releaseTokens) > 0 then
+        CampaignSetPending(campaign, 'route_release', releaseTokens)
+    else
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+    end
+    Emit(controller, 'campaign_route_releasing', {
+        route = route.routeKey or 'none',
+        epoch = tonumber(route.epoch) or -1,
+        fingerprint = route.routeFingerprint or 'none',
+        reason = route.releaseReason,
+        age = math.max(0, tick - (tonumber(route.stagedTick) or tick)),
+        release_age = math.max(
+            0,
+            tick - (tonumber(route.releaseStartedTick) or tick)
+        ),
+        units = TableGetn(releaseTokens),
+    })
+end
+
+ESCALATION.RouteFinalizeRelease = function(controller, campaign, route, reason)
+    local tick = CurrentTick(controller)
+    if route.restoreOnRelease == true then
+        ESCALATION.RouteRestoreSnapshot(campaign, route.source, tick)
+    end
+    campaign.routeReleaseOrders = (tonumber(campaign.routeReleaseOrders) or 0) + 1
+    local ownership = controller.routeCleanupOwnership
+    if type(ownership) == 'table'
+        and ownership.routeKey == route.routeKey
+        and ownership.epoch == route.epoch
+    then
+        controller.routeCleanupOwnership = nil
+    end
+    ESCALATION.RouteClear(campaign)
+    Emit(controller, 'campaign_route_released', {
+        route = route.routeKey or 'none',
+        epoch = tonumber(route.epoch) or -1,
+        fingerprint = route.routeFingerprint or 'none',
+        reason = tostring(reason or route.releaseReason or 'released'),
+        age = math.max(0, tick - (tonumber(route.stagedTick) or tick)),
+        release_age = math.max(
+            0,
+            tick - (tonumber(route.releaseStartedTick) or tick)
+        ),
+    })
+end
+
+ESCALATION.RouteCandidateFromCluster = function(cluster)
+    return {
+        kind = 'pressure_front',
+        clusterKey = cluster.key,
+        memberKeys = CopyArray(cluster.memberKeys),
+        anchorKey = cluster.anchorKey,
+        anchorPosition = CopyPosition(cluster.anchorPosition),
+        anchorTargetDistanceSquared = cluster.anchorTargetDistanceSquared,
+    }
+end
+
+ESCALATION.RouteAssaultCandidate = function(controller)
+    if not ESCALATION.RouteStrategicTargetValid(controller) then return nil end
+    local graph = BuildPressureGraph(controller)
+    return {
+        kind = 'strategic_assault',
+        clusterKey = 'strategic_assault',
+        memberKeys = {},
+        anchorKey = 'target:' .. graph.targetName,
+        anchorPosition = CopyPosition(graph.targetPosition),
+        anchorTargetDistanceSquared = 0,
+    }
+end
+
 local function QuickSelect(values, wanted)
     local left = 1
     local right = TableGetn(values)
@@ -4864,8 +5797,15 @@ local function NextPressureCluster(controller, campaign)
     end
     local best = nil
     local bestDistance = 1000000000000
+    local tick = CurrentTick(controller)
     for _, cluster in ipairs(graph.clusters or {}) do
-        if not PressureClusterIntersects(cluster, currentMembers)
+        local blockKey = ESCALATION.RouteBlockKey(
+            campaign.anchorKey,
+            'pressure_front',
+            cluster.key
+        )
+        if not ESCALATION.RouteBlockActive(campaign, blockKey, tick)
+            and not PressureClusterIntersects(cluster, currentMembers)
             and cluster.anchorTargetDistanceSquared
                 < (tonumber(campaign.anchorTargetDistanceSquared)
                     or 1000000000000)
@@ -4936,6 +5876,317 @@ local function StageStrategicAssault(controller, campaign)
     campaign.desiredObjectivePosition = CopyPosition(graph.targetPosition)
     campaign.desiredObjectiveReason = 'strategic_assault'
     return true
+end
+
+ESCALATION.RouteBulkTokens = function(controller, observation, campaign, route)
+    local probeSet = BuildTokenSet(route.probeTokens) or {}
+    local tokens = {}
+    for _, record in ipairs(observation.units or {}) do
+        if CampaignFieldContains(campaign, record.token)
+            and probeSet[record.token] ~= true
+            and COMBAT_ROLES[record.role]
+            and record.complete == true
+            and LiveOwnedActor(controller, record.token, record, record.role)
+        then
+            TableInsert(tokens, record.token)
+        end
+    end
+    table.sort(tokens)
+    return tokens
+end
+
+ESCALATION.RouteUpdate = function(controller, observation, campaign, readinessReady)
+    local route = campaign.routeAttempt
+    local tick = CurrentTick(controller)
+    campaign.routeBlockedCount = ESCALATION.RouteBlockedCount(campaign, tick)
+    if route ~= nil and type(route) ~= 'table' then
+        ESCALATION.RouteClear(campaign)
+        return true
+    end
+    if type(route) == 'table' then
+        local fingerprint = ESCALATION.RouteFingerprint(route)
+        if fingerprint == nil or fingerprint ~= route.routeFingerprint then
+            if route.state == 'staged' then
+                ESCALATION.RouteAddBlock(
+                    controller,
+                    campaign,
+                    route,
+                    'route_corrupt'
+                )
+                ESCALATION.RouteClear(campaign)
+                return false
+            elseif route.state == 'probing' or route.state == 'proven' then
+                ESCALATION.RouteBeginRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'route_corrupt',
+                    true
+                )
+                return true
+            elseif route.state == 'releasing' then
+                campaign.pendingMode = nil
+                campaign.pendingTokens = {}
+                if tick >= (tonumber(route.releaseDeadlineTick) or tick) then
+                    ESCALATION.RouteFinalizeRelease(
+                        controller,
+                        campaign,
+                        route,
+                        'release_deadline'
+                    )
+                end
+                return true
+            end
+            ESCALATION.RouteClear(campaign)
+            return true
+        end
+        if readinessReady ~= true and route.state ~= 'releasing' then
+            if route.state == 'staged' then
+                ESCALATION.RouteClear(campaign)
+            else
+                ESCALATION.RouteBeginRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'readiness_lost',
+                    false
+                )
+            end
+            return true
+        end
+        if route.state ~= 'releasing'
+            and (not ESCALATION.RouteSourceAuthoritative(campaign, route)
+                or not ESCALATION.RouteCandidateLive(controller, route))
+        then
+            if route.state == 'staged' then
+                ESCALATION.RouteAddBlock(
+                    controller,
+                    campaign,
+                    route,
+                    'objective_invalid'
+                )
+                ESCALATION.RouteClear(campaign)
+                -- No probe actor was ordered, so the old snapshot needs no
+                -- cleanup.  Let this reconcile choose a different unblocked
+                -- forward component instead of burning an extra planner tick.
+                return false
+            else
+                ESCALATION.RouteBeginRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'objective_invalid',
+                    true
+                )
+            end
+            return true
+        end
+        if route.state == 'staged' then
+            local dispatchStart = tonumber(route.dispatchFailureTick)
+                or tonumber(route.stagedTick)
+                or tick
+            if tick - dispatchStart >= ESCALATION.ROUTE_PROBE_STUCK_TICKS then
+                ESCALATION.RouteBeginRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'probe_dispatch_stuck',
+                    false
+                )
+                return true
+            end
+            local live = ESCALATION.RouteLiveRecords(
+                controller,
+                observation,
+                route.probeTokens
+            )
+            for _, token in ipairs(route.probeTokens or {}) do
+                local record = live[token]
+                if not record
+                    or not CampaignFieldContains(campaign, token)
+                    or Distance(record.position, route.source.anchorPosition)
+                        > FIELD_CAMPAIGN_ANCHOR_RADIUS
+                then
+                    ESCALATION.RouteClear(campaign)
+                    return true
+                end
+            end
+            CampaignSetPending(campaign, 'route_probe', route.probeTokens)
+            return true
+        end
+        if route.state == 'probing' or route.state == 'proven' then
+            local _, liveCount, atDestination, distance =
+                ESCALATION.RouteProbeMetrics(controller, observation, route)
+            route.atDestination = atDestination
+            if liveCount < route.probeQuorum then
+                ESCALATION.RouteBeginRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'probe_attrition',
+                    false
+                )
+                return true
+            end
+            if distance + 2 < (tonumber(route.bestDistance) or 1000000000000)
+            then
+                route.bestDistance = distance
+                route.lastProgressTick = tick
+            end
+            if atDestination >= route.probeQuorum then
+                route.state = 'proven'
+                route.provenTick = route.provenTick or tick
+                local dispatchStart = tonumber(route.dispatchFailureTick)
+                    or tonumber(route.provenTick)
+                    or tick
+                if tick - dispatchStart >= ESCALATION.ROUTE_PROBE_STUCK_TICKS then
+                    ESCALATION.RouteBeginRelease(
+                        controller,
+                        campaign,
+                        route,
+                        'bulk_dispatch_stuck',
+                        false
+                    )
+                    return true
+                end
+                route.bulkTokens = ESCALATION.RouteBulkTokens(
+                    controller,
+                    observation,
+                    campaign,
+                    route
+                )
+                if TableGetn(route.bulkTokens) > 0 then
+                    CampaignSetPending(campaign, 'route_commit', route.bulkTokens)
+                else
+                    campaign.pendingMode = nil
+                    campaign.pendingTokens = {}
+                end
+                if route.provenEvent ~= true then
+                    route.provenEvent = true
+                    Emit(controller, 'campaign_route_proven', {
+                        route = route.routeKey,
+                        epoch = route.epoch,
+                        fingerprint = route.routeFingerprint,
+                        source = route.sourceAnchorKey,
+                        destination = route.candidateAnchorKey,
+                        waypoints = TableGetn(route.waypoints or {}),
+                        route_length = tonumber(route.routeLength) or -1,
+                        arrived = atDestination,
+                        quorum = route.probeQuorum,
+                    })
+                end
+                return true
+            end
+            route.state = 'probing'
+            campaign.pendingMode = nil
+            campaign.pendingTokens = {}
+            if tick - (tonumber(route.lastProgressTick) or tick)
+                >= ESCALATION.ROUTE_PROBE_STUCK_TICKS
+            then
+                ESCALATION.RouteBeginRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'probe_stuck',
+                    true
+                )
+            end
+            return true
+        end
+        if route.state == 'releasing' then
+            local live = ESCALATION.RouteLiveRecords(
+                controller,
+                observation,
+                route.releaseTokens
+            )
+            local releaseTokens = {}
+            for _, token in ipairs(route.releaseTokens or {}) do
+                if live[token] then TableInsert(releaseTokens, token) end
+            end
+            route.cleanupTokens = CopyArray(releaseTokens)
+            route.releaseTokens = releaseTokens
+            local ownership = controller.routeCleanupOwnership
+            if type(ownership) == 'table'
+                and ownership.routeKey == route.routeKey
+                and ownership.epoch == route.epoch
+            then
+                ownership.tokens = CopyArray(releaseTokens)
+            end
+            route.routeFingerprint = ESCALATION.RouteFingerprint(route)
+                or 'invalid'
+            if type(ownership) == 'table'
+                and ownership.routeKey == route.routeKey
+                and ownership.epoch == route.epoch
+            then
+                ownership.routeFingerprint = route.routeFingerprint
+            end
+            if tick >= (tonumber(route.releaseDeadlineTick) or tick)
+                or TableGetn(releaseTokens) == 0
+            then
+                ESCALATION.RouteFinalizeRelease(
+                    controller,
+                    campaign,
+                    route,
+                    'release_deadline'
+                )
+            else
+                CampaignSetPending(campaign, 'route_release', releaseTokens)
+            end
+            return true
+        end
+        ESCALATION.RouteClear(campaign)
+        return true
+    end
+
+    local rollback = campaign.routeRollback
+    if type(rollback) == 'table' then
+        if not ESCALATION.RouteConfirmCommittedArrival(controller, campaign)
+            and tick - (tonumber(campaign.lastProgressTick)
+                or tonumber(rollback.committedTick)
+                or tick) >= ESCALATION.ROUTE_PROBE_STUCK_TICKS
+        then
+            local release = {
+                state = 'releasing',
+                epoch = rollback.epoch,
+                routeKey = rollback.routeKey,
+                routeFingerprint = rollback.routeFingerprint,
+                blockKey = rollback.blockKey,
+                source = rollback.source,
+                sourceAnchorKey = rollback.source.anchorKey,
+                sourcePosition = CopyPosition(
+                    rollback.sourcePosition or rollback.source.anchorPosition
+                ),
+                candidateKind = campaign.kind,
+                candidateClusterKey = campaign.clusterKey,
+                candidateMemberKeys = CopyArray(campaign.memberKeys),
+                candidateAnchorKey = campaign.anchorKey,
+                candidateAnchorPosition = CopyPosition(campaign.anchorPosition),
+                candidateAnchorTargetDistanceSquared =
+                    campaign.anchorTargetDistanceSquared,
+                destination = CopyPosition(campaign.anchorPosition),
+                probeTokens = {},
+                probeQuorum = 0,
+                releaseTokens = CopyArray(campaign.fieldTokens),
+                restoreOnRelease = true,
+                stagedTick = rollback.committedTick,
+                releaseDeadlineTick = (tonumber(rollback.committedTick) or tick)
+                    + ESCALATION.ROUTE_PROBE_RELEASE_TICKS,
+            }
+            campaign.routeRollback = nil
+            campaign.routeAttempt = release
+            ESCALATION.RouteBeginRelease(
+                controller,
+                campaign,
+                release,
+                'bulk_stuck',
+                true
+            )
+            return true
+        end
+    elseif rollback ~= nil then
+        campaign.routeRollback = nil
+    end
+    return false
 end
 
 local function CampaignAcuHealth(observation)
@@ -5022,6 +6273,7 @@ local function UpdateFieldCampaign(controller, observation)
     end
     ApplyCampaignFlags(controller, campaign, observation.units)
     UpdatePressureProgress(controller, observation, campaign)
+    ESCALATION.RouteConfirmCommittedArrival(controller, campaign)
     local liveField = TableGetn(campaign.fieldTokens or {})
     local readinessReady = observation.macro
         and observation.macro.campaignReady == true
@@ -5029,6 +6281,12 @@ local function UpdateFieldCampaign(controller, observation)
         and TableGetn(campaign.homeTokens) < HOME_RESERVE_MIN
         and TableGetn(campaign.fieldTokens) > 0
     then
+        ESCALATION.RouteRestoreCommittedSource(
+            controller,
+            campaign,
+            'home_reserve'
+        )
+        if campaign.routeAttempt ~= nil then ESCALATION.RouteClear(campaign) end
         ClearDesiredCampaignObjective(campaign)
         campaign.pendingRollbackReason = nil
         local emergencyField, emergencyHome = EmergencyCampaignCohorts(
@@ -5045,6 +6303,12 @@ local function UpdateFieldCampaign(controller, observation)
         and health and health < FIELD_CAMPAIGN_RECALL_HEALTH
         and TableGetn(campaign.fieldTokens) > 0
     then
+        ESCALATION.RouteRestoreCommittedSource(
+            controller,
+            campaign,
+            'acu_health'
+        )
+        if campaign.routeAttempt ~= nil then ESCALATION.RouteClear(campaign) end
         ClearDesiredCampaignObjective(campaign)
         campaign.pendingRollbackReason = nil
         campaign.pendingEmergencyReason = 'acu_health'
@@ -5104,6 +6368,12 @@ local function UpdateFieldCampaign(controller, observation)
         return
     end
     if rollbackReason and campaign.pendingMode ~= 'recall' then
+        ESCALATION.RouteRestoreCommittedSource(
+            controller,
+            campaign,
+            rollbackReason
+        )
+        if campaign.routeAttempt ~= nil then ESCALATION.RouteClear(campaign) end
         ClearDesiredCampaignObjective(campaign)
         campaign.pendingRollbackReason = rollbackReason
         if liveField > 0 then
@@ -5141,6 +6411,14 @@ local function UpdateFieldCampaign(controller, observation)
             campaign.pendingMode = nil
             campaign.pendingTokens = {}
         end
+        return
+    end
+    if ESCALATION.RouteUpdate(
+        controller,
+        observation,
+        campaign,
+        readinessReady
+    ) then
         return
     end
     if not readinessReady
@@ -5214,10 +6492,23 @@ local function UpdateFieldCampaign(controller, observation)
                 campaign.lastSecuredAnchorPosition = CopyPosition(campaign.anchorPosition)
                 local nextCluster = NextPressureCluster(controller, campaign)
                 if nextCluster then
-                    StagePressureCluster(campaign, nextCluster)
-                    CampaignSetPending(campaign, 'transition', campaign.fieldTokens)
-                elseif StageStrategicAssault(controller, campaign) then
-                    CampaignSetPending(campaign, 'assault', campaign.fieldTokens)
+                    ESCALATION.RouteStage(
+                        controller,
+                        observation,
+                        campaign,
+                        ESCALATION.RouteCandidateFromCluster(nextCluster)
+                    )
+                else
+                    local assaultCandidate =
+                        ESCALATION.RouteAssaultCandidate(controller)
+                    if assaultCandidate then
+                        ESCALATION.RouteStage(
+                            controller,
+                            observation,
+                            campaign,
+                            assaultCandidate
+                        )
+                    end
                 end
                 return
             end
@@ -5309,6 +6600,329 @@ local function EmergencyRecallStagesLive(controller, campaign, recordByToken)
     return true
 end
 
+ESCALATION.RouteIssueCached = function(actors, route, release)
+    local clearOk = pcall(function() IssueClearCommands(actors) end)
+    if not clearOk then
+        return false, release == true and 'release_clear' or 'clear'
+    end
+    if release == true then
+        local releaseOk = pcall(function()
+            IssueAggressiveMove(actors, route.sourcePosition)
+        end)
+        if not releaseOk then
+            local cleanupOk = pcall(function() IssueClearCommands(actors) end)
+            return false, cleanupOk
+                and 'release_aggressive'
+                or 'release_aggressive_cleanup'
+        end
+        return true
+    end
+    local waypointCount = TableGetn(route.waypoints or {})
+    if waypointCount == 0 then return false end
+    for index = 1, waypointCount - 1 do
+        local moveOk = pcall(function()
+            IssueMove(actors, route.waypoints[index])
+        end)
+        if not moveOk then
+            local cleanupOk = pcall(function() IssueClearCommands(actors) end)
+            return false, cleanupOk
+                and 'move_' .. tostring(index)
+                or 'move_' .. tostring(index) .. '_cleanup'
+        end
+    end
+    local aggressiveOk = pcall(function()
+        IssueAggressiveMove(actors, route.waypoints[waypointCount])
+    end)
+    if not aggressiveOk then
+        local cleanupOk = pcall(function() IssueClearCommands(actors) end)
+        return false, cleanupOk and 'aggressive' or 'aggressive_cleanup'
+    end
+    return true
+end
+
+ESCALATION.ExecuteRoute = function(
+    controller,
+    intent,
+    recordByToken,
+    usedActors,
+    observation
+)
+    local campaign = controller.fieldCampaign
+    local route = campaign and campaign.routeAttempt or nil
+    local mode = intent and intent.mode or nil
+    local expectedState = mode == 'route_probe' and 'staged'
+        or (mode == 'route_commit' and 'proven'
+            or (mode == 'route_release' and 'releasing' or nil))
+    local sealedFingerprint = type(route) == 'table'
+        and ESCALATION.RouteFingerprint(route)
+        or nil
+    if controller.fieldCampaignEnabled ~= true
+        or type(route) ~= 'table'
+        or type(route.source) ~= 'table'
+        or sealedFingerprint == nil
+        or sealedFingerprint ~= route.routeFingerprint
+        or expectedState == nil
+        or route.state ~= expectedState
+        or campaign.pendingMode ~= mode
+        or type(intent.actorTokens) ~= 'table'
+        or type(intent.routeEpoch) ~= 'number'
+        or intent.routeEpoch ~= route.epoch
+        or type(intent.routeKey) ~= 'string'
+        or intent.routeKey ~= route.routeKey
+        or type(intent.routeFingerprint) ~= 'string'
+        or intent.routeFingerprint ~= route.routeFingerprint
+        or type(intent.routeSourceKey) ~= 'string'
+        or intent.routeSourceKey ~= route.sourceAnchorKey
+    then
+        return false
+    end
+    local release = mode == 'route_release'
+    local expectedKind = release and route.source.kind or route.candidateKind
+    local expectedCluster = release
+        and route.source.clusterKey
+        or route.candidateClusterKey
+    local expectedObjective = release
+        and route.source.anchorKey
+        or route.candidateAnchorKey
+    local expectedPosition = release
+        and route.source.anchorPosition
+        or route.candidateAnchorPosition
+    if intent.campaignKind ~= expectedKind
+        or intent.clusterKey ~= expectedCluster
+        or intent.objectiveKey ~= expectedObjective
+        or not IsCampaignPosition(intent.position)
+        or DistanceSquared(intent.position, expectedPosition) > 0.01
+    then
+        return false
+    end
+    if not release
+        and (type(observation) ~= 'table'
+            or type(observation.macro) ~= 'table'
+            or observation.macro.campaignReady ~= true
+            or not ESCALATION.RouteSourceAuthoritative(campaign, route)
+            or not ESCALATION.RouteCandidateLive(controller, route))
+    then
+        return false
+    end
+    local tokens = {}
+    local seen = {}
+    for _, token in ipairs(intent.actorTokens) do
+        if type(token) ~= 'string' or seen[token] then return false end
+        seen[token] = true
+        TableInsert(tokens, token)
+    end
+    table.sort(tokens)
+    local expected = CopyArray(campaign.pendingTokens)
+    table.sort(expected)
+    if TableGetn(tokens) == 0 or not SameArray(tokens, expected) then return false end
+    if mode == 'route_probe' and not SameArray(tokens, route.probeTokens) then
+        return false
+    elseif mode == 'route_commit' then
+        local bulk = ESCALATION.RouteBulkTokens(
+            controller,
+            observation,
+            campaign,
+            route
+        )
+        if not SameArray(tokens, bulk) then return false end
+        local _, liveCount, atDestination = ESCALATION.RouteProbeMetrics(
+            controller,
+            observation,
+            route
+        )
+        if liveCount < route.probeQuorum
+            or atDestination < route.probeQuorum
+        then
+            return false
+        end
+    elseif mode == 'route_release'
+        and not SameArray(tokens, route.releaseTokens)
+    then
+        return false
+    end
+    local actors = {}
+    for _, token in ipairs(tokens) do
+        local record = recordByToken[token]
+        if usedActors[token]
+            or not CampaignFieldContains(campaign, token)
+            or controller.pending[token]
+            or controller.waveAssignments[token]
+            or not record
+            or not COMBAT_ROLES[record.role]
+            or record.complete ~= true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, record.role)
+        if not actor then return false end
+        if mode == 'route_probe' then
+            local livePosition = CopyPosition(
+                SafeCall(nil, actor.GetPosition, actor)
+            )
+            if not livePosition
+                or Distance(livePosition, route.source.anchorPosition)
+                    > FIELD_CAMPAIGN_ANCHOR_RADIUS
+            then
+                return false
+            end
+        end
+        TableInsert(actors, actor)
+    end
+    local tick = CurrentTick(controller)
+    local issued, issueFailure = ESCALATION.RouteIssueCached(
+        actors,
+        route,
+        release
+    )
+    if not issued then
+        local previousFailure = route.lastFailure
+        if mode == 'route_commit'
+            and type(issueFailure) == 'string'
+            and string.sub(issueFailure, -8) == '_cleanup'
+        then
+            local releaseSet = BuildTokenSet(route.probeTokens) or {}
+            local releaseTokens = CopyArray(route.probeTokens)
+            for _, token in ipairs(tokens) do
+                if not releaseSet[token] then
+                    releaseSet[token] = true
+                    TableInsert(releaseTokens, token)
+                end
+            end
+            table.sort(releaseTokens)
+            route.cleanupTokens = releaseTokens
+            route.releaseTokens = nil
+            route.routeFingerprint = ESCALATION.RouteFingerprint(route)
+                or 'invalid'
+            controller.routeCleanupOwnership = {
+                routeKey = route.routeKey,
+                epoch = route.epoch,
+                tokens = CopyArray(releaseTokens),
+                routeFingerprint = route.routeFingerprint,
+            }
+        end
+        route.dispatchFailureTick = route.dispatchFailureTick or tick
+        route.lastFailureTick = tick
+        route.lastFailure = tostring(issueFailure or 'command_failed')
+        if previousFailure ~= route.lastFailure then
+            Emit(controller, 'campaign_route_dispatch_failed', {
+                route = route.routeKey or 'none',
+                epoch = tonumber(route.epoch) or -1,
+                fingerprint = route.routeFingerprint or 'none',
+                mode = tostring(mode or 'none'),
+                reason = route.lastFailure,
+                age = math.max(0, tick - (tonumber(route.stagedTick) or tick)),
+            })
+        end
+        return false
+    end
+    route.dispatchFailureTick = nil
+    for _, token in ipairs(tokens) do
+        usedActors[token] = true
+        campaign.orderedTokens[token] = true
+    end
+    if mode == 'route_probe' then
+        route.state = 'probing'
+        route.issuedTick = tick
+        route.lastProgressTick = tick
+        local _, _, atDestination, distance = ESCALATION.RouteProbeMetrics(
+            controller,
+            observation,
+            route
+        )
+        route.atDestination = atDestination
+        route.bestDistance = distance
+        campaign.routeProbeOrders = (tonumber(campaign.routeProbeOrders) or 0) + 1
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+        Emit(controller, 'campaign_route_probe', {
+            route = route.routeKey,
+            epoch = route.epoch,
+            fingerprint = route.routeFingerprint,
+            source = route.sourceAnchorKey,
+            destination = route.candidateAnchorKey,
+            waypoints = TableGetn(route.waypoints or {}),
+            route_length = tonumber(route.routeLength) or -1,
+            units = TableGetn(tokens),
+            quorum = route.probeQuorum,
+        })
+        return true
+    end
+    if mode == 'route_commit' then
+        local previousCluster = campaign.clusterKey
+        local rollback = {
+            epoch = route.epoch,
+            routeKey = route.routeKey,
+            routeFingerprint = route.routeFingerprint,
+            blockKey = route.blockKey,
+            source = route.source,
+            sourcePosition = CopyPosition(route.sourcePosition),
+            committedTick = tick,
+        }
+        campaign.kind = route.candidateKind
+        campaign.clusterKey = route.candidateClusterKey
+        campaign.memberKeys = CopyArray(route.candidateMemberKeys)
+        campaign.anchorKey = route.candidateAnchorKey
+        campaign.anchorPosition = CopyPosition(route.candidateAnchorPosition)
+        campaign.anchorTargetDistanceSquared =
+            route.candidateAnchorTargetDistanceSquared
+        campaign.objectiveKey = campaign.anchorKey
+        campaign.objectivePosition = CopyPosition(campaign.anchorPosition)
+        campaign.objectiveReason = campaign.kind
+        campaign.state = 'active'
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.routeBulkOrders = (tonumber(campaign.routeBulkOrders) or 0) + 1
+        campaign.missionIssuedTick = tick
+        campaign.lastProgressTick = tick
+        campaign.bestDistance = 1000000000000
+        campaign.bestAtAnchor = 0
+        campaign.progressCohortSize = -1
+        campaign.recoveryWindows = 0
+        campaign.lastRecoveryAttemptTick = tick - FIELD_CAMPAIGN_STUCK_TICKS
+        campaign.heldSinceTick = nil
+        campaign.routeRollback = rollback
+        local ownership = controller.routeCleanupOwnership
+        if type(ownership) == 'table'
+            and ownership.routeKey == route.routeKey
+            and ownership.epoch == route.epoch
+        then
+            controller.routeCleanupOwnership = nil
+        end
+        campaign.routeAttempt = nil
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
+        ClearDesiredCampaignObjective(campaign)
+        if campaign.kind == 'strategic_assault' then
+            campaign.assaultEvents = campaign.assaultEvents + 1
+            Emit(controller, 'campaign_assault', {
+                from = previousCluster or 'none',
+                target = campaign.anchorKey,
+            })
+        else
+            campaign.transitionEvents = campaign.transitionEvents + 1
+            Emit(controller, 'campaign_transition', {
+                from = previousCluster or 'none',
+                cluster = campaign.clusterKey,
+                objective = campaign.anchorKey,
+            })
+        end
+        Emit(controller, 'campaign_route_committed', {
+            route = route.routeKey,
+            epoch = route.epoch,
+            fingerprint = route.routeFingerprint,
+            source = route.sourceAnchorKey,
+            destination = route.candidateAnchorKey,
+            waypoints = TableGetn(route.waypoints or {}),
+            route_length = tonumber(route.routeLength) or -1,
+            cluster = campaign.clusterKey,
+            objective = campaign.anchorKey,
+            units = TableGetn(tokens),
+        })
+        return true
+    end
+    ESCALATION.RouteFinalizeRelease(controller, campaign, route, 'ordered')
+    return true
+end
+
 local function ExecuteFieldCampaign(
     controller,
     intent,
@@ -5317,6 +6931,19 @@ local function ExecuteFieldCampaign(
     observation
 )
     local campaign = controller.fieldCampaign
+    if intent
+        and (intent.mode == 'route_probe'
+            or intent.mode == 'route_commit'
+            or intent.mode == 'route_release')
+    then
+        return ESCALATION.ExecuteRoute(
+            controller,
+            intent,
+            recordByToken,
+            usedActors,
+            observation
+        )
+    end
     local allowedModes = {
         activate = true,
         reinforce = true,
@@ -5725,6 +7352,7 @@ Controller.Create = function(brain)
         fieldCampaignEnabled = true,
         fieldCampaign = nil,
         fieldCampaignSerial = 0,
+        routeCleanupOwnership = nil,
         airAssignments = {},
         airScreenCount = 0,
         factoryTarget = 2,
@@ -6494,6 +8122,37 @@ Controller.Step = function(controller)
             recovery_orders = tonumber(macro.campaignRecoveryOrders) or 0,
             mode_switches = tonumber(macro.campaignModeSwitches) or 0,
             campaign_emergency = macro.campaignEmergency == true,
+            route_state = tostring(macro.campaignRouteState or 'none'),
+            route_source = tostring(macro.campaignRouteSource or 'none'),
+            route_destination = tostring(
+                macro.campaignRouteDestination or 'none'
+            ),
+            route_probe_units = tonumber(macro.campaignRouteProbeUnits) or 0,
+            route_probe_quorum = tonumber(macro.campaignRouteProbeQuorum) or 0,
+            route_at_destination = tonumber(
+                macro.campaignRouteAtDestination
+            ) or 0,
+            route_age = tonumber(macro.campaignRouteAge) or -1,
+            route_last_progress_tick = tonumber(
+                macro.campaignRouteLastProgressTick
+            ) or -1,
+            route_epoch = tonumber(macro.campaignRouteEpoch) or -1,
+            route_key = tostring(macro.campaignRouteKey or 'none'),
+            route_fingerprint = tostring(
+                macro.campaignRouteFingerprint or 'none'
+            ),
+            route_waypoints = tonumber(macro.campaignRouteWaypointCount) or 0,
+            route_length = tonumber(macro.campaignRouteLength) or -1,
+            route_progress_age = tonumber(
+                macro.campaignRouteProgressAge
+            ) or -1,
+            route_release_age = tonumber(
+                macro.campaignRouteReleaseAge
+            ) or -1,
+            route_last_failure = tostring(
+                macro.campaignRouteLastFailure or 'none'
+            ),
+            route_blocked = tonumber(macro.campaignRouteBlockedCount) or 0,
             engineer_demand = tonumber(macro.engineerDemand) or 0,
             factory_demand = tonumber(macro.factoryDemand) or 0,
             economy_stage = tostring(macro.economyStage or 'opening'),

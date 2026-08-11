@@ -2188,6 +2188,9 @@ local function FieldCampaignDecision(snapshot, intents)
         recall = true,
         resume = true,
         rollback = true,
+        route_probe = true,
+        route_commit = true,
+        route_release = true,
     }
     if type(mode) ~= 'string' or not allowed[mode] then return end
     local tokens = {}
@@ -2203,7 +2206,7 @@ local function FieldCampaignDecision(snapshot, intents)
         and snapshot.basePosition
         or macro.campaignIntentPosition
     if not IsUsablePosition(position) then return end
-    AddIntent(intents, {
+    local intent = {
         kind = 'field_campaign',
         mode = mode,
         actorTokens = tokens,
@@ -2212,13 +2215,32 @@ local function FieldCampaignDecision(snapshot, intents)
         campaignSerial = macro.campaignSerial,
         clusterKey = macro.campaignIntentCluster,
         objectiveKey = macro.campaignIntentObjective,
-        priority = (mode == 'recall' or mode == 'rollback') and 1 or 24,
+        priority = (mode == 'recall'
+            or mode == 'rollback'
+            or mode == 'route_release') and 1 or 24,
         reason = mode == 'rollback'
             and tostring(macro.campaignIntentRollbackReason or 'rollback')
             or (mode == 'assault'
                 and 'strategic_assault_campaign'
                 or 'pressure_front_campaign'),
-    })
+    }
+    if mode == 'route_probe'
+        or mode == 'route_commit'
+        or mode == 'route_release'
+    then
+        if type(macro.campaignRouteEpoch) ~= 'number'
+            or type(macro.campaignRouteKey) ~= 'string'
+            or type(macro.campaignRouteFingerprint) ~= 'string'
+            or type(macro.campaignRouteSourceKey) ~= 'string'
+        then
+            return
+        end
+        intent.routeEpoch = macro.campaignRouteEpoch
+        intent.routeKey = macro.campaignRouteKey
+        intent.routeFingerprint = macro.campaignRouteFingerprint
+        intent.routeSourceKey = macro.campaignRouteSourceKey
+    end
+    AddIntent(intents, intent)
 end
 
 local function RegroupDecision(snapshot, units, intents)
