@@ -1765,11 +1765,11 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             if unit.role == 'air_factory' then completedAir = completedAir + 1 end
         end
     end
-    local reserveCombatBeforeUnlock = macro
+    local protectLandCombat = macro
         and macro.allocatorEnabled == true
-        and macro.unlockingEngineerNeeded == true
-        and completedLand >= 2
-        and completedEngineers >= MIN_RECOVERY_ENGINEERS
+        and completedLand >= 1
+        and (completedEngineers >= MIN_RECOVERY_ENGINEERS
+            or (completedLand >= 2 and completedEngineers >= 1))
     local massStored = tonumber(economy.massStoredRatio)
     local energyStored = tonumber(economy.energyStoredRatio)
     local massTrend = tonumber(economy.massTrend)
@@ -1884,8 +1884,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     reason = 'recovery_engineer_floor'
                     plannedEngineer = true
                     recoveryOutstanding = true
-                elseif not recoveryMode
-                    and reserveCombatBeforeUnlock
+                elseif protectLandCombat
                     and not plannedAllocatorCombat
                 then
                     local candidate = NextCombatRole(counts)
@@ -2358,6 +2357,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
     local factorySlots = math.max(0,
         math.floor(tonumber(macro.factoryFundedCount) or 0))
     local factoryAccepted = 0
+    local protectedCombatAccepted = false
     local actors = {}
     local completedLandFactories = 0
     local completedEngineers = 0
@@ -2369,8 +2369,9 @@ Policy.ApplyAllocator = function(snapshot, intents)
             completedEngineers = completedEngineers + 1
         end
     end
-    local reserveLandCombat = completedLandFactories >= 2
-        and completedEngineers >= MIN_RECOVERY_ENGINEERS
+    local reserveLandCombat = completedLandFactories >= 1
+        and (completedEngineers >= MIN_RECOVERY_ENGINEERS
+            or (completedLandFactories >= 2 and completedEngineers >= 1))
     local landCombatRoles = {
         anti_air = true,
         artillery = true,
@@ -2380,11 +2381,32 @@ Policy.ApplyAllocator = function(snapshot, intents)
     local ordered = CopyArray(intents)
     local leadingExpansion = nil
     local hasLandCombatRequest = false
+    local protectedCombatIntent = nil
+    local concurrentUnlockIntent = nil
     for _, intent in ipairs(ordered) do
         if intent.kind == 'factory_build'
             and landCombatRoles[intent.buildRole] == true
         then
             hasLandCombatRequest = true
+            if reserveLandCombat
+                and (not protectedCombatIntent
+                    or IntentActorKey(intent)
+                        < IntentActorKey(protectedCombatIntent))
+            then
+                protectedCombatIntent = intent
+            end
+        end
+        if reserveLandCombat
+            and completedLandFactories >= 2
+            and completedEngineers
+                < math.max(MIN_RECOVERY_ENGINEERS,
+                    math.floor(tonumber(macro.engineerTarget) or 0))
+            and intent.kind == 'factory_build'
+            and intent.reason == 'unlock_profitable_expansion'
+            and (not concurrentUnlockIntent
+                or IntentActorKey(intent) < IntentActorKey(concurrentUnlockIntent))
+        then
+            concurrentUnlockIntent = intent
         end
         if (intent.kind == 'build_structure'
                 or intent.kind == 'assist_structure')
@@ -2487,6 +2509,11 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local requestDuration = request and request.duration or 0
             local structureRequest = intent.kind == 'build_structure'
                 or intent.kind == 'assist_structure'
+            local protectedCombat = intent == protectedCombatIntent
+            local concurrentUnlock = intent == concurrentUnlockIntent
+            local protectedFactoryLane = protectedCombat
+                or (concurrentUnlock and protectedCombatAccepted)
+            local protectedUsesBank = false
             if allowed and structureRequest then
                 local actor = actors[intent.actorToken]
                 local buildRate = actor and tonumber(actor.buildRate) or nil
@@ -2515,8 +2542,12 @@ Policy.ApplyAllocator = function(snapshot, intents)
             then
                 allowed = false
             end
+            if concurrentUnlock and not protectedCombatAccepted then
+                allowed = false
+            end
             if intent.kind == 'factory_build'
                 and intent.reason ~= 'recovery_engineer_floor'
+                and not protectedFactoryLane
                 and factoryAccepted >= factorySlots
             then
                 allowed = false
@@ -2534,10 +2565,17 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     request.energyCost - laneEnergy * requestDuration)
                 local massFit = bankMass + fitTolerance >= massGap
                 local energyFit = bankEnergy + fitTolerance >= energyGap
-                if intent.kind == 'factory_build'
+                if protectedFactoryLane then
+                    local recurringFit = availableMass + fitTolerance
+                            >= requestMassDrain
+                        and availableEnergy + fitTolerance
+                            >= requestEnergyDrain
+                    local bankFit = bankMass + fitTolerance >= request.massCost
+                        and bankEnergy + fitTolerance >= request.energyCost
+                    allowed = recurringFit or bankFit
+                    protectedUsesBank = not recurringFit and bankFit
+                elseif intent.kind == 'factory_build'
                     and intent.reason ~= 'recovery_engineer_floor'
-                    and not (reserveLandCombat
-                        and landCombatRoles[intent.buildRole] == true)
                 then
                     massFit = availableMass + fitTolerance >= requestMassDrain
                         and massFit
@@ -2574,11 +2612,17 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     availableMass - (requestMassDrain - massCreditUsed))
                 availableEnergy = math.max(0,
                     availableEnergy - (requestEnergyDrain - energyCreditUsed))
-                bankMass = math.max(0, bankMass - massGap)
-                bankEnergy = math.max(0, bankEnergy - energyGap)
+                if protectedUsesBank then
+                    bankMass = math.max(0, bankMass - request.massCost)
+                    bankEnergy = math.max(0, bankEnergy - request.energyCost)
+                else
+                    bankMass = math.max(0, bankMass - massGap)
+                    bankEnergy = math.max(0, bankEnergy - energyGap)
+                end
                 if intent.kind == 'factory_build' then
                     factoryAccepted = factoryAccepted + 1
                 end
+                if protectedCombat then protectedCombatAccepted = true end
                 TableInsert(accepted, intent)
             end
         end

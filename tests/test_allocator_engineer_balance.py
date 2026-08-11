@@ -64,14 +64,13 @@ def _factory_snapshot(
     bank_energy: float,
     factory_slots: int = 1,
 ) -> dict[str, Any]:
-    # Two completed land factories, two completed engineers, and a scout make
-    # this the exact post-opening choice between another unlock engineer and
-    # the first ordinary combat queue.
+    # Two completed land factories, the bounded two-engineer target, and a
+    # scout isolate ordinary protected combat funding.
     snapshot = _policy_allocator_snapshot("engineer")
     snapshot["macro"].update(
-        engineerTarget=10,
-        engineerDemand=10,
-        unlockingEngineerNeeded=True,
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=False,
         expansionOpportunityCount=56,
         factoryFundedCount=factory_slots,
         availableRecurringMass=available_mass,
@@ -255,7 +254,7 @@ def test_unfunded_or_infeasible_marker_backlog_does_not_create_engineer_demand(
 
 
 @pytest.mark.parametrize("tick", [847, 2755])
-def test_artifact_two_factory_choice_funds_combat_before_another_unlock_engineer(
+def test_artifact_two_factory_choice_keeps_the_bounded_combat_lane_funded(
     tick: int,
 ) -> None:
     snapshot = _factory_snapshot(
@@ -366,12 +365,17 @@ def test_controller_factory_slot_uses_exact_land_combat_drain_boundary(
 ) -> None:
     harness = make_harness()
     harness.controller.fieldCampaignEnabled = False
+    first_engineer = _engineer(harness, 90, 20)
+    second_engineer = _engineer(harness, 91, 22)
+    for engineer in (first_engineer, second_engineer):
+        engineer.options.idleState = False
+        engineer.options.states = lua_value(harness.lua, {"Building": True})
     harness.brain.units = harness.lua.table_from(
         [
             _live_factory(harness, 80),
             _live_factory(harness, 81),
-            _engineer(harness, 90, 20),
-            _engineer(harness, 91, 22),
+            first_engineer,
+            second_engineer,
             harness.unit(entityId=92, blueprintId="uel0101", position=[15, 2, 20]),
         ]
     )
@@ -389,6 +393,8 @@ def test_controller_factory_slot_uses_exact_land_combat_drain_boundary(
         mass_usage=0,
         energy_usage=0,
     )
+    harness.brain.massStored = 0
+    harness.brain.energyStored = 0
 
     observation = _sample(harness, 4)
 
@@ -418,7 +424,7 @@ def test_allocator_accepts_the_controller_published_six_decimal_combat_boundary(
     ]
 
 
-def test_single_factory_opening_can_still_fund_one_unlock_engineer_before_combat_reservation() -> None:
+def test_single_factory_after_opening_floor_protects_combat_before_extra_engineer() -> None:
     snapshot = _policy_allocator_snapshot()
     factories = [unit for unit in snapshot["units"] if unit["role"] == "land_factory"]
     snapshot["units"].remove(factories[-1])
@@ -436,9 +442,150 @@ def test_single_factory_opening_can_still_fund_one_unlock_engineer_before_combat
         factoryFundedCount=1,
     )
 
-    assert _factory_orders(snapshot) == [
-        ("engineer", "unlock_profitable_expansion")
+    assert _factory_orders(snapshot) == [("tank", "continuous_land_production")]
+
+
+def test_protected_land_combat_lane_reissues_after_each_completed_unit() -> None:
+    first = _factory_snapshot(
+        available_mass=0.5,
+        available_energy=2.5,
+        bank_mass=0,
+        bank_energy=0,
+        factory_slots=0,
+    )
+    first["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=0,
+    )
+
+    second = copy.deepcopy(first)
+    second["units"].append(
+        {
+            "token": "500:1",
+            "role": "tank",
+            "complete": True,
+            "idle": True,
+            "healthRatio": 1,
+            "position": [20, 2, 20],
+            "canBuild": {},
+            "availableForWave": True,
+            "assignedToWave": False,
+            "nearStaging": True,
+        }
+    )
+
+    assert _factory_orders(first) == [("tank", "continuous_land_production")]
+    assert _factory_orders(second) == [("artillery", "continuous_land_production")]
+
+
+def test_tick5815_bank_and_forecast_fund_combat_when_generic_factory_slots_are_zero() -> None:
+    snapshot = _policy_allocator_snapshot()
+    snapshot["tick"] = 5815
+    snapshot["economy"].update(
+        massIncome=1.9,
+        massRequested=0,
+        massUsage=0,
+        massTrend=1.9,
+        energyIncome=6,
+        energyRequested=0,
+        energyUsage=0,
+        energyTrend=6,
+        massStoredRatio=1,
+        energyStoredRatio=1,
+    )
+    snapshot["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=True,
+        expansionOpportunityCount=0,
+        factoryFundedCount=0,
+        availableRecurringMass=1.9,
+        availableRecurringEnergy=6,
+        expansionRecurringMassBudget=1.9,
+        expansionRecurringEnergyBudget=6,
+        oneTimeMassReserve=820,
+        oneTimeEnergyReserve=4000,
+    )
+
+    assert ("tank", "continuous_land_production") in _factory_orders(snapshot)
+
+
+def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:
+    snapshot = _policy_allocator_snapshot()
+    snapshot["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=True,
+        expansionOpportunityCount=0,
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=TANK_MASS_COST + 52,
+        oneTimeEnergyReserve=TANK_ENERGY_COST + 260,
+    )
+
+    orders = intents_of(decide(snapshot), "factory_build")
+
+    assert sorted((intent["buildRole"], intent["reason"]) for intent in orders) == [
+        ("engineer", "unlock_profitable_expansion"),
+        ("tank", "continuous_land_production"),
     ]
+    assert len({intent["actorToken"] for intent in orders}) == 2
+
+
+@pytest.mark.parametrize(
+    ("available_mass", "available_energy", "bank_mass", "bank_energy"),
+    [
+        (TANK_MASS_DRAIN - 0.00011, TANK_ENERGY_DRAIN, 0, 0),
+        (TANK_MASS_DRAIN, TANK_ENERGY_DRAIN - 0.00011, 0, 0),
+        (0, 0, TANK_MASS_COST - 0.001, TANK_ENERGY_COST),
+        (0, 0, TANK_MASS_COST, TANK_ENERGY_COST - 0.001),
+    ],
+)
+def test_protected_combat_lane_fails_closed_without_recurring_or_full_unit_bank(
+    available_mass: float,
+    available_energy: float,
+    bank_mass: float,
+    bank_energy: float,
+) -> None:
+    snapshot = _factory_snapshot(
+        available_mass=available_mass,
+        available_energy=available_energy,
+        bank_mass=bank_mass,
+        bank_energy=bank_energy,
+        factory_slots=0,
+    )
+    snapshot["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=0,
+    )
+
+    assert _factory_orders(snapshot) == []
+
+
+def test_immediate_contact_does_not_suppress_the_protected_combat_lane() -> None:
+    snapshot = _factory_snapshot(
+        available_mass=TANK_MASS_DRAIN,
+        available_energy=TANK_ENERGY_DRAIN,
+        bank_mass=0,
+        bank_energy=0,
+        factory_slots=0,
+    )
+    snapshot["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=0,
+    )
+    snapshot["enemyContact"] = {"position": [11, 2, 10], "immediate": True}
+
+    assert _factory_orders(snapshot) == [("tank", "continuous_land_production")]
 
 
 @pytest.mark.parametrize("lost", [False, True])

@@ -949,7 +949,8 @@ def test_stalled_backlog_does_not_displace_a_funded_combat_queue_after_engineer_
     result = decide(snapshot)
     factory = intents_of(result, "factory_build")
     assert [(intent["buildRole"], intent["reason"]) for intent in factory] == [
-        ("tank", "continuous_land_production")
+        ("tank", "continuous_land_production"),
+        ("engineer", "unlock_profitable_expansion"),
     ]
 
 
