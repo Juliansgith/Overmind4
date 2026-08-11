@@ -61,7 +61,7 @@ local BUILD_ROLES = {
         'anti_air', 'artillery', 'engineer', 'lab', 'land_factory_t2',
         'scout', 'tank',
     },
-    air_factory = { 'interceptor' },
+    air_factory = { 'air_scout', 'interceptor' },
     land_factory_t2 = { 't2_anti_air', 't2_direct_fire' },
 }
 
@@ -103,6 +103,7 @@ local ESCALATION = {
     LAND_COMBAT_ENERGY_RESERVE = 1.773333,
     requestLanes = {
         air_factory = 'air',
+        air_scout = 'air',
         hydrocarbon = 'energy',
         interceptor = 'air',
         land_factory = 'factory',
@@ -137,7 +138,7 @@ local ESCALATION = {
         power_generator = true,
     },
     factoryProducts = {
-        air_factory = { interceptor = true },
+        air_factory = { air_scout = true, interceptor = true },
         land_factory = {
             anti_air = true, artillery = true, engineer = true,
             lab = true, scout = true, tank = true,
@@ -661,6 +662,7 @@ local function NormalizeOwnUnit(controller, unit)
         commanderEscort = assignment and assignment.commanderEscort == true or false,
         frontierEscort = frontierAssignment ~= nil,
         airAssigned = controller.airAssignments[token] == true,
+        airScoutAssigned = controller.airScoutAssignments[token] == true,
         fieldCohort = fieldCohort == true,
         homeCohort = homeCohort == true,
         campaignEngineer = campaignEngineer == true,
@@ -2243,6 +2245,7 @@ local function MacroSnapshot(controller, units, economy)
         placementProbeCount = tonumber(controller.lastPlacementProbeCount) or 0,
         upgradeState = controller.upgradeState or 'none',
         airScreenCount = tonumber(controller.airScreenCount) or 0,
+        airScoutCount = tonumber(controller.airScoutCount) or 0,
         campaignReady = campaignReady,
         campaignReadinessBlockers = readinessBlockers,
         campaignReadinessBlocker = readinessBlockers[1] or 'none',
@@ -3166,6 +3169,79 @@ ESCALATION.ExecuteAirScreen = function(
         command = 'patrol',
         role = 'interceptor',
         units = TableGetn(tokens),
+    })
+    return true
+end
+
+ESCALATION.ExecuteAirScout = function(
+    controller,
+    intent,
+    records,
+    usedActors,
+    observation
+)
+    if type(intent.actorToken) ~= 'string'
+        or type(intent.siteKey) ~= 'string'
+        or type(observation) ~= 'table'
+        or type(observation.macro) ~= 'table'
+        or observation.macro.selectedFrontierSite ~= intent.siteKey
+        or not IsCampaignPosition(intent.position)
+    then
+        return false
+    end
+    local site = nil
+    for _, candidate in ipairs(((observation.sites or {}).mass) or {}) do
+        if candidate.key == intent.siteKey then
+            site = candidate
+            break
+        end
+    end
+    if not site
+        or not IsCampaignPosition(site.position)
+        or DistanceSquared(intent.position, site.position) > 0.01
+        or math.abs(intent.position[2] - site.position[2]) > 0.01
+        or not IsCampaignPosition(observation.basePosition)
+        or DistanceSquared(site.position, observation.basePosition) <= 0.01
+    then
+        return false
+    end
+    local record = records[intent.actorToken]
+    if usedActors[intent.actorToken]
+        or controller.airScoutAssignments[intent.actorToken]
+        or not record
+        or record.role ~= 'air_scout'
+        or record.complete ~= true
+        or record.idle ~= true
+    then
+        return false
+    end
+    local actor = LiveOwnedActor(
+        controller,
+        intent.actorToken,
+        record,
+        'air_scout'
+    )
+    local position = TerrainPosition(site.position)
+    if not actor
+        or not position
+        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or SafeCall(false, actor.IsUnitState, actor, 'Moving') == true
+    then
+        return false
+    end
+    if not pcall(function() IssueClearCommands({ actor }) end) then return false end
+    if not pcall(function() IssuePatrol({ actor }, position) end) then
+        pcall(function() IssueClearCommands({ actor }) end)
+        return false
+    end
+    controller.airScoutAssignments[intent.actorToken] = true
+    controller.airScoutCount = CountArray(controller.airScoutAssignments)
+    usedActors[intent.actorToken] = true
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'patrol',
+        role = 'air_scout',
+        site = intent.siteKey,
     })
     return true
 end
@@ -7375,6 +7451,8 @@ Controller.Create = function(brain)
         routeCleanupOwnership = nil,
         airAssignments = {},
         airScreenCount = 0,
+        airScoutAssignments = {},
+        airScoutCount = 0,
         factoryTarget = 2,
         economyLedger = { samples = {}, lastTick = nil, lastStats = nil },
         economyCommitmentLeases = {},
@@ -7559,6 +7637,13 @@ Controller.Reconcile = function(controller, observation)
         end
     end
     controller.airScreenCount = CountArray(controller.airAssignments)
+    for token, _ in pairs(controller.airScoutAssignments or {}) do
+        local record = records[token]
+        if not record or record.role ~= 'air_scout' or record.complete ~= true then
+            controller.airScoutAssignments[token] = nil
+        end
+    end
+    controller.airScoutCount = CountArray(controller.airScoutAssignments)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
         local record = records[token]
@@ -7863,6 +7948,14 @@ Controller.Execute = function(controller, intents, observation)
             and controller.fieldCampaignEnabled == true
         then
             ExecuteFieldCampaign(
+                controller,
+                intent,
+                records,
+                usedActors,
+                observation
+            )
+        elseif intent.kind == 'air_scout' then
+            ESCALATION.ExecuteAirScout(
                 controller,
                 intent,
                 records,
@@ -8266,6 +8359,7 @@ Controller.Step = function(controller)
             placement_probes = tonumber(macro.placementProbeCount) or 0,
             upgrade_state = tostring(macro.upgradeState or 'none'),
             air_screen = tonumber(macro.airScreenCount) or 0,
+            air_scout = tonumber(macro.airScoutCount) or 0,
             reclaim_candidate_value = tonumber(macro.reclaimValue) or -1,
             campaign_ready = macro.campaignReady == true,
             campaign_readiness_blockers = tostring(

@@ -1747,6 +1747,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     local plannedEngineer = false
     local protectedCombatOutstanding = false
     local plannedAirScreen = false
+    local plannedAirScout = false
     for _, operation in ipairs(snapshot.pending or {}) do
         if operation.kind == 'factory_build'
             and (operation.buildRole == 'tank'
@@ -1763,6 +1764,10 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             and operation.buildRole == 'interceptor'
         then
             plannedAirScreen = true
+        elseif operation.kind == 'factory_build'
+            and operation.buildRole == 'air_scout'
+        then
+            plannedAirScout = true
         end
     end
     local completedEngineers = 0
@@ -1778,11 +1783,13 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     local completedMex = 0
     local completedLand = 0
     local completedAir = 0
+    local completedAirScout = 0
     for _, unit in ipairs(units or {}) do
         if unit.complete == true then
             if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
             if unit.role == 'land_factory' then completedLand = completedLand + 1 end
             if unit.role == 'air_factory' then completedAir = completedAir + 1 end
+            if unit.role == 'air_scout' then completedAirScout = completedAirScout + 1 end
         end
     end
     local protectLandCombat = macro
@@ -1835,19 +1842,34 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             and factory.complete == true
             and factory.idle == true
             and not pendingActors[factory.token]
-            and not plannedAirScreen
-            and (counts.interceptor or 0) < 4
-            and CanBuild(factory, 'interceptor')
         then
-            AddIntent(intents, {
-                kind = 'factory_build',
-                actorToken = factory.token,
-                buildRole = 'interceptor',
-                priority = 31,
-                reason = 'persistent_air_screen',
-            })
-            counts.interceptor = (counts.interceptor or 0) + 1
-            plannedAirScreen = true
+            if completedAirScout < 1
+                and not plannedAirScout
+                and CanBuild(factory, 'air_scout')
+            then
+                AddIntent(intents, {
+                    kind = 'factory_build',
+                    actorToken = factory.token,
+                    buildRole = 'air_scout',
+                    priority = 24,
+                    reason = 'initial_frontier_air_scout',
+                })
+                plannedAirScout = true
+            elseif completedAirScout >= 1
+                and not plannedAirScreen
+                and (counts.interceptor or 0) < 4
+                and CanBuild(factory, 'interceptor')
+            then
+                AddIntent(intents, {
+                    kind = 'factory_build',
+                    actorToken = factory.token,
+                    buildRole = 'interceptor',
+                    priority = 31,
+                    reason = 'persistent_air_screen',
+                })
+                counts.interceptor = (counts.interceptor or 0) + 1
+                plannedAirScreen = true
+            end
         elseif factory.role == 'land_factory_t2'
             and factory.complete == true
             and factory.idle == true
@@ -1987,6 +2009,42 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             priority = 32,
             reason = 'defensive_air_screen',
         })
+    end
+    local selectedSite = nil
+    if macro
+        and type(macro.selectedFrontierSite) == 'string'
+        and macro.selectedFrontierSite ~= 'none'
+    then
+        for _, site in ipairs(((snapshot.sites or {}).mass) or {}) do
+            if site.key == macro.selectedFrontierSite
+                and IsUsablePosition(site.position)
+                and IsUsablePosition(snapshot.basePosition)
+                and PositionDistanceSquared(site.position, snapshot.basePosition) > 0.01
+            then
+                selectedSite = site
+                break
+            end
+        end
+    end
+    if selectedSite then
+        for _, unit in ipairs(units or {}) do
+            if unit.role == 'air_scout'
+                and unit.complete == true
+                and unit.idle == true
+                and unit.airScoutAssigned ~= true
+                and not pendingActors[unit.token]
+            then
+                AddIntent(intents, {
+                    kind = 'air_scout',
+                    actorToken = unit.token,
+                    siteKey = selectedSite.key,
+                    position = selectedSite.position,
+                    priority = 32,
+                    reason = 'public_frontier_recon',
+                })
+                break
+            end
+        end
     end
 end
 
@@ -2354,6 +2412,7 @@ Policy.requestEconomy = {
     lab = { massDrain = 0.5, energyDrain = 2, massCost = 30, energyCost = 120, duration = 60 },
     tank = { massDrain = 0.373333, energyDrain = 1.773333, massCost = 56, energyCost = 266, duration = 150 },
     interceptor = { massDrain = 0.2, energyDrain = 9, massCost = 50, energyCost = 2250, duration = 250 },
+    air_scout = { massDrain = 0.4, energyDrain = 5.8, massCost = 40, energyCost = 580, duration = 100 },
     t2_direct_fire = { massDrain = 0.9, energyDrain = 4.5, massCost = 198, energyCost = 990, duration = 220 },
     t2_anti_air = { massDrain = 0.8, energyDrain = 4, massCost = 160, energyCost = 800, duration = 200 },
 }
@@ -2482,6 +2541,9 @@ Policy.ApplyAllocator = function(snapshot, intents)
             and landCombatRoles[a.buildRole] == true
         then ap = 31 end
         if a.kind == 'factory_upgrade' then ap = 20.5 end
+        if a.kind == 'factory_build'
+            and a.reason == 'initial_frontier_air_scout'
+        then ap = 20.75 end
         if reserveLandCombat and hasLandCombatRequest and leadingExpansion
             and a ~= leadingExpansion
             and (a.kind == 'build_structure'
@@ -2504,6 +2566,9 @@ Policy.ApplyAllocator = function(snapshot, intents)
             and landCombatRoles[b.buildRole] == true
         then bp = 31 end
         if b.kind == 'factory_upgrade' then bp = 20.5 end
+        if b.kind == 'factory_build'
+            and b.reason == 'initial_frontier_air_scout'
+        then bp = 20.75 end
         if reserveLandCombat and hasLandCombatRequest and leadingExpansion
             and b ~= leadingExpansion
             and (b.kind == 'build_structure'
@@ -2547,8 +2612,12 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local protectedCombat = intent == protectedCombatIntent
             local protectedAirScreen = intent.kind == 'factory_build'
                 and intent.reason == 'persistent_air_screen'
+            local protectedAirScout = intent.kind == 'factory_build'
+                and intent.reason == 'initial_frontier_air_scout'
             local concurrentUnlock = intent == concurrentUnlockIntent
-            local protectedFactoryLane = protectedCombat or protectedAirScreen
+            local protectedFactoryLane = protectedCombat
+                or protectedAirScreen
+                or protectedAirScout
                 or (concurrentUnlock and protectedCombatAccepted)
             local protectedUsesBank = false
             if allowed and structureRequest then

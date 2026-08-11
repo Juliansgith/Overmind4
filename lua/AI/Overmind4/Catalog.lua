@@ -12,6 +12,7 @@ local IdByRole = {
     anti_air = 'uel0104',
     lab = 'uel0106',
     tank = 'uel0201',
+    air_scout = 'uea0101',
     interceptor = 'uea0102',
     t2_direct_fire = 'uel0202',
     t2_anti_air = 'uel0205',

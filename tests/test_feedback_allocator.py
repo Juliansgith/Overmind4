@@ -684,6 +684,7 @@ def _air_screen_allocator_snapshot(
 ) -> dict[str, Any]:
     snapshot = _policy_allocator_snapshot(
         *(["air_factory"] * air_factories),
+        "air_scout",
         *(["interceptor"] * interceptors),
     )
     snapshot["sites"]["mass"] = []
@@ -696,6 +697,56 @@ def _air_screen_allocator_snapshot(
         oneTimeEnergyReserve=0,
     )
     return snapshot
+
+
+def _air_scout_allocator_snapshot() -> dict[str, Any]:
+    snapshot = _policy_allocator_snapshot("air_factory")
+    air = next(unit for unit in snapshot["units"] if unit["role"] == "air_factory")
+    air["canBuild"].update(air_scout=True, interceptor=True)
+    snapshot["sites"]["mass"] = []
+    snapshot["sites"]["hydro"] = []
+    snapshot["macro"].update(
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+    )
+    return snapshot
+
+
+@pytest.mark.parametrize(
+    ("mass", "energy", "bank_mass", "bank_energy", "expected"),
+    [
+        (0.4, 5.8, 0, 0, 1),
+        (0.399, 5.8, 0, 0, 0),
+        (0.4, 5.799, 0, 0, 0),
+        (0, 0, 40, 580, 1),
+        (0, 0, 39.999, 580, 0),
+        (0, 0, 40, 579.999, 0),
+    ],
+)
+def test_air_scout_uses_exact_recurring_or_full_bank_before_factory_slots(
+    mass: float,
+    energy: float,
+    bank_mass: float,
+    bank_energy: float,
+    expected: int,
+) -> None:
+    snapshot = _air_scout_allocator_snapshot()
+    snapshot["macro"].update(
+        availableRecurringMass=mass,
+        availableRecurringEnergy=energy,
+        oneTimeMassReserve=bank_mass,
+        oneTimeEnergyReserve=bank_energy,
+    )
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("buildRole") == "air_scout"
+    ]
+
+    assert len(builds) == expected
 
 
 @pytest.mark.parametrize("available_energy, expected", [(8.999, 0), (9.0, 1)])
@@ -845,7 +896,7 @@ def test_air_screen_bank_is_reserved_before_speculative_mex() -> None:
 
 def test_funded_air_land_and_expansion_lanes_use_distinct_actors() -> None:
     snapshot = _policy_allocator_snapshot(
-        "air_factory", "land_factory", "land_factory", "engineer",
+        "air_factory", "air_scout", "land_factory", "land_factory", "engineer",
     )
     snapshot["sites"]["hydro"] = []
     snapshot["sites"]["mass"] = [mass_site("funded", 25, 20, frontier=True)]

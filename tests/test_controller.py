@@ -84,6 +84,7 @@ def make_harness() -> ControllerHarness:
             uel0105 = { BlueprintId = 'uel0105', Economy = { BuildTime = 260, BuildCostMass = 52, BuildCostEnergy = 260, BuildRate = 5 } },
             uel0106 = { BlueprintId = 'uel0106', Economy = { BuildTime = 120, BuildCostMass = 30, BuildCostEnergy = 120 } },
             uel0201 = { BlueprintId = 'uel0201', Economy = { BuildTime = 300, BuildCostMass = 56, BuildCostEnergy = 266 } },
+            uea0101 = { BlueprintId = 'uea0101', Economy = { BuildTime = 200, BuildCostMass = 40, BuildCostEnergy = 580 } },
             uea0102 = { BlueprintId = 'uea0102', Economy = { BuildTime = 500, BuildCostMass = 50, BuildCostEnergy = 2250 } },
             uel0202 = { BlueprintId = 'uel0202', Economy = { BuildTime = 880, BuildCostMass = 198, BuildCostEnergy = 990 } },
             uel0205 = { BlueprintId = 'uel0205', Economy = { BuildTime = 800, BuildCostMass = 160, BuildCostEnergy = 800 } },

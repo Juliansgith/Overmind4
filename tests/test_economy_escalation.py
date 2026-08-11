@@ -145,6 +145,7 @@ def test_catalog_contains_pinned_uef_air_and_t2_vertical_slice() -> None:
     catalog = lua.globals().Catalog
     expected = {
         "air_factory": "ueb0102",
+        "air_scout": "uea0101",
         "interceptor": "uea0102",
         "land_factory_t2": "ueb0201",
         "t2_direct_fire": "uel0202",
@@ -662,7 +663,15 @@ def test_air_factory_exact_milestone_gate(
 def test_air_factory_produces_interceptor_and_assigns_fair_defensive_patrol() -> None:
     snapshot = economy_policy_snapshot("hydrocarbon", "air_factory")
     air = next(unit for unit in snapshot["units"] if unit["role"] == "air_factory")
-    air.update(idle=True, needsRally=False, canBuild={"interceptor": True})
+    air.update(idle=True, needsRally=False, canBuild={"air_scout": True, "interceptor": True})
+    snapshot["units"].append({
+        "token": "899:1",
+        "role": "air_scout",
+        "complete": True,
+        "idle": False,
+        "position": [20, 2, 20],
+        "canBuild": {},
+    })
     interceptor = {
         "token": "900:1",
         "role": "interceptor",
@@ -682,6 +691,46 @@ def test_air_factory_produces_interceptor_and_assigns_fair_defensive_patrol() ->
     patrol = only(result, "air_screen")
     assert patrol["actorTokens"] == ["900:1"]
     assert patrol["position"] in (snapshot["basePosition"], snapshot.get("rallyPosition"))
+
+
+def test_air_factory_builds_one_scout_before_any_interceptor() -> None:
+    snapshot = economy_policy_snapshot("hydrocarbon", "air_factory", "air_factory")
+    for unit in snapshot["units"]:
+        if unit["role"] == "air_factory":
+            unit.update(idle=True, needsRally=False)
+            unit["canBuild"].update(air_scout=True, interceptor=True)
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("buildRole") in {"air_scout", "interceptor"}
+    ]
+
+    assert len(builds) == 1
+    assert builds[0]["buildRole"] == "air_scout"
+    assert builds[0]["reason"] == "initial_frontier_air_scout"
+
+
+def test_pending_air_scout_suppresses_duplicate_and_interceptor_until_complete() -> None:
+    snapshot = economy_policy_snapshot("hydrocarbon", "air_factory", "air_factory")
+    factories = sorted(
+        (unit for unit in snapshot["units"] if unit["role"] == "air_factory"),
+        key=lambda unit: unit["token"],
+    )
+    for factory in factories:
+        factory["canBuild"].update(air_scout=True, interceptor=True)
+    snapshot["pending"].append({
+        "kind": "factory_build",
+        "actorToken": factories[0]["token"],
+        "buildRole": "air_scout",
+        "phase": "accepted",
+    })
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("buildRole") in {"air_scout", "interceptor"}
+    ]
+
+    assert builds == []
 
 
 def test_air_screen_executor_rejects_enemy_target_and_accepts_exact_own_base() -> None:
@@ -761,6 +810,118 @@ def test_air_screen_execution_revalidates_exact_live_interceptor_generation(
     assert len(harness.calls.clear) == 0
     assert len(harness.calls.patrol) == 0
     assert harness.controller.airAssignments["90:1"] is None
+
+
+def test_completed_idle_air_scout_targets_exact_public_selected_frontier_site() -> None:
+    snapshot = economy_policy_snapshot("hydrocarbon", "air_factory", "air_scout")
+    scout = next(unit for unit in snapshot["units"] if unit["role"] == "air_scout")
+    scout.update(idle=True, airScoutAssigned=False)
+    snapshot["sites"]["mass"] = [mass_site("public-frontier", 70, 40, frontier=True)]
+    snapshot["macro"]["selectedFrontierSite"] = "public-frontier"
+
+    intent = only(decide(snapshot), "air_scout")
+
+    assert intent["actorToken"] == scout["token"]
+    assert intent["siteKey"] == "public-frontier"
+    assert intent["position"] == [70, 2, 40]
+
+
+def _live_frontier_air_scout() -> tuple[Any, Any, Any, dict[str, Any]]:
+    harness = make_harness()
+    scout = harness.unit(entityId=91, blueprintId="uea0101", position=[10, 2, 20])
+    harness.brain.units = harness.lua.table_from([scout])
+    first = harness.observe()
+    site = next(
+        value for value in plain(first.sites.mass)
+        if value["key"] == first.macro.selectedFrontierSite
+    )
+    observation = first
+    intent = {
+        "kind": "air_scout",
+        "actorToken": "91:1",
+        "siteKey": site["key"],
+        "position": site["position"],
+        "priority": 32,
+        "reason": "public_frontier_recon",
+    }
+    return harness, scout, observation, intent
+
+
+def test_air_factory_executor_accepts_exact_uef_air_scout_product() -> None:
+    harness = make_harness()
+    factory = harness.unit(
+        entityId=80,
+        blueprintId="ueb0102",
+        canBuild={"uea0101": True},
+    )
+    harness.brain.units = harness.lua.table_from([factory])
+    observation = harness.observe()
+
+    execute_intents(harness, [{
+        "kind": "factory_build",
+        "actorToken": "80:1",
+        "buildRole": "air_scout",
+        "priority": 24,
+        "reason": "initial_frontier_air_scout",
+    }], observation)
+
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].blueprintId == "uea0101"
+
+
+def test_frontier_air_scout_orders_once_and_emits_exact_site_telemetry() -> None:
+    harness, _, observation, intent = _live_frontier_air_scout()
+
+    execute_intents(harness, [intent], observation)
+    execute_intents(harness, [intent], observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "patrol"]
+    target = plain(harness.calls.patrol[1].position)
+    base = plain(observation.basePosition)
+    assert (target[0], target[2]) != (base[0], base[2])
+    assert harness.controller.airScoutAssignments["91:1"] is True
+    assert any(
+        "command=patrol" in line
+        and "role=air_scout" in line
+        and f"site={intent['siteKey']}" in line
+        for line in harness.logs
+    )
+
+
+@pytest.mark.parametrize("invalid", ["missing", "wrong_position", "nan"])
+def test_frontier_air_scout_rejects_missing_or_malformed_selected_site(invalid: str) -> None:
+    harness, _, observation, intent = _live_frontier_air_scout()
+    if invalid == "missing":
+        intent["siteKey"] = "missing"
+    elif invalid == "wrong_position":
+        intent["position"] = [intent["position"][0] + 1, 2, intent["position"][2]]
+    else:
+        intent["position"] = [intent["position"][0], float("nan"), intent["position"][2]]
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.patrol) == 0
+
+
+@pytest.mark.parametrize("mutation", ["dead", "captured", "recycled", "busy"])
+def test_frontier_air_scout_revalidates_exact_live_idle_generation(mutation: str) -> None:
+    harness, scout, observation, intent = _live_frontier_air_scout()
+    if mutation == "dead":
+        scout.Dead = True
+    elif mutation == "captured":
+        scout.options.army = 2
+    elif mutation == "busy":
+        scout.options.idleState = False
+    else:
+        replacement = harness.unit(entityId=91, blueprintId="uea0101")
+        harness.brain.units = harness.lua.table_from([replacement])
+        harness.controller.unitRefs["91:1"] = replacement
+
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.clear) == 0
+    assert len(harness.calls.patrol) == 0
 
 
 @pytest.mark.parametrize(
