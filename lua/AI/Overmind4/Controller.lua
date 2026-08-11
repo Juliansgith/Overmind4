@@ -11560,6 +11560,19 @@ Controller.Step = function(controller)
             directorClaims[job.actorToken] = true
         end
     end
+    for _, mission in pairs(controller.transportMissions or {}) do
+        if type(mission.transportToken) == 'string' then
+            directorClaims[mission.transportToken] = true
+        end
+        for _, token in ipairs(mission.cargoTokens or {}) do
+            if type(token) == 'string' then directorClaims[token] = true end
+        end
+    end
+    for _, delivery in pairs(controller.transportDeliveries or {}) do
+        if type(delivery.actorToken) == 'string' then
+            directorClaims[delivery.actorToken] = true
+        end
+    end
     for _, intent in ipairs(directorIntents or {}) do
         if type(intent.actorToken) == 'string' then
             directorClaims[intent.actorToken] = true

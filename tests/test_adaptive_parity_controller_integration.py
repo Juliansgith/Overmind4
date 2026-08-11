@@ -2561,6 +2561,51 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
     assert len(harness.calls.transportLoad) == 0
 
 
+def test_unloading_airlift_keeps_cargo_engineer_out_of_policy_work() -> None:
+    harness = make_harness()
+    drop = [300, 2, 300]
+    cargo = harness.unit(
+        entityId=32,
+        blueprintId="uel0105",
+        position=drop,
+        attached=True,
+        canBuild={"ueb3101": True},
+    )
+    transport = harness.unit(
+        entityId=31,
+        blueprintId="uea0107",
+        position=drop,
+        cargo=[cargo],
+    )
+    harness.brain.units = harness.lua.table_from([transport, cargo])
+    harness.controller.transportMissions["airlift:front"] = lua_value(
+        harness.lua,
+        {
+            "missionId": "airlift:front",
+            "state": "unloading",
+            "transportToken": "31:1",
+            "cargoTokens": ["32:1"],
+            "siteKey": "front",
+            "dropPosition": drop,
+            "dropTolerance": 20,
+            "deadlineTick": 900,
+            "retryCount": 0,
+        },
+    )
+    harness.lua.execute(
+        "Policy.Decide = function() return {{"
+        "kind = 'build_structure', actorToken = '32:1', buildRole = 'radar', "
+        "position = { 20, 2, 20 }, reason = 'policy_probe' }} end"
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 0
+    assert plain(harness.controller.transportMissions["airlift:front"])["state"] == (
+        "unloading"
+    )
+
+
 def test_loaded_transport_reconcile_rejects_attached_foreign_extra_cargo() -> None:
     harness = make_harness()
     cargo = harness.unit(
