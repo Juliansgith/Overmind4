@@ -537,6 +537,74 @@ def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoin
     assert len({intent["actorToken"] for intent in orders}) == 2
 
 
+def test_live_two_factory_lane_builds_one_missing_engineer_then_returns_both_to_combat() -> None:
+    initial = _policy_allocator_snapshot()
+    initial["tick"] = 5815
+    initial["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=0,
+        factoryFundedCount=0,
+        availableRecurringMass=1.9,
+        availableRecurringEnergy=6,
+        expansionRecurringMassBudget=1.9,
+        expansionRecurringEnergyBudget=6,
+        oneTimeMassReserve=820,
+        oneTimeEnergyReserve=4000,
+    )
+
+    initial_orders = intents_of(decide(initial), "factory_build")
+    assert sorted((intent["buildRole"], intent["reason"]) for intent in initial_orders) == [
+        ("engineer", "unlock_profitable_expansion"),
+        ("tank", "continuous_land_production"),
+    ]
+    assert len({intent["actorToken"] for intent in initial_orders}) == 2
+
+    pending = copy.deepcopy(initial)
+    pending["pending"] = [
+        {
+            "kind": "factory_build",
+            "actorToken": "11:1",
+            "buildRole": "engineer",
+            "phase": "accepted",
+        }
+    ]
+    pending_orders = intents_of(decide(pending), "factory_build")
+    assert [(intent["buildRole"], intent["reason"]) for intent in pending_orders] == [
+        ("tank", "continuous_land_production")
+    ]
+
+    completed = copy.deepcopy(initial)
+    completed["macro"]["factoryFundedCount"] = 2
+    completed["units"].append(
+        {
+            "token": "99:1",
+            "role": "engineer",
+            "complete": True,
+            "idle": True,
+            "healthRatio": 1,
+            "position": [24, 2, 20],
+            "buildRate": 5,
+            "canBuild": {},
+        }
+    )
+    completed_orders = intents_of(decide(completed), "factory_build")
+    assert all(intent["buildRole"] != "engineer" for intent in completed_orders)
+    assert sorted(intent["actorToken"] for intent in completed_orders) == ["10:1", "11:1"]
+
+    starved = copy.deepcopy(initial)
+    starved["macro"].update(
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=TANK_MASS_COST - 0.001,
+        oneTimeEnergyReserve=TANK_ENERGY_COST,
+    )
+    assert intents_of(decide(starved), "factory_build") == []
+
+
 @pytest.mark.parametrize(
     ("available_mass", "available_energy", "bank_mass", "bank_energy"),
     [

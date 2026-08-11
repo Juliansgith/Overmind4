@@ -1899,7 +1899,10 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     and not plannedEngineer
                     and macro
                     and macro.allocatorEnabled == true
-                    and macro.unlockingEngineerNeeded == true
+                    and (macro.unlockingEngineerNeeded == true
+                        or (protectLandCombat
+                            and completedLand >= 2
+                            and completedEngineers < engineerDemand))
                     and (counts.engineer or 0) < engineerDemand
                     and CanBuild(factory, 'engineer')
                 then
