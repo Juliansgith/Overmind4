@@ -9644,27 +9644,169 @@ ESCALATION.DirectorForceInput = function(controller, observation, macroPlan, int
     }
 end
 
+ESCALATION.JobActorIdentity = function(token)
+    if type(token) ~= 'string' then return nil end
+    local identity, generation = string.match(token, '^(.+):(%d+)$')
+    if type(identity) ~= 'string' or identity == '' or generation == nil then
+        return nil
+    end
+    return identity
+end
+
+ESCALATION.JobActorLineage = function(job)
+    if type(job) ~= 'table' then return nil end
+    local currentIdentity = ESCALATION.JobActorIdentity(job.actorToken)
+    if not currentIdentity then return nil end
+    local lineage = {}
+    if job.actorLineage ~= nil then
+        if type(job.actorLineage) ~= 'table' then return nil end
+        for identity, token in pairs(job.actorLineage) do
+            if type(identity) ~= 'string' or identity == ''
+                or ESCALATION.JobActorIdentity(token) ~= identity
+            then
+                return nil
+            end
+            lineage[identity] = token
+        end
+    end
+    if lineage[currentIdentity] and lineage[currentIdentity] ~= job.actorToken then
+        return nil
+    end
+    lineage[currentIdentity] = job.actorToken
+    return lineage
+end
+
+ESCALATION.JobEpoch = function(job)
+    if type(job) ~= 'table' then return nil end
+    if job.jobEpoch == nil then return 0 end
+    local epoch = job.jobEpoch
+    if type(epoch) ~= 'number' or epoch ~= epoch
+        or epoch < 0 or epoch > 1000000000 or epoch ~= math.floor(epoch)
+    then
+        return nil
+    end
+    return epoch
+end
+
+ESCALATION.JobSiteKey = function(job)
+    if type(job) ~= 'table' or type(job.targetKey) ~= 'string'
+        or job.targetKey == ''
+    then
+        return nil
+    end
+    if job.siteKey ~= nil
+        and (type(job.siteKey) ~= 'string' or job.siteKey ~= job.targetKey)
+    then
+        return nil
+    end
+    return job.siteKey or job.targetKey
+end
+
+ESCALATION.ValidExpansionJob = function(job)
+    local position = type(job) == 'table' and CopyPosition(job.position) or nil
+    return type(job) == 'table'
+        and type(job.id) == 'string' and job.id ~= ''
+        and ESCALATION.JobActorIdentity(job.actorToken) ~= nil
+        and ESCALATION.JobActorLineage(job) ~= nil
+        and ESCALATION.JobSiteKey(job) ~= nil
+        and ESCALATION.JobEpoch(job) ~= nil
+        and position ~= nil
+        and ESCALATION.FiniteEconomyNumber(position[1], true)
+        and ESCALATION.FiniteEconomyNumber(position[2], true)
+        and ESCALATION.FiniteEconomyNumber(position[3], true)
+end
+
+ESCALATION.JobRestartDecision = function(existing, incoming)
+    if not ESCALATION.ValidExpansionJob(incoming) then return false, false end
+    if not existing then return true, false end
+    if not ESCALATION.ValidExpansionJob(existing)
+        or existing.id ~= incoming.id
+        or ESCALATION.JobSiteKey(existing) ~= ESCALATION.JobSiteKey(incoming)
+    then
+        return false, false
+    end
+    if existing.phase ~= 'retryable' and existing.phase ~= 'cancelled'
+        and existing.phase ~= 'completed'
+    then
+        return false, false
+    end
+    local existingEpoch = ESCALATION.JobEpoch(existing)
+    local incomingEpoch = ESCALATION.JobEpoch(incoming)
+    if incomingEpoch < existingEpoch then return false, false end
+    if incomingEpoch > existingEpoch
+        or existing.phase == 'completed' or existing.phase == 'cancelled'
+    then
+        return true, true
+    end
+    local incomingIdentity = ESCALATION.JobActorIdentity(incoming.actorToken)
+    local existingLineage = ESCALATION.JobActorLineage(existing)
+    if existingLineage[incomingIdentity]
+        and existingLineage[incomingIdentity] ~= incoming.actorToken
+    then
+        return false, false
+    end
+    return true, false
+end
+
+ESCALATION.OrderedExpansionJobs = function(jobs)
+    local ordered = {}
+    if type(jobs) == 'table' then
+        for key, job in pairs(jobs) do
+            if type(key) == 'number' and key >= 1 and key <= 1000000
+                and key == math.floor(key)
+            then
+                TableInsert(ordered, ESCALATION.DeepCopy(job))
+            end
+        end
+    end
+    table.sort(ordered, function(a, b)
+        local aId = type(a) == 'table' and tostring(a.id or '') or ''
+        local bId = type(b) == 'table' and tostring(b.id or '') or ''
+        if aId ~= bId then return aId < bId end
+        local aEpoch = ESCALATION.JobEpoch(a) or -1
+        local bEpoch = ESCALATION.JobEpoch(b) or -1
+        if aEpoch ~= bEpoch then return aEpoch > bEpoch end
+        local aActor = type(a) == 'table' and tostring(a.actorToken or '') or ''
+        local bActor = type(b) == 'table' and tostring(b.actorToken or '') or ''
+        if aActor ~= bActor then return aActor < bActor end
+        local aSite = type(a) == 'table' and tostring(a.siteKey or '') or ''
+        local bSite = type(b) == 'table' and tostring(b.siteKey or '') or ''
+        return aSite < bSite
+    end)
+    return ordered
+end
+
 ESCALATION.DirectorJobInput = function(controller, observation, expansionPlan)
     local newJobs = {}
-    for _, job in ipairs((expansionPlan or {}).jobs or {}) do
-        local existing = type(job.id) == 'string'
+    local selectedIds = {}
+    for _, job in ipairs(ESCALATION.OrderedExpansionJobs(
+            (expansionPlan or {}).jobs or {}))
+    do
+        local existing = type(job) == 'table' and type(job.id) == 'string'
             and (controller.jobLedger.jobs or {})[job.id]
             or nil
-        if type(job.id) == 'string'
-            and (not existing or existing.phase == 'retryable'
-                or existing.phase == 'cancelled')
-        then
+        local admitted, reset = ESCALATION.JobRestartDecision(existing, job)
+        if admitted and not selectedIds[job.id] then
             local candidate = ESCALATION.DeepCopy(job)
             if existing then
-                candidate.retryCount = math.max(
+                local retryCount = math.max(
                     tonumber(candidate.retryCount) or 0,
-                    tonumber(existing.retryCount) or 0
-                )
-                candidate.ordered = existing.ordered
-                candidate.orderedActorToken = existing.orderedActorToken
-                candidate.orderedAttempt = existing.orderedAttempt
+                    tonumber(existing.retryCount) or 0)
+                candidate.retryCount = reset == true and retryCount + 1 or retryCount
+                candidate.ordered = reset ~= true and existing.ordered or nil
+                candidate.orderedActorToken = reset ~= true
+                    and existing.orderedActorToken or nil
+                candidate.orderedAttempt = reset ~= true
+                    and existing.orderedAttempt or nil
             end
+            local actorLineage = reset ~= true and existing
+                and ESCALATION.JobActorLineage(existing) or {}
+            actorLineage[ESCALATION.JobActorIdentity(candidate.actorToken)] =
+                candidate.actorToken
+            candidate.actorLineage = actorLineage
+            candidate.failureReason = nil
             TableInsert(newJobs, candidate)
+            selectedIds[job.id] = true
         end
     end
     local targets = {}
@@ -9720,7 +9862,12 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         ESCALATION.DirectorExpansionInput(controller, observation, macroPlan)
     ) or { jobs = {}, denials = {} }
     expansionPlan = ESCALATION.DeepCopy(expansionPlan)
-    for _, job in ipairs(expansionPlan.jobs or {}) do
+    local expansionJobs = {}
+    for _, job in ipairs(ESCALATION.OrderedExpansionJobs(expansionPlan.jobs)) do
+        if type(job) == 'table' then TableInsert(expansionJobs, job) end
+    end
+    expansionPlan.jobs = expansionJobs
+    for _, job in ipairs(expansionJobs) do
         for index, region in ipairs(macroPlan.regions or {}) do
             if region.key == job.regionKey
                 and TableGetn(job.escortTokens or {}) > 0

@@ -35,6 +35,12 @@ def _use_real_macro_job_ledger(harness: Any) -> None:
     )
 
 
+def _use_real_macro_expansion_and_job_ledger(harness: Any) -> None:
+    """Exercise production expansion selection and its persistent job ledger."""
+    _use_real_macro_job_ledger(harness)
+    harness.lua.execute("MacroDirectorStub.PlanExpansion = MacroDirector.PlanExpansion")
+
+
 def _configure_local_expansion(
     harness: Any,
     *,
@@ -2170,6 +2176,429 @@ def test_real_ledger_replacement_fails_closed_without_an_eligible_new_identity()
     assert ledger_job["phase"] == "retryable"
     assert ledger_job["failureReason"] == "actor_unavailable"
     assert ledger_job["actorToken"] == "72:1"
+
+
+def test_real_expansion_recycled_identity_stays_quarantined_when_same_job_returns() -> None:
+    harness = make_harness()
+    _use_real_macro_expansion_and_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    original = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([original])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    first_pending = plain(harness.controller.pending)
+    assert list(first_pending) == ["72:1"]
+    operation_id = first_pending["72:1"]["operationId"]
+    assert [
+        call.units[1].options.entityId for call in harness.calls.buildMobile.values()
+    ] == [72]
+
+    recycled = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([recycled])
+    harness.brain.tick = 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    quarantined = plain(harness.controller.jobLedger)["jobs"][operation_id]
+    assert quarantined["phase"] == "retryable"
+    assert quarantined["failureReason"] == "actor_unavailable"
+    assert quarantined["actorToken"] == "72:1"
+    assert plain(harness.controller.pending) == {}
+
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert plain(harness.controller.pending) == {}
+    still_quarantined = plain(harness.controller.jobLedger)["jobs"][operation_id]
+    assert still_quarantined["phase"] == "retryable"
+    assert still_quarantined["actorToken"] == "72:1"
+
+
+def test_retryable_job_prefers_fresh_entity_independently_of_new_job_order() -> None:
+    for actor_order in (("72:2", "73:1"), ("73:1", "72:2")):
+        harness = make_harness()
+        _use_real_macro_job_ledger(harness)
+        harness.lua.execute("Policy.Decide = function() return {} end")
+        original = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([original])
+        harness.observe()
+        recycled = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[11, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        fresh = harness.unit(
+            entityId=73,
+            blueprintId="uel0105",
+            position=[13, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([recycled, fresh])
+        site, template = _configure_local_expansion(harness)
+        incoming = [{**template, "actorToken": token} for token in actor_order]
+        _set_director_result(
+            harness, "expansionPlan", {"jobs": incoming, "denials": []}
+        )
+        harness.controller.jobLedger = lua_value(
+            harness.lua,
+            {
+                "epoch": 1,
+                "jobs": {
+                    template["id"]: {
+                        **template,
+                        "phase": "retryable",
+                        "failureReason": "actor_unavailable",
+                        "retryCount": 1,
+                    }
+                },
+                "releasedActorTokens": [],
+            },
+        )
+
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        assert [
+            call.units[1].options.entityId
+            for call in harness.calls.buildMobile.values()
+        ] == [73]
+        assert list(plain(harness.controller.pending)) == ["73:1"]
+        ledger_job = plain(harness.controller.jobLedger)["jobs"][template["id"]]
+        assert ledger_job["actorToken"] == "73:1"
+        assert plain(harness.controller.reservations)[site["key"]]["actorToken"] == "73:1"
+
+
+def test_recycled_identity_quarantine_survives_fresh_replacement_in_same_epoch() -> None:
+    harness = make_harness()
+    _use_real_macro_expansion_and_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    harness.controller.markers.mass = harness.lua.table_from(
+        [harness.controller.markers.mass[1]]
+    )
+    original = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([original])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    operation_id = plain(harness.controller.pending)["72:1"]["operationId"]
+
+    recycled = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    fresh = harness.unit(
+        entityId=73,
+        blueprintId="uel0105",
+        position=[13, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([recycled, fresh])
+    harness.brain.tick = 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert [
+        call.units[1].options.entityId for call in harness.calls.buildMobile.values()
+    ] == [72, 73]
+    replaced_job = plain(harness.controller.jobLedger)["jobs"][operation_id]
+    assert replaced_job["actorLineage"] == {"72": "72:1", "73": "73:1"}
+
+    harness.brain.units = harness.lua.table_from([recycled])
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 2
+    assert plain(harness.controller.pending) == {}
+    quarantined = plain(harness.controller.jobLedger)["jobs"][operation_id]
+    assert quarantined["phase"] == "retryable"
+    assert quarantined["failureReason"] == "actor_unavailable"
+    assert quarantined["actorToken"] == "73:1"
+    assert quarantined["actorLineage"] == {"72": "72:1", "73": "73:1"}
+
+    harness.brain.tick = 3
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.buildMobile) == 2
+    assert plain(harness.controller.pending) == {}
+
+
+def test_explicit_new_job_epoch_releases_recycled_identity_quarantine() -> None:
+    harness = make_harness()
+    _use_real_macro_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    original = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([original])
+    harness.observe()
+    recycled = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([recycled])
+    _, template = _configure_local_expansion(harness)
+    previous = {
+        **template,
+        "jobEpoch": 3,
+        "phase": "retryable",
+        "failureReason": "actor_unavailable",
+        "retryCount": 1,
+    }
+    incoming = {**template, "actorToken": "72:2", "jobEpoch": 4}
+    harness.controller.jobLedger = lua_value(
+        harness.lua,
+        {
+            "epoch": 1,
+            "jobs": {template["id"]: previous},
+            "releasedActorTokens": [],
+        },
+    )
+    _set_director_result(
+        harness, "expansionPlan", {"jobs": [incoming], "denials": []}
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert [
+        call.units[1].options.entityId for call in harness.calls.buildMobile.values()
+    ] == [72]
+    pending = plain(harness.controller.pending)["72:2"]
+    assert pending["operationAttempt"] == 2
+    ledger_job = plain(harness.controller.jobLedger)["jobs"][template["id"]]
+    assert ledger_job["jobEpoch"] == 4
+    assert ledger_job["retryCount"] == 2
+
+
+def test_completed_expansion_site_starts_new_attempt_after_real_site_reset() -> None:
+    harness = make_harness()
+    _use_real_macro_expansion_and_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    harness.controller.markers.mass = harness.lua.table_from(
+        [harness.controller.markers.mass[1]]
+    )
+    engineer = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    first_pending = plain(harness.controller.pending)["72:1"]
+    operation_id = first_pending["operationId"]
+    completed_mex = harness.unit(
+        entityId=80,
+        blueprintId="ueb1103",
+        position=first_pending["position"],
+    )
+    harness.brain.units = harness.lua.table_from([engineer, completed_mex])
+    harness.brain.tick = 1
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert plain(harness.controller.pending) == {}
+    completed_job = plain(harness.controller.jobLedger)["jobs"][operation_id]
+    assert completed_job["phase"] == "completed"
+
+    harness.brain.units = harness.lua.table_from([engineer])
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 2
+    restarted = plain(harness.controller.pending)["72:1"]
+    assert restarted["operationId"] == operation_id
+    assert restarted["operationAttempt"] == 1
+
+
+def test_retryable_job_rejects_malformed_lineage_without_overwriting_history() -> None:
+    malformed_changes = (
+        {"actorToken": None},
+        {"actorToken": "72"},
+        {"actorToken": "72:new"},
+        {"actorToken": "malformed"},
+        {"actorToken": "73:1", "jobEpoch": float("nan")},
+        {"actorToken": "73:1", "jobEpoch": -1},
+        {"actorToken": "73:1", "siteKey": "other-site"},
+        {"actorToken": "73:1", "position": [float("inf"), 2, 20]},
+    )
+    for changes in malformed_changes:
+        harness = make_harness()
+        _use_real_macro_job_ledger(harness)
+        harness.lua.execute("Policy.Decide = function() return {} end")
+        original = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([original])
+        harness.observe()
+        recycled = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        fresh = harness.unit(
+            entityId=73,
+            blueprintId="uel0105",
+            position=[13, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([recycled, fresh])
+        _, template = _configure_local_expansion(harness)
+        previous = {
+            **template,
+            "jobEpoch": 0,
+            "phase": "retryable",
+            "failureReason": "actor_unavailable",
+            "retryCount": 1,
+        }
+        incoming = {**template, "actorToken": "72:2", "jobEpoch": 0, **changes}
+        harness.controller.jobLedger = lua_value(
+            harness.lua,
+            {
+                "epoch": 1,
+                "jobs": {template["id"]: previous},
+                "releasedActorTokens": [],
+            },
+        )
+        _set_director_result(
+            harness, "expansionPlan", {"jobs": [incoming], "denials": []}
+        )
+
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        assert len(harness.calls.buildMobile) == 0
+        assert plain(harness.controller.pending) == {}
+        preserved = plain(harness.controller.jobLedger)["jobs"][template["id"]]
+        assert preserved["actorToken"] == "72:1"
+        assert preserved["phase"] == "retryable"
+        assert preserved["jobEpoch"] == 0
+
+
+def test_non_table_new_jobs_do_not_block_a_valid_fresh_identity() -> None:
+    for entries in (
+        ("malformed", "fresh", 7),
+        (7, "fresh", "malformed"),
+        (None, "fresh", 7),
+        ("fresh", None),
+    ):
+        harness = make_harness()
+        _use_real_macro_job_ledger(harness)
+        harness.lua.execute("Policy.Decide = function() return {} end")
+        original = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([original])
+        harness.observe()
+        recycled = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[11, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        fresh = harness.unit(
+            entityId=73,
+            blueprintId="uel0105",
+            position=[13, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([recycled, fresh])
+        _, template = _configure_local_expansion(harness)
+        fresh_job = {**template, "actorToken": "73:1"}
+        jobs = [fresh_job if entry == "fresh" else entry for entry in entries]
+        harness.controller.jobLedger = lua_value(
+            harness.lua,
+            {
+                "epoch": 1,
+                "jobs": {
+                    template["id"]: {
+                        **template,
+                        "phase": "retryable",
+                        "failureReason": "actor_unavailable",
+                        "retryCount": 1,
+                    }
+                },
+                "releasedActorTokens": [],
+            },
+        )
+        _set_director_result(
+            harness, "expansionPlan", {"jobs": jobs, "denials": []}
+        )
+
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        assert [
+            call.units[1].options.entityId
+            for call in harness.calls.buildMobile.values()
+        ] == [73]
+        assert list(plain(harness.controller.pending)) == ["73:1"]
 
 
 def test_failed_expansion_command_becomes_a_new_attempt_then_dedupes_after_success() -> None:

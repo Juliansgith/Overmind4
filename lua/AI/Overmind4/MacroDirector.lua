@@ -560,6 +560,30 @@ local function ExactGenerationToken(token)
         and string.match(token, '^.+:%d+$') ~= nil
 end
 
+local function ActorLineage(job)
+    if type(job) ~= 'table' or not ExactGenerationToken(job.actorToken) then
+        return nil
+    end
+    local currentIdentity = TokenIdentity(job.actorToken)
+    local lineage = {}
+    if job.actorLineage ~= nil then
+        if type(job.actorLineage) ~= 'table' then return nil end
+        for identity, token in pairs(job.actorLineage) do
+            if type(identity) ~= 'string' or identity == ''
+                or not ExactGenerationToken(token) or TokenIdentity(token) ~= identity
+            then
+                return nil
+            end
+            lineage[identity] = token
+        end
+    end
+    if lineage[currentIdentity] and lineage[currentIdentity] ~= job.actorToken then
+        return nil
+    end
+    lineage[currentIdentity] = job.actorToken
+    return lineage
+end
+
 local function ValidPosition(position)
     return type(position) == 'table'
         and SignedNumber(position[1], nil) ~= nil
@@ -567,7 +591,7 @@ local function ValidPosition(position)
         and SignedNumber(position[3], nil) ~= nil
 end
 
-local function CanReplaceMexEngineer(actor, replacedToken)
+local function CanReplaceMexEngineer(actor, replacedToken, actorLineage)
     if type(actor) ~= 'table' or not ExactGenerationToken(actor.token)
         or not ValidPosition(actor.position)
     then
@@ -581,7 +605,10 @@ local function CanReplaceMexEngineer(actor, replacedToken)
     then
         return false
     end
-    return TokenIdentity(actor.token) ~= TokenIdentity(replacedToken)
+    local identity = TokenIdentity(actor.token)
+    return identity ~= TokenIdentity(replacedToken)
+        and not (actorLineage and actorLineage[identity]
+            and actorLineage[identity] ~= actor.token)
 end
 
 local function ExistingMexEngineerInvalid(actor)
@@ -604,11 +631,12 @@ local function ExistingMexEngineerInvalid(actor)
     return false
 end
 
-local function NearestReplacement(actors, target, claimed, replacedToken)
+local function NearestReplacement(actors, target, claimed, replacedToken, actorLineage)
     local best = nil
     local bestDistance = nil
     for _, actor in ipairs(actors or {}) do
-        if CanReplaceMexEngineer(actor, replacedToken) and not claimed[actor.token]
+        if CanReplaceMexEngineer(actor, replacedToken, actorLineage)
+            and not claimed[actor.token]
         then
             local distance = DistanceSquared(actor.position, target and target.position)
             if bestDistance == nil or distance < bestDistance
@@ -665,16 +693,20 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                 ReleaseJob(job, result, 'target_gone')
             elseif ExistingMexEngineerInvalid(actor) then
                 local oldToken = job.actorToken
+                local actorLineage = ActorLineage(job)
+                if actorLineage then job.actorLineage = actorLineage end
                 if oldToken then
                     claimed[oldToken] = nil
                     table.insert(result.releasedActorTokens, oldToken)
                 end
-                local replacement = NearestReplacement(
-                    snapshot.actors or {}, target, claimed, oldToken
-                )
+                local replacement = actorLineage and NearestReplacement(
+                    snapshot.actors or {}, target, claimed, oldToken, actorLineage
+                ) or nil
                 job.retryCount = (Number(job.retryCount, 0) or 0) + 1
                 if replacement then
                     job.actorToken = replacement.token
+                    actorLineage[TokenIdentity(replacement.token)] = replacement.token
+                    job.actorLineage = actorLineage
                     job.ordered = nil
                     job.orderedActorToken = nil
                     job.orderedAttempt = nil
