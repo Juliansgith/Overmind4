@@ -9342,11 +9342,13 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     local currentAir = 0
     local currentMex = 0
     local currentPower = 0
+    local currentHydro = 0
     for _, unit in ipairs(observation.units or {}) do
         if unit.complete == true then
             if unit.role == 'engineer' then currentEngineers = currentEngineers + 1 end
             if unit.roleFamily == 'mass_extractor' then currentMex = currentMex + 1 end
             if unit.role == 'power_generator' then currentPower = currentPower + 1 end
+            if unit.role == 'hydrocarbon' then currentHydro = currentHydro + 1 end
             if unit.role == 'land_factory' or unit.role == 'land_factory_t2'
                 or unit.role == 'land_factory_t2_support'
                 or unit.role == 'land_factory_t3'
@@ -9379,7 +9381,8 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         end
         if currentAir < (tonumber(macroPlan.airFactoryTarget) or currentAir) then
             local actor = currentLand > 0 and currentAir < 1
-                and currentPower >= 4 and currentMex >= 4
+                and (currentPower >= 4 or (currentPower >= 3 and currentHydro >= 1))
+                and currentMex >= 4
                 and ESCALATION.AvailableDirectorActor(
                 controller, observation, 'acu', 'air_factory', reserved
             ) or nil

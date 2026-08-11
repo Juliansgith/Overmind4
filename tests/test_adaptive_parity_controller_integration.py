@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from conftest import source
 from test_controller import execute_intents, make_harness
 from test_policy import lua_value, plain
@@ -1260,6 +1262,69 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
     order = harness.calls.buildMobile[1]
     assert order.blueprintId == "ueb0102"
     assert order.units[1].options.entityId == 1
+
+
+@pytest.mark.parametrize(
+    ("power_count", "has_hydro", "expected_orders"),
+    [
+        (3, True, 1),
+        (3, False, 0),
+        (4, False, 1),
+    ],
+)
+def test_acu_first_air_accepts_hydro_backed_three_generator_opening(
+    power_count: int,
+    has_hydro: bool,
+    expected_orders: int,
+) -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        canBuild={"ueb0102": True},
+    )
+    land_factory = harness.unit(entityId=20, blueprintId="ueb0101")
+    power = [
+        harness.unit(entityId=30 + index, blueprintId="ueb1101")
+        for index in range(power_count)
+    ]
+    mexes = [
+        harness.unit(entityId=40 + index, blueprintId="ueb1103")
+        for index in range(4)
+    ]
+    hydro = [harness.unit(entityId=50, blueprintId="ueb1102")] if has_hydro else []
+    harness.brain.units = harness.lua.table_from(
+        [acu, land_factory, *power, *mexes, *hydro]
+    )
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 1,
+            "airFactoryTarget": 1,
+            "lanes": {"factory_growth": {"admitted": True}},
+            "grants": [
+                {
+                    "requestId": "factory-1",
+                    "lane": "factory_growth",
+                    "source": "bank",
+                }
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == expected_orders
+    if expected_orders:
+        order = harness.calls.buildMobile[1]
+        assert order.blueprintId == "ueb0102"
+        assert order.units[1].options.entityId == 1
 
 
 def test_acu_finishes_local_power_and_mex_before_starting_first_air() -> None:
