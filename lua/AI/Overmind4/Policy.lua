@@ -816,11 +816,16 @@ end
 
 local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtualPlacements, pendingActors, underContact, allowPlacement, intents)
     local engineers = {}
+    local reclaimPatrolActive = false
     for _, unit in ipairs(units) do
+        if unit.role == 'engineer' and unit.reclaimPatrolAssigned == true then
+            reclaimPatrolActive = true
+        end
         if unit.role == 'engineer'
             and unit.complete == true
             and unit.idle == true
             and not pendingActors[unit.token]
+            and unit.reclaimPatrolAssigned ~= true
         then
             TableInsert(engineers, unit)
         end
@@ -1063,6 +1068,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local factoryTarget = macro and (tonumber(macro.factoryTarget)
         or tonumber(macro.factoryDemand)) or 2
     local placementAssignments = {}
+    local reclaimPatrolAssignments = {}
     local function AssignPlacement(role, index, priority, reason)
         local hasBuilder = false
         for _, engineer in ipairs(engineers) do
@@ -1256,6 +1262,61 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
     end
 
+    if not underContact
+        and not reclaimPatrolActive
+        and activeReclaimJobs == 0
+        and completedMex >= 4
+        and TableGetn(engineers) >= 4
+    then
+        local siteKeys = {}
+        local waypoints = {}
+        for _, site in ipairs(SortSites(massSites)) do
+            if site.complete == true
+                and site.localSite == true
+                and type(site.key) == 'string'
+                and IsUsablePosition(site.position)
+                and TableGetn(siteKeys) < 4
+            then
+                TableInsert(siteKeys, site.key)
+                TableInsert(waypoints, {
+                    site.position[1],
+                    site.position[2],
+                    site.position[3],
+                })
+            end
+        end
+        if TableGetn(siteKeys) >= 2 then
+            local best = nil
+            local bestDistance = nil
+            for _, engineer in ipairs(engineers) do
+                if not assignedEngineers[engineer.token]
+                    and engineer.campaignEngineer ~= true
+                    and IsUsablePosition(engineer.position)
+                then
+                    local distance = PositionDistanceSquared(
+                        engineer.position,
+                        snapshot.basePosition
+                    )
+                    if not best
+                        or distance < bestDistance
+                        or (distance == bestDistance
+                            and tostring(engineer.token) < tostring(best.token))
+                    then
+                        best = engineer
+                        bestDistance = distance
+                    end
+                end
+            end
+            if best then
+                assignedEngineers[best.token] = true
+                reclaimPatrolAssignments[best.token] = {
+                    siteKeys = siteKeys,
+                    waypoints = waypoints,
+                }
+            end
+        end
+    end
+
     -- Once required energy and the first strategic production milestone have
     -- had a chance to reserve their nearest home builder, the secured campaign
     -- may use every remaining engineer for distinct expansion opportunities.
@@ -1320,6 +1381,17 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
         if not intent and placementAssignments[engineer.token] then
             intent = placementAssignments[engineer.token]
+        end
+        if not intent and reclaimPatrolAssignments[engineer.token] then
+            local patrol = reclaimPatrolAssignments[engineer.token]
+            intent = {
+                kind = 'reclaim_patrol',
+                actorToken = engineer.token,
+                siteKeys = patrol.siteKeys,
+                waypoints = patrol.waypoints,
+                priority = 49,
+                reason = 'home_reclaim_patrol',
+            }
         end
         if not intent and expansionAssignments[engineer.token] then
             local assignedSite = expansionAssignments[engineer.token]

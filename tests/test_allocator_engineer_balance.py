@@ -663,6 +663,85 @@ def test_opening_air_power_is_not_starved_by_future_commitment_reservations() ->
     assert power[0]["reason"] == "opening_air_power"
 
 
+@pytest.mark.parametrize(("under_contact", "expected"), [(False, 1), (True, 0)])
+def test_one_home_engineer_patrols_completed_local_mexes_for_reclaim(
+    under_contact: bool,
+    expected: int,
+) -> None:
+    snapshot = _policy_allocator_snapshot("engineer", "engineer", "engineer")
+    for site in snapshot["sites"]["mass"]:
+        site["complete"] = True
+    if under_contact:
+        snapshot["enemyContact"] = {"position": [12, 2, 12], "immediate": True}
+
+    patrols = intents_of(decide(snapshot), "reclaim_patrol")
+
+    assert len(patrols) == expected
+    if expected:
+        assert patrols[0]["reason"] == "home_reclaim_patrol"
+        assert len(patrols[0]["siteKeys"]) == 4
+        assert len(patrols[0]["waypoints"]) == 4
+        actor = next(
+            unit
+            for unit in snapshot["units"]
+            if unit["token"] == patrols[0]["actorToken"]
+        )
+        assert actor["role"] == "engineer"
+
+
+def test_home_reclaim_patrol_issues_one_persistent_public_mex_loop() -> None:
+    harness = make_harness()
+    engineer = harness.unit(
+        entityId=70,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+    )
+    positions = [[12 + index * 4, 2, 20] for index in range(4)]
+    mexes = [
+        harness.unit(
+            entityId=80 + index,
+            blueprintId="ueb1103",
+            position=position,
+        )
+        for index, position in enumerate(positions)
+    ]
+    harness.brain.units = harness.lua.table_from([engineer, *mexes])
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                "key": f"local-{index}",
+                "name": f"Local {index}",
+                "kind": "mass",
+                "position": position,
+                "distance": index + 1,
+                "localSite": True,
+                "reachable": True,
+                "engineerReachable": True,
+            }
+            for index, position in enumerate(positions)
+        ],
+    )
+    observation = harness.observe()
+    intent = {
+        "kind": "reclaim_patrol",
+        "actorToken": "70:1",
+        "siteKeys": [f"local-{index}" for index in range(4)],
+        "waypoints": positions,
+        "reason": "home_reclaim_patrol",
+    }
+
+    execute_intents(harness, [intent], observation)
+    execute_intents(harness, [intent], observation)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.patrol) == 4
+    assert [plain(call.position) for call in harness.calls.patrol.values()] == [
+        [position[0], position[0] + position[2] / 100, position[2]]
+        for position in positions
+    ]
+
+
 def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:
     snapshot = _policy_allocator_snapshot()
     snapshot["macro"].update(

@@ -702,6 +702,7 @@ local function NormalizeOwnUnit(controller, unit)
         frontierEscort = frontierAssignment ~= nil,
         airAssigned = controller.airAssignments[token] == true,
         airScoutAssigned = controller.airScoutAssignments[token] == true,
+        reclaimPatrolAssigned = controller.reclaimPatrolAssignments[token] == true,
         fieldCohort = fieldCohort == true,
         homeCohort = homeCohort == true,
         campaignEngineer = campaignEngineer == true,
@@ -3551,6 +3552,81 @@ ESCALATION.ExecuteAirScout = function(
         command = 'patrol',
         role = 'air_scout',
         site = intent.siteKey,
+    })
+    return true
+end
+
+ESCALATION.ExecuteReclaimPatrol = function(
+    controller,
+    intent,
+    records,
+    usedActors,
+    observation
+)
+    local token = intent.actorToken
+    local keys = intent.siteKeys
+    local waypoints = intent.waypoints
+    local count = type(keys) == 'table' and TableGetn(keys) or 0
+    if type(token) ~= 'string'
+        or count < 2
+        or count > 4
+        or type(waypoints) ~= 'table'
+        or TableGetn(waypoints) ~= count
+        or usedActors[token]
+        or controller.reclaimPatrolAssignments[token]
+        or controller.pending[token]
+    then
+        return false
+    end
+    local record = records[token]
+    if not record
+        or record.role ~= 'engineer'
+        or record.complete ~= true
+        or record.idle ~= true
+    then
+        return false
+    end
+    local positions = {}
+    for index = 1, count do
+        local key = keys[index]
+        local waypoint = waypoints[index]
+        local site = nil
+        for _, candidate in ipairs(((observation.sites or {}).mass) or {}) do
+            if candidate.key == key then site = candidate break end
+        end
+        if not site
+            or site.complete ~= true
+            or site.localSite ~= true
+            or not IsCampaignPosition(site.position)
+            or not IsCampaignPosition(waypoint)
+            or DistanceSquared(site.position, waypoint) > 0.01
+            or math.abs(site.position[2] - waypoint[2]) > 0.01
+        then
+            return false
+        end
+        local position = TerrainPosition(site.position)
+        if not position then return false end
+        TableInsert(positions, position)
+    end
+    local actor = LiveOwnedActor(controller, token, record, 'engineer')
+    if not actor or SafeCall(false, actor.IsIdleState, actor) ~= true then
+        return false
+    end
+    if not pcall(function() IssueClearCommands({ actor }) end) then return false end
+    for _, position in ipairs(positions) do
+        if not pcall(function() IssuePatrol({ actor }, position) end) then
+            pcall(function() IssueClearCommands({ actor }) end)
+            return false
+        end
+    end
+    controller.reclaimPatrolAssignments[token] = true
+    usedActors[token] = true
+    Emit(controller, 'order', {
+        actor = token,
+        command = 'patrol',
+        role = 'engineer',
+        reason = 'home_reclaim_patrol',
+        waypoints = count,
     })
     return true
 end
@@ -7767,6 +7843,7 @@ Controller.Create = function(brain)
         airScreenCount = 0,
         airScoutAssignments = {},
         airScoutCount = 0,
+        reclaimPatrolAssignments = {},
         intelState = { epoch = 0, contacts = {}, threat = {}, expansionSafety = {} },
         macroPlan = { epoch = 0, valid = false, lanes = {}, regions = {}, intents = {} },
         jobLedger = { epoch = 0, jobs = {}, releasedActorTokens = {} },
@@ -8009,6 +8086,12 @@ Controller.Reconcile = function(controller, observation)
         end
     end
     controller.airScoutCount = CountArray(controller.airScoutAssignments)
+    for token, _ in pairs(controller.reclaimPatrolAssignments or {}) do
+        local record = records[token]
+        if not record or record.role ~= 'engineer' or record.complete ~= true then
+            controller.reclaimPatrolAssignments[token] = nil
+        end
+    end
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
         local record = records[token]
@@ -11240,6 +11323,10 @@ Controller.Execute = function(controller, intents, observation)
                 )
             elseif intent.kind == 'air_scout' then
                 issued = ESCALATION.ExecuteAirScout(
+                    controller, intent, records, usedActors, observation
+                )
+            elseif intent.kind == 'reclaim_patrol' then
+                issued = ESCALATION.ExecuteReclaimPatrol(
                     controller, intent, records, usedActors, observation
                 )
             elseif intent.kind == 'air_screen' then
