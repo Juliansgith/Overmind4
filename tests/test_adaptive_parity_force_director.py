@@ -179,6 +179,30 @@ class TestCombatOwnership:
             | set(assigned(grown, "garrison"))
         )
 
+    def test_rebuilding_rebalances_surviving_old_field_ownership_back_under_safety_floors(self) -> None:
+        snapshot = force_snapshot(80)
+        snapshot["campaign"]["state"] = "rebuilding"
+        snapshot["previousAssignments"] = {
+            "home": [],
+            "garrison": [],
+            "field": [unit["token"] for unit in snapshot["units"]],
+            "response": [],
+            "raider": [],
+            "unassigned": [],
+        }
+
+        plan = invoke(MODULE, GLOBAL, "Assign", snapshot)
+        tokens = [token for bucket in BUCKETS for token in assigned(plan, bucket)]
+
+        assert plan["ratios"]["field"] <= 0.60
+        assert plan["ratios"]["home"] >= 0.20
+        assert len(assigned(plan, "response")) >= 8
+        assert len(tokens) == len(set(tokens)) == 80
+
+        permuted = copy.deepcopy(snapshot)
+        random.Random(9001).shuffle(permuted["units"])
+        assert invoke(MODULE, GLOBAL, "Assign", permuted) == plan
+
     def test_establishing_expansion_has_bound_land_and_aa_garrison_before_ready(self) -> None:
         plan = invoke(MODULE, GLOBAL, "Assign", force_snapshot(30))
         region = plan["regionAssignments"]["front"]
@@ -187,6 +211,20 @@ class TestCombatOwnership:
         assert region["antiAirCount"] >= 1
         assert region["ready"] is True
         assert set(region["actorTokens"]) <= set(assigned(plan, "garrison"))
+
+    def test_establishing_bootstrap_preserves_the_exact_generic_land_and_aa_binding(self) -> None:
+        snapshot = force_snapshot(30)
+        snapshot["regions"][0]["bootstrapEscortTokens"] = [
+            "unit-029:1",
+            "unit-030:1",
+        ]
+
+        plan = invoke(MODULE, GLOBAL, "Assign", snapshot)
+        region = plan["regionAssignments"]["front"]
+
+        assert {"unit-029:1", "unit-030:1"} <= set(region["actorTokens"])
+        assert {"unit-029:1", "unit-030:1"} <= set(assigned(plan, "garrison"))
+        assert region["antiAirCount"] >= 1
 
     def test_multiple_region_garrisons_are_disjoint_and_each_bind_their_own_aa(self) -> None:
         snapshot = force_snapshot(40)

@@ -81,7 +81,12 @@ ForceDirector.Assign = function(snapshot)
             table.insert(activeRegions, region)
         end
     end
-    table.sort(activeRegions, function(a, b) return tostring(a.key) < tostring(b.key) end)
+    table.sort(activeRegions, function(a, b)
+        local aBootstrap = Count(a.bootstrapEscortTokens) > 0
+        local bBootstrap = Count(b.bootstrapEscortTokens) > 0
+        if aBootstrap ~= bBootstrap then return aBootstrap end
+        return tostring(a.key) < tostring(b.key)
+    end)
     local maxRegionCount = math.floor(math.max(4, total * 0.20) / 4)
     while Count(activeRegions) > maxRegionCount do table.remove(activeRegions) end
     local minimumGarrison = Count(activeRegions) * 4
@@ -95,9 +100,29 @@ ForceDirector.Assign = function(snapshot)
         if IsAntiAir(unit) then table.insert(aa, unit) end
     end
     local claimed = {}
-    for index = 1, math.min(Count(activeRegions), Count(aa)) do
-        table.insert(assignments.garrison, aa[index].token)
-        claimed[aa[index].token] = true
+    local bootstrapHasAntiAir = {}
+    for index, region in ipairs(activeRegions) do
+        local bootstrap = Copy(region.bootstrapEscortTokens or {})
+        table.sort(bootstrap)
+        for _, token in ipairs(bootstrap) do
+            local unit = byToken[token]
+            if unit and not claimed[token] then
+                table.insert(assignments.garrison, token)
+                claimed[token] = true
+                if IsAntiAir(unit) then bootstrapHasAntiAir[index] = true end
+            end
+        end
+    end
+    for index, region in ipairs(activeRegions) do
+        if region.requiresAntiAir == true and bootstrapHasAntiAir[index] ~= true then
+            for _, unit in ipairs(aa) do
+                if not claimed[unit.token] then
+                    table.insert(assignments.garrison, unit.token)
+                    claimed[unit.token] = true
+                    break
+                end
+            end
+        end
     end
     local filtered = {}
     for _, unit in ipairs(remaining) do
@@ -119,15 +144,28 @@ ForceDirector.Assign = function(snapshot)
         for _, unit in ipairs(remaining) do
             if previousField[unit.token] then table.insert(oldFieldUnits, unit) else table.insert(nonField, unit) end
         end
-        remaining = nonField
-        for _, unit in ipairs(RemovePrefix(remaining, homeTarget)) do
+        local homeCandidates = nonField
+        local needed = math.max(0, homeTarget - Count(homeCandidates))
+        Append(homeCandidates, RemovePrefix(oldFieldUnits, needed))
+        for _, unit in ipairs(RemovePrefix(homeCandidates, homeTarget)) do
             table.insert(assignments.home, unit.token)
         end
-        for _, unit in ipairs(RemovePrefix(remaining, responseTarget)) do
+        local responseCandidates = homeCandidates
+        needed = math.max(0, responseTarget - Count(responseCandidates))
+        Append(responseCandidates, RemovePrefix(oldFieldUnits, needed))
+        for _, unit in ipairs(RemovePrefix(responseCandidates, responseTarget)) do
             table.insert(assignments.response, unit.token)
         end
-        while Count(remaining) > 0 do table.insert(assignments.garrison, table.remove(remaining, 1).token) end
-        for _, unit in ipairs(oldFieldUnits) do table.insert(assignments.field, unit.token) end
+        while Count(responseCandidates) > 0 do
+            table.insert(assignments.garrison, table.remove(responseCandidates, 1).token)
+        end
+        local maxField = math.floor(total * 0.60)
+        for _, unit in ipairs(RemovePrefix(oldFieldUnits, maxField)) do
+            table.insert(assignments.field, unit.token)
+        end
+        while Count(oldFieldUnits) > 0 do
+            table.insert(assignments.unassigned, table.remove(oldFieldUnits, 1).token)
+        end
     else
         local picked = RemovePrefix(remaining, homeTarget)
         for _, unit in ipairs(picked) do table.insert(assignments.home, unit.token) end
@@ -152,7 +190,18 @@ ForceDirector.Assign = function(snapshot)
     for _, region in ipairs(activeRegions) do
         local tokens = {}
         local antiAirCount = 0
-        if region.requiresAntiAir == true then
+        local bootstrap = Copy(region.bootstrapEscortTokens or {})
+        table.sort(bootstrap)
+        for _, token in ipairs(bootstrap) do
+            if not regionClaimed[token] and ownership[token] == 'garrison' then
+                table.insert(tokens, token)
+                regionClaimed[token] = true
+                if IsAntiAir(byToken[token] or {}) then
+                    antiAirCount = antiAirCount + 1
+                end
+            end
+        end
+        if region.requiresAntiAir == true and antiAirCount == 0 then
             for _, token in ipairs(assignments.garrison) do
                 if not regionClaimed[token] and IsAntiAir(byToken[token] or {}) then
                     table.insert(tokens, token)

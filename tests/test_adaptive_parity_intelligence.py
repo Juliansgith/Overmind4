@@ -59,6 +59,19 @@ class TestFairIntel:
             ("new", "establish_region_radar"),
         ]
 
+    def test_any_live_radar_coverage_wins_over_dead_duplicate_independent_of_input_order(self) -> None:
+        regions = [
+            {"key": "front", "state": "secured", "position": [100, 0, 100]}
+        ]
+        coverage = [
+            {"regionKey": "front", "role": "radar", "live": True},
+            {"regionKey": "front", "role": "radar", "live": False},
+        ]
+
+        assert not invoke(MODULE, GLOBAL, "PlanRadar", regions, coverage)
+        coverage.reverse()
+        assert not invoke(MODULE, GLOBAL, "PlanRadar", regions, coverage)
+
     def test_scout_route_cycles_multiple_public_objectives_in_stable_order(self) -> None:
         objectives = [
             {"key": "front-b", "position": [200, 0, 50], "public": True},
@@ -189,6 +202,81 @@ class TestAirAndMobility:
             snapshot["needs"]["visibleRaidTarget"] = False
             transport_plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
             assert transport_plan["orders"][0]["buildRole"] == "transport"
+
+    @pytest.mark.parametrize(
+        ("completed", "needs", "expected"),
+        (
+            (
+                {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1},
+                {"visibleRaidTarget": False, "remoteSafeExpansion": False},
+                "interceptor",
+            ),
+            (
+                {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1},
+                {"airThreatCount": 3, "visibleRaidTarget": True},
+                "interceptor",
+            ),
+            (
+                {"air_scout": 1, "interceptor": 5, "bomber": 1, "transport": 1},
+                {
+                    "airThreat": False,
+                    "airThreatCount": 0,
+                    "visibleRaidTarget": True,
+                },
+                "bomber",
+            ),
+            (
+                {"air_scout": 1, "interceptor": 4, "bomber": 0, "transport": 1},
+                {"visibleRaidTarget": True},
+                "bomber",
+            ),
+            (
+                {"air_scout": 1, "interceptor": 4, "bomber": 0, "transport": 1},
+                {
+                    "airThreat": False,
+                    "airThreatCount": 0,
+                    "visibleRaidTarget": False,
+                    "remoteSafeExpansion": False,
+                },
+                "bomber",
+            ),
+        ),
+    )
+    def test_funded_air_factories_sustain_threat_aware_interceptor_bomber_mix_and_replacements(
+        self,
+        completed: dict[str, int],
+        needs: dict[str, Any],
+        expected: str,
+    ) -> None:
+        snapshot = air_snapshot()
+        snapshot["completed"].update(completed)
+        snapshot["needs"].update(needs)
+
+        plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
+
+        assert len(plan["orders"]) == 1
+        assert plan["orders"][0]["buildRole"] == expected
+
+    def test_air_slot_selects_idle_factory_deterministically_under_factory_permutation(self) -> None:
+        snapshot = air_snapshot()
+        snapshot["completed"].update(
+            {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1}
+        )
+        snapshot["needs"].update(
+            {"airThreat": False, "visibleRaidTarget": False, "remoteSafeExpansion": False}
+        )
+        snapshot["fundedSlots"] = 1
+        snapshot["factories"] = [
+            {"token": "air-a", "idle": False, "tier": 1},
+            {"token": "air-z", "idle": True, "tier": 1},
+        ]
+
+        expected = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
+        reversed_snapshot = copy.deepcopy(snapshot)
+        reversed_snapshot["factories"].reverse()
+
+        assert expected["orders"][0]["actorToken"] == "air-z"
+        assert invoke(MODULE, GLOBAL, "PlanAir", reversed_snapshot) == expected
 
     def test_bomber_targets_only_current_visual_engineer_then_mex_fallback(self) -> None:
         observations = [
@@ -350,6 +438,69 @@ class TestAirAndMobility:
         )
         assert outside_drop["state"] == "unloading"
         assert outside_drop["released"] is not True
+
+    @pytest.mark.parametrize("state", ("loaded", "flying"))
+    @pytest.mark.parametrize(
+        "attached",
+        ([], ["eng:2"], ["eng:1", "eng:2"]),
+        ids=("missing", "wrong", "extra"),
+    )
+    def test_loaded_and_flying_transport_continuously_releases_on_any_exact_cargo_change(
+        self, state: str, attached: list[str]
+    ) -> None:
+        mission = {
+            "state": state,
+            "transportToken": "transport:1",
+            "cargoTokens": ["eng:1"],
+            "dropPosition": [2600, 0, 0],
+            "deadlineTick": 900,
+            "retryCount": 0,
+        }
+
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "AdvanceTransport",
+            mission,
+            {
+                "kind": "observed",
+                "tick": 200,
+                "transportToken": "transport:1",
+                "attachedCargoTokens": attached,
+            },
+        )
+
+        assert result["state"] == "released"
+        assert result["released"] is True
+        assert result["retryable"] is True
+        assert result["retryCount"] == 1
+
+    @pytest.mark.parametrize("state", ("loaded", "flying"))
+    def test_loaded_and_flying_transport_keeps_exact_attached_cargo(self, state: str) -> None:
+        mission = {
+            "state": state,
+            "transportToken": "transport:1",
+            "cargoTokens": ["eng:1"],
+            "dropPosition": [2600, 0, 0],
+            "deadlineTick": 900,
+            "retryCount": 0,
+        }
+
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "AdvanceTransport",
+            mission,
+            {
+                "kind": "observed",
+                "tick": 200,
+                "transportToken": "transport:1",
+                "attachedCargoTokens": ["eng:1"],
+            },
+        )
+
+        assert result["state"] == state
+        assert result["released"] is False
 
     def test_intelligence_module_has_no_engine_global_hidden_scan_or_warp_surface(self) -> None:
         text = director_path(MODULE).read_text(encoding="utf-8")

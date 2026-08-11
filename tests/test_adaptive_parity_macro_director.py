@@ -275,6 +275,86 @@ class TestFundedPortfolio:
         assert plan["committedMassDrain"] == pytest.approx(0.7)
         assert plan["committedEnergyDrain"] == pytest.approx(8)
 
+    def test_lane_priority_not_caller_order_protects_required_combat_from_optional_work(self) -> None:
+        land = lane_request(
+            "land_production",
+            mass_drain=0.28,
+            energy_drain=3,
+            mass_cost=56,
+            energy_cost=600,
+            required=True,
+        )
+        tech = lane_request(
+            "tech",
+            mass_drain=0.28,
+            energy_drain=3,
+            mass_cost=56,
+            energy_cost=600,
+            optional=True,
+        )
+        plans = []
+        for requests in ([tech, land], [land, tech]):
+            snapshot = portfolio_snapshot(requests=requests)
+            snapshot["economy"].update(
+                {
+                    "massIncome": 0.28,
+                    "massRequested": 0,
+                    "energyIncome": 3,
+                    "energyRequested": 0,
+                    "massStored": 0,
+                    "energyStored": 0,
+                }
+            )
+            plans.append(build_portfolio(snapshot))
+
+        assert plans[0] == plans[1]
+        assert intent_by_id(plans[0], "land_production")["admitted"] is True
+        assert intent_by_id(plans[0], "tech")["admitted"] is False
+
+    @pytest.mark.parametrize(
+        ("mass_income", "admitted_count"),
+        ((0.699999, 1), (0.7, 2)),
+    )
+    def test_requested_load_model_does_not_double_subtract_active_commitments(
+        self, mass_income: float, admitted_count: int
+    ) -> None:
+        request = lane_request(
+            "factory_growth",
+            mass_drain=0.35,
+            energy_drain=4,
+            mass_cost=210,
+            energy_cost=2400,
+        )
+        snapshot = portfolio_snapshot(requests=[request])
+        snapshot["economy"].update(
+            {
+                "massIncome": mass_income,
+                "massRequested": 0.35,
+                "energyIncome": 8,
+                "energyRequested": 4,
+                "massStored": 0,
+                "energyStored": 0,
+                "commitmentsIncludedInRequested": True,
+            }
+        )
+        snapshot["commitments"] = [
+            {
+                "id": "already-requested",
+                "lane": "factory_growth",
+                "massDrain": 0.35,
+                "energyDrain": 4,
+            }
+        ]
+
+        plan = build_portfolio(snapshot)
+
+        assert intent_by_id(plan, "factory_growth")["admittedCount"] == admitted_count
+        assert plan["availableRecurringMass"] == pytest.approx(
+            max(0, mass_income - 0.35)
+        )
+        expected_committed = 0.35 if admitted_count == 1 else 0.7
+        assert plan["committedMassDrain"] == pytest.approx(expected_committed)
+
     def test_full_bank_and_sustained_unused_income_scale_engineers_and_factories(self) -> None:
         low = portfolio_snapshot()
         low["economy"].update(
@@ -411,6 +491,27 @@ class TestFundedPortfolio:
                     for lane in plan.get("lanes", {}).values()
                 ), (field, bad)
 
+    def test_missing_or_nonfinite_trends_fail_closed_but_finite_negative_stall_is_valid(self) -> None:
+        for field in ("massTrend", "energyTrend"):
+            for bad in (float("nan"), float("inf"), float("-inf"), "bad", None):
+                snapshot = portfolio_snapshot()
+                snapshot["economy"][field] = bad
+                plan = build_portfolio(snapshot)
+                assert plan["valid"] is False, (field, bad)
+                assert not any(
+                    lane.get("admitted") is True for lane in plan["lanes"].values()
+                )
+
+            missing = portfolio_snapshot()
+            del missing["economy"][field]
+            assert build_portfolio(missing)["valid"] is False
+
+        negative = portfolio_snapshot()
+        negative["economy"].update({"massTrend": -0.01, "energyTrend": -1})
+        plan = build_portfolio(negative)
+        assert plan["valid"] is True
+        assert plan["stalled"] is True
+
     def test_raw_public_marker_volume_cannot_inflate_funded_targets(self) -> None:
         targets = []
         for marker_count in (0, 24, 240, 2400):
@@ -508,6 +609,7 @@ class TestRegionalMacro:
             "key": "region-a",
             "state": "planned",
             "lossCount": 0,
+            "bootstrapEscortTokens": ["aa:1", "tank:1"],
         }
         transitions = (
             ("package_ordered", "establishing"),
@@ -530,6 +632,7 @@ class TestRegionalMacro:
 
         assert region["productionAnchor"] is True
         assert region["reclaimAnchor"] is True
+        assert "bootstrapEscortTokens" not in region
 
     def test_expansion_rebuilds_lost_mex_before_nearer_new_site(self) -> None:
         snapshot = {
@@ -607,6 +710,36 @@ class TestRegionalMacro:
         assert len({job["siteKey"] for job in jobs}) == 2
         assert {job["regionKey"] for job in jobs} == {"region-a", "region-b"}
         assert len({job["actorToken"] for job in jobs}) == 2
+
+    def test_multiple_remote_regions_bind_disjoint_land_and_aa_escort_pairs(self) -> None:
+        snapshot = {
+            "fundedExpansionSlots": 2,
+            "controlledRadius": 60,
+            "engineers": [
+                {"token": "eng-a", "position": [0, 0, 0], "available": True},
+                {"token": "eng-b", "position": [10, 0, 0], "available": True},
+            ],
+            "sites": [
+                mass_site("a", 300, 0, region="region-a"),
+                mass_site("b", 400, 0, region="region-b"),
+            ],
+            "regions": [
+                {"key": "region-a", "state": "planned"},
+                {"key": "region-b", "state": "planned"},
+            ],
+            "escorts": [
+                {"token": "aa-a", "role": "anti_air", "available": True},
+                {"token": "aa-b", "role": "anti_air", "available": True},
+                {"token": "tank-a", "role": "tank", "available": True},
+                {"token": "tank-b", "role": "tank", "available": True},
+            ],
+        }
+
+        jobs = invoke(MODULE, GLOBAL, "PlanExpansion", snapshot)["jobs"]
+
+        assert len(jobs) == 2
+        assert set(jobs[0]["escortTokens"]).isdisjoint(jobs[1]["escortTokens"])
+        assert len({token for job in jobs for token in job["escortTokens"]}) == 4
 
     def test_active_region_package_persists_factory_radar_defenses_and_garrison(self) -> None:
         plan = invoke(
@@ -686,6 +819,9 @@ class TestRegionalMacro:
 
         assert len(without_screen["jobs"]) == 0
         assert without_screen["denials"][0]["reason"] == "escort_not_ready"
+        assert without_screen["denials"][0]["id"] == "mex:remote:remote"
+        assert without_screen["denials"][0]["actorToken"] == "eng"
+        assert without_screen["denials"][0]["regionKey"] == "remote"
         assert with_screen["jobs"][0]["escortTokens"] == ["aa", "tank"]
 
     def test_reclaim_is_region_local_deterministic_unique_and_revalidated(self) -> None:
@@ -1044,6 +1180,33 @@ class TestRegionalMacro:
             {"token": "eng-1:1", "live": False, "owned": True, "position": [20, 0, 0]},
             {"token": "eng-1:1", "live": True, "owned": False, "position": [20, 0, 0]},
             {"token": "eng-1:2", "live": True, "owned": True, "position": [20, 0, 0]},
+            {
+                "token": "eng-1:1",
+                "role": "tank",
+                "complete": True,
+                "live": True,
+                "owned": True,
+                "canBuild": {"mass_extractor": True},
+                "position": [20, 0, 0],
+            },
+            {
+                "token": "eng-1:1",
+                "role": "engineer",
+                "complete": False,
+                "live": True,
+                "owned": True,
+                "canBuild": {"mass_extractor": True},
+                "position": [20, 0, 0],
+            },
+            {
+                "token": "eng-1:1",
+                "role": "engineer",
+                "complete": True,
+                "live": True,
+                "owned": True,
+                "canBuild": {"mass_extractor": False},
+                "position": [20, 0, 0],
+            },
         )
 
         for invalid in invalid_actors:
@@ -1059,16 +1222,22 @@ class TestRegionalMacro:
                         invalid,
                         {
                             "token": "eng-near:1",
+                            "role": "engineer",
+                            "complete": True,
                             "live": True,
                             "owned": True,
                             "available": True,
+                            "canBuild": {"mass_extractor": True},
                             "position": [90, 0, 0],
                         },
                         {
                             "token": "eng-far:1",
+                            "role": "engineer",
+                            "complete": True,
                             "live": True,
                             "owned": True,
                             "available": True,
+                            "canBuild": {"mass_extractor": True},
                             "position": [0, 0, 0],
                         },
                     ],
@@ -1079,6 +1248,125 @@ class TestRegionalMacro:
             assert job["actorToken"] == "eng-near:1", invalid
             assert job["retryCount"] == 1, invalid
             assert "eng-1:1" in result["releasedActorTokens"], invalid
+
+    def test_job_replacement_rejects_every_ineligible_or_recycled_actor_and_chooses_nearest_capable_engineer(self) -> None:
+        ledger = {
+            "jobs": {
+                "mex:front:1": {
+                    "id": "mex:front:1",
+                    "kind": "build_mex",
+                    "phase": "travelling",
+                    "actorToken": "original:1",
+                    "targetKey": "front-1",
+                    "deadlineTick": 900,
+                    "lastProgressTick": 100,
+                    "remainingDistance": 100,
+                    "retryCount": 0,
+                }
+            }
+        }
+        base = {
+            "role": "engineer",
+            "complete": True,
+            "live": True,
+            "owned": True,
+            "available": True,
+            "canBuild": {"mass_extractor": True},
+        }
+        actors = [
+            {**base, "token": "original:1", "live": False, "position": [0, 0, 0]},
+            {**base, "token": "original:2", "position": [99, 0, 0]},
+            {**base, "token": "tank:1", "role": "tank", "position": [98, 0, 0]},
+            {**base, "token": "factory:1", "role": "land_factory", "position": [97, 0, 0]},
+            {**base, "token": "dead:1", "live": False, "position": [96, 0, 0]},
+            {**base, "token": "captured:1", "owned": False, "position": [95, 0, 0]},
+            {**base, "token": "unfinished:1", "complete": False, "position": [94, 0, 0]},
+            {**base, "token": "busy:1", "available": False, "position": [93, 0, 0]},
+            {
+                **base,
+                "token": "incapable:1",
+                "canBuild": {"mass_extractor": False},
+                "position": [92, 0, 0],
+            },
+            {**base, "token": "valid-near:3", "position": [80, 0, 0]},
+            {**base, "token": "valid-far:1", "position": [20, 0, 0]},
+        ]
+
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            ledger,
+            {
+                "tick": 200,
+                "newJobs": [],
+                "actors": actors,
+                "targets": [
+                    {"key": "front-1", "live": True, "position": [100, 0, 0]}
+                ],
+            },
+        )
+
+        assert result["jobs"]["mex:front:1"]["actorToken"] == "valid-near:3"
+        assert result["jobs"]["mex:front:1"]["phase"] == "travelling"
+        assert result["jobs"]["mex:front:1"]["retryCount"] == 1
+        assert result["releasedActorTokens"] == ["original:1"]
+
+    def test_job_replacement_fails_closed_when_no_complete_owned_mex_capable_engineer_exists(self) -> None:
+        ledger = {
+            "jobs": {
+                "mex:front:1": {
+                    "id": "mex:front:1",
+                    "kind": "rebuild_mex",
+                    "phase": "travelling",
+                    "actorToken": "original:1",
+                    "targetKey": "front-1",
+                    "deadlineTick": 900,
+                    "retryCount": 0,
+                }
+            }
+        }
+
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            ledger,
+            {
+                "tick": 200,
+                "newJobs": [],
+                "actors": [
+                    {
+                        "token": "original:2",
+                        "role": "engineer",
+                        "complete": True,
+                        "live": True,
+                        "owned": True,
+                        "available": True,
+                        "canBuild": {"mass_extractor": True},
+                        "position": [99, 0, 0],
+                    },
+                    {
+                        "token": "near-tank:1",
+                        "role": "tank",
+                        "complete": True,
+                        "live": True,
+                        "owned": True,
+                        "available": True,
+                        "canBuild": {"mass_extractor": True},
+                        "position": [98, 0, 0],
+                    },
+                ],
+                "targets": [
+                    {"key": "front-1", "live": True, "position": [100, 0, 0]}
+                ],
+            },
+        )
+
+        job = result["jobs"]["mex:front:1"]
+        assert job["phase"] == "retryable"
+        assert job["failureReason"] == "actor_unavailable"
+        assert job["retryCount"] == 1
 
     def test_t2_hq_milestone_has_no_hydro_dependency_and_keeps_one_t1_lane(self) -> None:
         ready = {
@@ -1107,6 +1395,94 @@ class TestRegionalMacro:
         }
         assert blocked["hqAction"] == "hold"
         assert blocked["hqDenialReason"] == "preserve_final_t1_lane"
+
+    def test_t2_hq_counts_busy_functioning_t1_lane_while_selecting_only_idle_upgrade_source(self) -> None:
+        snapshot = {
+            "tick": 5700,
+            "economyHealthy": True,
+            "techFunded": True,
+            "t2HqComplete": False,
+            "landFactories": [
+                {
+                    "token": "busy-lane",
+                    "tier": 1,
+                    "idle": False,
+                    "live": True,
+                    "complete": True,
+                    "functioning": True,
+                },
+                {
+                    "token": "idle-source",
+                    "tier": 1,
+                    "idle": True,
+                    "live": True,
+                    "complete": True,
+                    "functioning": True,
+                },
+                {
+                    "token": "dead-nearer",
+                    "tier": 1,
+                    "idle": True,
+                    "live": False,
+                    "complete": True,
+                    "functioning": True,
+                },
+                {
+                    "token": "unfinished",
+                    "tier": 1,
+                    "idle": True,
+                    "live": True,
+                    "complete": False,
+                    "functioning": True,
+                },
+            ],
+            "mex": [],
+        }
+
+        plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
+
+        assert plan["hqAction"] == "start_t2"
+        assert plan["hqSourceToken"] == "idle-source"
+        assert plan["remainingT1ProductionLanes"] == 1
+
+        snapshot["landFactories"] = snapshot["landFactories"][1:]
+        blocked = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
+        assert blocked["hqAction"] == "hold"
+        assert blocked["hqDenialReason"] == "preserve_final_t1_lane"
+
+    def test_t2_hq_does_not_count_an_already_upgrading_factory_as_a_t1_production_lane(self) -> None:
+        snapshot = {
+            "economyHealthy": True,
+            "techFunded": True,
+            "t2HqComplete": False,
+            "landFactories": [
+                {
+                    "token": "already-upgrading",
+                    "tier": 1,
+                    "idle": False,
+                    "live": True,
+                    "complete": True,
+                    "functioning": True,
+                    "upgrading": True,
+                },
+                {
+                    "token": "last-t1-lane",
+                    "tier": 1,
+                    "idle": True,
+                    "live": True,
+                    "complete": True,
+                    "functioning": True,
+                    "upgrading": False,
+                },
+            ],
+            "mex": [],
+        }
+
+        plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
+
+        assert plan["hqAction"] == "hold"
+        assert plan["hqDenialReason"] == "preserve_final_t1_lane"
+        assert plan["remainingT1ProductionLanes"] == 1
 
     @pytest.mark.parametrize(
         ("healthy", "t3_action"),

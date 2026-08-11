@@ -150,6 +150,8 @@ def make_harness() -> ControllerHarness:
                     Economy = self.options.blueprintEconomy or stored.Economy or {},
                     General = self.options.blueprintGeneral or stored.General or {},
                     Intel = self.options.blueprintIntel or {},
+                    Categories = self.options.blueprintCategories or stored.Categories,
+                    CategoriesHash = self.options.blueprintCategoriesHash or stored.CategoriesHash,
                 }
             end
             function unit:GetBuildRate()
@@ -592,6 +594,15 @@ def make_harness() -> ControllerHarness:
                     and ExactCargo(advanced.cargoTokens, event.attachedCargoTokens)
                 then
                     advanced.state = 'loaded'
+                elseif event and event.kind == 'observed'
+                    and (advanced.state == 'loaded' or advanced.state == 'flying')
+                    and event.transportToken == advanced.transportToken
+                    and not ExactCargo(advanced.cargoTokens, event.attachedCargoTokens)
+                then
+                    advanced.state = 'released'
+                    advanced.released = true
+                    advanced.retryable = true
+                    advanced.retryCount = (tonumber(advanced.retryCount) or 0) + 1
                 elseif event and event.kind == 'unload_ordered' then
                     advanced.state = 'unloading'
                 elseif event and event.kind == 'observed'

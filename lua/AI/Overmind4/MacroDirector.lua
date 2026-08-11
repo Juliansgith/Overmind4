@@ -9,6 +9,17 @@ local LANE_ORDER = {
     'tech',
 }
 
+local LANE_RANK = {
+    energy_recovery = 1,
+    mex_rebuild = 2,
+    reclaim = 3,
+    engineers = 4,
+    land_production = 5,
+    air_production = 6,
+    factory_growth = 7,
+    tech = 8,
+}
+
 local function Copy(value)
     if type(value) ~= 'table' then return value end
     local result = {}
@@ -18,6 +29,15 @@ end
 
 local function Number(value, fallback)
     if type(value) ~= 'number' or value ~= value or value < 0 or value > 1000000000000 then
+        return fallback
+    end
+    return value
+end
+
+local function SignedNumber(value, fallback)
+    if type(value) ~= 'number' or value ~= value
+        or value < -1000000000000 or value > 1000000000000
+    then
         return fallback
     end
     return value
@@ -85,6 +105,11 @@ MacroDirector.BuildPortfolio = function(snapshot)
     for _, field in ipairs(requiredFields) do
         if Number(economy[field], nil) == nil then valid = false end
     end
+    if SignedNumber(economy.massTrend, nil) == nil
+        or SignedNumber(economy.energyTrend, nil) == nil
+    then
+        valid = false
+    end
 
     local plan = {
         valid = valid,
@@ -99,6 +124,7 @@ MacroDirector.BuildPortfolio = function(snapshot)
         landFactoryTarget = 1,
         airFactoryTarget = 1,
         factoryTarget = 2,
+        stalled = false,
         intents = {},
     }
     for _, laneId in ipairs(LANE_ORDER) do
@@ -117,14 +143,18 @@ MacroDirector.BuildPortfolio = function(snapshot)
     local bankEnergy = economy.energyStored
     local committedMass = 0
     local committedEnergy = 0
+    local requestedIncludesCommitments = economy.commitmentsIncludedInRequested == true
+    plan.stalled = economy.massTrend < 0 or economy.energyTrend < 0
 
     for _, commitment in ipairs(snapshot.commitments or {}) do
         local massDrain = Number(commitment.massDrain, 0) or 0
         local energyDrain = Number(commitment.energyDrain, 0) or 0
         committedMass = committedMass + massDrain
         committedEnergy = committedEnergy + energyDrain
-        recurringMass = math.max(0, recurringMass - massDrain)
-        recurringEnergy = math.max(0, recurringEnergy - energyDrain)
+        if not requestedIncludesCommitments then
+            recurringMass = math.max(0, recurringMass - massDrain)
+            recurringEnergy = math.max(0, recurringEnergy - energyDrain)
+        end
         local lane = plan.lanes[commitment.lane]
         if lane then
             lane.admitted = true
@@ -132,7 +162,14 @@ MacroDirector.BuildPortfolio = function(snapshot)
         end
     end
 
-    for _, request in ipairs(snapshot.requests or {}) do
+    local requests = Copy(snapshot.requests or {})
+    table.sort(requests, function(a, b)
+        local aRank = LANE_RANK[a.lane] or 1000
+        local bRank = LANE_RANK[b.lane] or 1000
+        if aRank == bRank then return tostring(a.id or '') < tostring(b.id or '') end
+        return aRank < bRank
+    end)
+    for _, request in ipairs(requests) do
         local lane = plan.lanes[request.lane]
         if lane then
             local massDrain = Number(request.massDrain, 0) or 0
@@ -141,8 +178,7 @@ MacroDirector.BuildPortfolio = function(snapshot)
             local energyCost = Number(request.energyCost, 0) or 0
             local recurringFits = recurringMass >= massDrain and recurringEnergy >= energyDrain
             local bankFits = bankMass >= massCost and bankEnergy >= energyCost
-            local stalled = economy.massTrend < 0 or economy.energyTrend < 0
-            local optionalBlocked = stalled and request.optional == true
+            local optionalBlocked = plan.stalled and request.optional == true
             if (recurringFits or bankFits) and not optionalBlocked then
                 lane.admitted = true
                 lane.admittedCount = lane.admittedCount + 1
@@ -256,6 +292,7 @@ MacroDirector.AdvanceRegion = function(region, event)
         result.productionAnchor = true
         result.reclaimAnchor = true
         result.suspendedUntilTick = 0
+        result.bootstrapEscortTokens = nil
     elseif kind == 'enemy_pressure' then
         result.state = 'contested'
     elseif kind == 'package_lost' then
@@ -275,6 +312,7 @@ MacroDirector.AdvanceRegion = function(region, event)
         end
         result.productionAnchor = false
         result.reclaimAnchor = false
+        result.bootstrapEscortTokens = nil
     elseif kind == 'retake_funded' then
         result.state = 'retake'
     elseif kind == 'suspension_expired' and tick >= (result.suspendedUntilTick or 0) then
@@ -322,12 +360,12 @@ local function EligibleSites(snapshot)
     return result
 end
 
-local function EscortTokens(escorts)
+local function EscortTokens(escorts, claimed)
     local aa = {}
     local land = {}
     for _, escort in ipairs(escorts or {}) do
         if escort.available == true and escort.live ~= false and escort.owned ~= false
-            and type(escort.token) == 'string'
+            and type(escort.token) == 'string' and not (claimed or {})[escort.token]
         then
             if escort.role == 'anti_air' or escort.role == 't2_anti_air' then
                 table.insert(aa, escort.token)
@@ -353,6 +391,7 @@ MacroDirector.PlanExpansion = function(snapshot)
     local usedEngineers = {}
     local usedSites = {}
     local usedRegions = {}
+    local usedEscorts = {}
     for slot = 1, slots do
         local best = nil
         for _, site in ipairs(sites) do
@@ -385,10 +424,14 @@ MacroDirector.PlanExpansion = function(snapshot)
         local remote = controlledRadius ~= nil and best.distance > controlledRadius
         local escorts = nil
         if remote then
-            escorts = EscortTokens(snapshot.escorts)
+            escorts = EscortTokens(snapshot.escorts, usedEscorts)
             if not escorts then
+                local regionKey = best.site.regionKey or best.site.key
                 table.insert(result.denials, {
+                    id = 'mex:' .. tostring(regionKey) .. ':' .. tostring(best.site.key),
+                    actorToken = best.engineer.token,
                     siteKey = best.site.key,
+                    regionKey = regionKey,
                     reason = 'escort_not_ready',
                 })
                 usedSites[best.site.key] = true
@@ -413,6 +456,7 @@ MacroDirector.PlanExpansion = function(snapshot)
             usedEngineers[best.engineer.token] = true
             usedSites[best.site.key] = true
             usedRegions[regionKey] = true
+            for _, token in ipairs(escorts or {}) do usedEscorts[token] = true end
         end
     end
     return result
@@ -503,12 +547,46 @@ local function ReleaseJob(job, result, reason)
     if job.actorToken then table.insert(result.releasedActorTokens, job.actorToken) end
 end
 
-local function NearestReplacement(actors, target, claimed)
+local function TokenIdentity(token)
+    if type(token) ~= 'string' then return nil end
+    return string.match(token, '^(.*):[^:]+$') or token
+end
+
+local function CanReplaceMexEngineer(actor, replacedToken)
+    if type(actor) ~= 'table' or type(actor.token) ~= 'string' then return false end
+    if actor.available ~= true or actor.live ~= true or actor.owned ~= true
+        or actor.complete ~= true
+        or (actor.role ~= 'engineer' and actor.roleFamily ~= 'engineer')
+        or type(actor.canBuild) ~= 'table'
+        or actor.canBuild.mass_extractor ~= true
+    then
+        return false
+    end
+    return TokenIdentity(actor.token) ~= TokenIdentity(replacedToken)
+end
+
+local function ExistingMexEngineerInvalid(actor)
+    if not actor or actor.live ~= true or actor.owned ~= true then return true end
+    if actor.complete ~= nil and actor.complete ~= true then return true end
+    if actor.role ~= nil and actor.role ~= 'engineer'
+        and actor.roleFamily ~= 'engineer'
+    then
+        return true
+    end
+    if actor.canBuild ~= nil
+        and (type(actor.canBuild) ~= 'table'
+            or actor.canBuild.mass_extractor ~= true)
+    then
+        return true
+    end
+    return false
+end
+
+local function NearestReplacement(actors, target, claimed, replacedToken)
     local best = nil
     local bestDistance = nil
     for _, actor in ipairs(actors or {}) do
-        if actor.available == true and actor.live == true and actor.owned == true
-            and type(actor.token) == 'string' and not claimed[actor.token]
+        if CanReplaceMexEngineer(actor, replacedToken) and not claimed[actor.token]
         then
             local distance = DistanceSquared(actor.position, target and target.position)
             if bestDistance == nil or distance < bestDistance
@@ -563,13 +641,15 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                 if job.actorToken then table.insert(result.releasedActorTokens, job.actorToken) end
             elseif target and target.live == false then
                 ReleaseJob(job, result, 'target_gone')
-            elseif not actor or actor.live ~= true or actor.owned ~= true then
+            elseif ExistingMexEngineerInvalid(actor) then
                 local oldToken = job.actorToken
                 if oldToken then
                     claimed[oldToken] = nil
                     table.insert(result.releasedActorTokens, oldToken)
                 end
-                local replacement = NearestReplacement(snapshot.actors or {}, target, claimed)
+                local replacement = NearestReplacement(
+                    snapshot.actors or {}, target, claimed, oldToken
+                )
                 job.retryCount = (Number(job.retryCount, 0) or 0) + 1
                 if replacement then
                     job.actorToken = replacement.token
@@ -630,12 +710,19 @@ MacroDirector.PlanTech = function(snapshot)
     local healthy = snapshot.economyHealthy == true
     local funded = snapshot.techFunded == true
     local factories = {}
+    local idleFactories = {}
     for _, factory in ipairs(snapshot.landFactories or {}) do
-        if factory.tier == 1 and factory.idle == true and type(factory.token) == 'string' then
+        if factory.tier == 1 and type(factory.token) == 'string'
+            and factory.live ~= false and factory.owned ~= false
+            and factory.complete ~= false and factory.functioning ~= false
+            and factory.upgrading ~= true
+        then
             table.insert(factories, factory)
+            if factory.idle == true then table.insert(idleFactories, factory) end
         end
     end
     SortByKey(factories, 'token')
+    SortByKey(idleFactories, 'token')
     local plan = {
         hqAction = 'hold',
         hqDenialReason = 'not_funded_or_healthy',
@@ -646,11 +733,13 @@ MacroDirector.PlanTech = function(snapshot)
         t3Action = 'hold',
     }
     if not snapshot.t2HqComplete and healthy and funded then
-        if Count(factories) >= 2 then
+        if Count(factories) >= 2 and Count(idleFactories) >= 1 then
             plan.hqAction = 'start_t2'
-            plan.hqSourceToken = factories[1].token
+            plan.hqSourceToken = idleFactories[1].token
             plan.remainingT1ProductionLanes = Count(factories) - 1
             plan.hqDenialReason = nil
+        elseif Count(factories) >= 2 then
+            plan.hqDenialReason = 'no_idle_t1_lane'
         else
             plan.hqDenialReason = 'preserve_final_t1_lane'
         end

@@ -58,7 +58,11 @@ Intelligence.PlanRadar = function(regions, coverage)
     local covered = {}
     for _, item in ipairs(coverage or {}) do
         if item.role == 'radar' and type(item.regionKey) == 'string' then
-            covered[item.regionKey] = item.live == true
+            if item.live == true then
+                covered[item.regionKey] = true
+            elseif covered[item.regionKey] == nil then
+                covered[item.regionKey] = false
+            end
         end
     end
     local ordered = {}
@@ -161,8 +165,15 @@ Intelligence.PlanAir = function(snapshot)
         local role = pending.buildRole or pending.role
         if totals[role] ~= nil then totals[role] = totals[role] + 1 end
     end
+    local factories = {}
+    for _, factory in ipairs(snapshot.factories or {}) do
+        if type(factory.token) == 'string' and factory.idle ~= false then
+            table.insert(factories, factory)
+        end
+    end
+    SortByKey(factories, 'token')
     local slots = math.max(0, Number(snapshot.fundedSlots, 0) or 0)
-    slots = math.min(slots, Count(snapshot.factories or {}))
+    slots = math.min(slots, Count(factories))
     local orders = {}
     for index = 1, slots do
         local role = nil
@@ -174,10 +185,26 @@ Intelligence.PlanAir = function(snapshot)
             role = 'bomber'
         elseif totals.transport < 1 and needs.remoteSafeExpansion == true then
             role = 'transport'
+        else
+            if totals.bomber < 1 then
+                role = 'bomber'
+            else
+                local threat = Number(needs.airThreatCount, nil)
+                if threat == nil then threat = needs.airThreat == true and 1 or 0 end
+                local interceptorTarget = math.min(12, 4 + math.max(0, threat) * 2)
+                if totals.interceptor < interceptorTarget then
+                    role = 'interceptor'
+                elseif needs.visibleRaidTarget == true
+                    and totals.bomber * 4 < totals.interceptor
+                then
+                    role = 'bomber'
+                else
+                    role = 'interceptor'
+                end
+            end
         end
-        if not role then break end
-        local factory = snapshot.factories[index]
-        if factory and factory.idle ~= false then
+        local factory = factories[index]
+        if factory then
             table.insert(orders, {
                 kind = 'factory_build',
                 actorToken = factory.token,
@@ -299,6 +326,12 @@ Intelligence.AdvanceTransport = function(mission, event)
             else
                 result.state = 'loaded'
                 result.deadlineTick = tick + 1200
+            end
+        elseif result.state == 'loaded' or result.state == 'flying' then
+            if not ExactTokens(result.cargoTokens or {}, event.attachedCargoTokens or {}) then
+                local reason = Count(event.attachedCargoTokens or {}) == 0
+                    and 'cargo_missing' or 'wrong_cargo'
+                return Release(result, reason)
             end
         elseif result.state == 'unloading' then
             local attached = event.attachedCargoTokens or {}
