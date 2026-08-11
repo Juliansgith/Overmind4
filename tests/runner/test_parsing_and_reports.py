@@ -23,6 +23,14 @@ STOCK_PLATOON_DISBAND_WARNING = (
     "         \t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363): "
     "in function <...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua:2210>\n"
 )
+OM4_TRACE_CONTINUATION = (
+    "         \tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99): "
+    "in function <C:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua:80>\n"
+)
+EXTRA_STOCK_TRACE_CONTINUATION = (
+    "         \t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2400): "
+    "in function <...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua:2300>\n"
+)
 
 
 def _result_line(result: str, *, army: int = 1, sim: int = 123) -> str:
@@ -239,8 +247,18 @@ def test_exact_live_artifact_excerpt_replays_as_one_structured_nonfatal_warning(
             "\t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363)",
             "\tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99)",
         ),
+        STOCK_PLATOON_DISBAND_WARNING.replace("PlatoonDisband", "platoondisband", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace("in function", "in FUNCTION", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace("platoon.lua", "Platoon.lua", 1),
     ],
-    ids=("header-line", "method", "om4-stack"),
+    ids=(
+        "header-line",
+        "method",
+        "om4-stack",
+        "method-case",
+        "function-case",
+        "path-case",
+    ),
 )
 def test_pre_result_stock_warning_near_misses_remain_fatal_even_if_results_follow(
     near_miss: str,
@@ -261,6 +279,60 @@ def test_pre_result_stock_warning_near_misses_remain_fatal_even_if_results_follo
     assert outcome.failure_reason == "lua-error"
     assert outcome.warnings == ()
     assert outcome.warning_details == ()
+
+
+@pytest.mark.parametrize(
+    "continuation",
+    [OM4_TRACE_CONTINUATION, EXTRA_STOCK_TRACE_CONTINUATION],
+    ids=("om4-frame", "extra-stock-frame"),
+)
+def test_blank_lines_do_not_hide_a_later_indented_trace_frame_from_full_log_parser(
+    continuation: str,
+) -> None:
+    text = (
+        _valid_lifecycle_prefix()
+        + STOCK_PLATOON_DISBAND_WARNING
+        + "\n\n"
+        + continuation
+        + _terminal_line("victory")
+        + _result_line("victory 10")
+    )
+
+    outcome = classify_outcome(
+        parse_log(text, "run-1", our_slot=1),
+        ProcessObservation(exit_code=1, wall_seconds=4, fail_fast_reason="lua-error"),
+    )
+
+    assert outcome.state == "load-error"
+    assert outcome.failure_reason == "lua-error"
+    assert outcome.warnings == ()
+    assert outcome.warning_details == ()
+
+
+def test_full_log_parser_accepts_stock_only_trace_with_multiple_blank_lines_at_eof() -> None:
+    telemetry = parse_log(
+        _valid_lifecycle_prefix() + STOCK_PLATOON_DISBAND_WARNING + "\n\n",
+        "run-1",
+        our_slot=1,
+    )
+
+    assert telemetry.failure_reason is None
+    assert telemetry.engine_diagnostics == ()
+    assert len(telemetry.warning_details) == 1
+    assert telemetry.warning_details[0].occurrences == 1
+
+
+def test_full_log_parser_keeps_an_incomplete_trace_fatal_across_blank_lines_at_eof() -> None:
+    incomplete = STOCK_PLATOON_DISBAND_WARNING.rsplit("\n", 2)[0] + "\n\n"
+    telemetry = parse_log(
+        _valid_lifecycle_prefix() + incomplete,
+        "run-1",
+        our_slot=1,
+    )
+
+    assert telemetry.failure_reason == "lua-error"
+    assert telemetry.engine_diagnostics == ("lua-error",)
+    assert telemetry.warning_details == ()
 
 
 def test_exact_stock_warning_before_completed_startup_remains_a_load_error() -> None:

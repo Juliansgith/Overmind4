@@ -144,17 +144,15 @@ _STOCK_PLATOON_PATH_PATTERN = (
 _STOCK_PLATOON_WARNING_HEADER = re.compile(
     r"^\s*warning:\s*Error running lua script:\s+"
     + _STOCK_PLATOON_PATH_PATTERN
-    + r"\(2363\): attempt to call method `PlatoonDisband' \(a nil value\)\s*$",
-    re.IGNORECASE,
+    + r"\(2363\): attempt to call method `PlatoonDisband' \(a nil value\)\s*$"
 )
-_STOCK_PLATOON_TRACEBACK_LABEL = re.compile(r"^\s+stack traceback:\s*$", re.IGNORECASE)
+_STOCK_PLATOON_TRACEBACK_LABEL = re.compile(r"^\s+stack traceback:\s*$")
 _STOCK_PLATOON_TRACE_FRAME = re.compile(
     r"^\s+"
     + _STOCK_PLATOON_PATH_PATTERN
     + r"\(2363\): in function <"
     + _STOCK_PLATOON_PATH_PATTERN
-    + r":2210>\s*$",
-    re.IGNORECASE,
+    + r":2210>\s*$"
 )
 _ENGINE_FAILURES = (
     (re.compile(r"LUA ERROR(?=\s|:|$)", re.IGNORECASE), "lua-error"),
@@ -207,9 +205,12 @@ def _stock_platoon_warning_ranges(lines: list[str]) -> tuple[tuple[int, int], ..
             continue
         if not is_stock_platoon_trace_frame(lines[index + 2]):
             continue
-        if trace_end < len(lines) and is_trace_continuation(lines[trace_end]):
+        next_content = trace_end
+        while next_content < len(lines) and not lines[next_content].strip():
+            next_content += 1
+        if next_content < len(lines) and is_trace_continuation(lines[next_content]):
             continue
-        ranges.append((index, trace_end))
+        ranges.append((index, next_content))
     return tuple(ranges)
 
 

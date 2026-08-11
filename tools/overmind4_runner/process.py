@@ -137,6 +137,8 @@ class _FailFastScanner:
             else:
                 self.failure_reason = "lua-error"
             return
+        if not line.strip():
+            return
         if is_trace_continuation(line):
             self.failure_reason = "lua-error"
             return

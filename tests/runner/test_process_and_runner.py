@@ -22,6 +22,14 @@ STOCK_PLATOON_DISBAND_WARNING = (
     "         \t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2363): "
     "in function <...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua:2210>\n"
 )
+OM4_TRACE_CONTINUATION = (
+    "         \tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99): "
+    "in function <C:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua:80>\n"
+)
+EXTRA_STOCK_TRACE_CONTINUATION = (
+    "         \t...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua(2400): "
+    "in function <...ogramdata\\faforever\\gamedata\\lua.nx2\\lua\\platoon.lua:2300>\n"
+)
 
 
 def _completed_lifecycle(run_id: str = "run-1") -> str:
@@ -160,8 +168,26 @@ def test_fail_fast_allows_only_the_exact_pinned_stock_platoon_warning_after_star
             "\tC:\\mods\\overmind4\\lua\\AI\\Overmind4\\Controller.lua(99)",
         ),
         STOCK_PLATOON_DISBAND_WARNING.replace("platoon.lua:2210", "platoon.lua:2211"),
+        STOCK_PLATOON_DISBAND_WARNING.replace("PlatoonDisband", "platoondisband", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace("in function", "in FUNCTION", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace("platoon.lua", "Platoon.lua", 1),
+        STOCK_PLATOON_DISBAND_WARNING.replace(
+            "Error running lua script",
+            "Error running Lua script",
+            1,
+        ),
     ],
-    ids=("om4-header-path", "header-line", "method", "om4-stack", "stack-line"),
+    ids=(
+        "om4-header-path",
+        "header-line",
+        "method",
+        "om4-stack",
+        "stack-line",
+        "method-case",
+        "function-case",
+        "path-case",
+        "diagnostic-case",
+    ),
 )
 def test_fail_fast_rejects_every_near_miss_of_the_stock_warning(near_miss: str) -> None:
     text = _completed_lifecycle() + near_miss + "info: simulation continued\n"
@@ -199,6 +225,44 @@ def test_fail_fast_deduplicates_repeated_exact_stock_warning_blocks() -> None:
     assert detect_fail_fast(text, run_id="run-1", our_slot=1) is None
 
 
+@pytest.mark.parametrize(
+    "continuation",
+    [OM4_TRACE_CONTINUATION, EXTRA_STOCK_TRACE_CONTINUATION],
+    ids=("om4-frame", "extra-stock-frame"),
+)
+def test_fail_fast_rejects_an_indented_frame_after_blank_lines(
+    continuation: str,
+) -> None:
+    text = (
+        _completed_lifecycle()
+        + STOCK_PLATOON_DISBAND_WARNING
+        + "\n\n"
+        + continuation
+        + "info: simulation continued\n"
+    )
+
+    assert detect_fail_fast(text, run_id="run-1", our_slot=1) == "lua-error"
+
+
+def test_fail_fast_accepts_an_exact_stock_only_trace_followed_by_blank_lines_at_eof() -> None:
+    text = _completed_lifecycle() + STOCK_PLATOON_DISBAND_WARNING + "\n\n"
+
+    assert detect_fail_fast(text, run_id="run-1", our_slot=1) is None
+
+
+def test_fail_fast_rejects_an_incomplete_trace_followed_by_blank_lines_at_eof() -> None:
+    incomplete = STOCK_PLATOON_DISBAND_WARNING.rsplit("\n", 2)[0] + "\n\n"
+
+    assert (
+        detect_fail_fast(
+            _completed_lifecycle() + incomplete,
+            run_id="run-1",
+            our_slot=1,
+        )
+        == "lua-error"
+    )
+
+
 def test_monitor_defers_a_split_exact_stock_trace_and_allows_the_process_to_continue(
     tmp_path: Path,
 ) -> None:
@@ -216,6 +280,69 @@ def test_monitor_defers_a_split_exact_stock_trace_and_allows_the_process_to_cont
                 "".join(warning_lines[1:]),
                 "info: simulation continued\n",
             ]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+        our_slot=1,
+    )
+
+    assert observation.exit_code == 0
+    assert observation.fail_fast_reason is None
+    assert terminated == []
+
+
+def test_monitor_keeps_the_candidate_across_split_crlf_blank_lines_and_rejects_om4_frame(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None] * 10, pid=7073)
+    terminated: list[int] = []
+    warning = STOCK_PLATOON_DISBAND_WARNING.replace("\n", "\r\n")
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [
+                _completed_lifecycle().replace("\n", "\r\n"),
+                warning + "\r",
+                "\n\r\n",
+                OM4_TRACE_CONTINUATION.replace("\n", "\r\n"),
+            ]
+        ),
+        terminate_tree=lambda pid: terminated.append(pid),
+        poll_interval=1,
+    )
+
+    observation = monitor.wait(
+        process,
+        tmp_path / "owned.log",
+        wall_timeout=100,
+        run_id="run-1",
+        our_slot=1,
+    )
+
+    assert observation.fail_fast_reason == "lua-error"
+    assert terminated == [7073]
+
+
+def test_monitor_accepts_an_exact_stock_only_trace_with_blank_lines_at_process_eof(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess([None, 0], pid=7074)
+    terminated: list[int] = []
+    monitor = Monitor(
+        now=clock.now,
+        sleep=clock.sleep,
+        tail_factory=lambda _: FakeTail(
+            [_completed_lifecycle() + STOCK_PLATOON_DISBAND_WARNING + "\n\n"]
         ),
         terminate_tree=lambda pid: terminated.append(pid),
         poll_interval=1,
