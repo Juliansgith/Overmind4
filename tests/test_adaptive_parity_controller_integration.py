@@ -1203,6 +1203,53 @@ def test_step_turns_macro_targets_and_t2_roles_into_exact_growth_orders_once() -
     ] == 2
 
 
+def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        canBuild={"ueb0102": True},
+    )
+    engineer = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        canBuild={"ueb0101": True, "ueb0102": True},
+    )
+    factories = [
+        harness.unit(entityId=20 + index, blueprintId="ueb0101")
+        for index in range(2)
+    ]
+    harness.brain.units = harness.lua.table_from([acu, engineer, *factories])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 3,
+            "airFactoryTarget": 1,
+            "lanes": {"factory_growth": {"admitted": True}},
+            "grants": [
+                {
+                    "requestId": "factory-1",
+                    "lane": "factory_growth",
+                    "source": "bank",
+                }
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    order = harness.calls.buildMobile[1]
+    assert order.blueprintId == "ueb0102"
+    assert order.units[1].options.entityId == 1
+
+
 def test_single_t2_lane_uses_completed_and_pending_deficits_to_build_tank_then_aa() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

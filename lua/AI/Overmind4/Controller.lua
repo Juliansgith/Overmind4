@@ -9307,7 +9307,10 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             end
         end
         if currentAir < (tonumber(macroPlan.airFactoryTarget) or currentAir) then
-            local actor = ESCALATION.AvailableDirectorActor(
+            local actor = currentAir < 1 and ESCALATION.AvailableDirectorActor(
+                controller, observation, 'acu', 'air_factory', reserved
+            ) or nil
+            actor = actor or ESCALATION.AvailableDirectorActor(
                 controller, observation, 'engineer', 'air_factory', reserved
             )
             local positions = (observation.placements or {}).air_factory or {}
