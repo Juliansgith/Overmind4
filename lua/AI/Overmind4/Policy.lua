@@ -1110,7 +1110,9 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local completedHydro = 0
     for _, unit in ipairs(units or {}) do
         if unit.complete == true then
-            if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
+            if (unit.roleFamily or unit.role) == 'mass_extractor' then
+                completedMex = completedMex + 1
+            end
             if unit.role == 'land_factory' or unit.role == 'land_factory_t2' then
                 completedLand = completedLand + 1
             end
@@ -1786,7 +1788,9 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     local completedAirScout = 0
     for _, unit in ipairs(units or {}) do
         if unit.complete == true then
-            if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
+            if (unit.roleFamily or unit.role) == 'mass_extractor' then
+                completedMex = completedMex + 1
+            end
             if unit.role == 'land_factory' then completedLand = completedLand + 1 end
             if unit.role == 'air_factory' then completedAir = completedAir + 1 end
             if unit.role == 'air_scout' then completedAirScout = completedAirScout + 1 end

@@ -1818,7 +1818,10 @@ def test_campaign_policy_never_targets_enemy_spawn_and_static_runtime_boundary_s
     policy_source = source("lua/AI/Overmind4/Policy.lua")
     assert "BuilderManager" not in controller_source + policy_source
     assert "PlatoonFormManager" not in controller_source + policy_source
-    assert controller_source.count("import(") == 5
+    # The runtime now imports the three pure parity directors in addition to
+    # the original five modules. Keep this boundary exact so accidental engine
+    # dependencies still fail the contract.
+    assert controller_source.count("import(") == 8
 
 
 def test_unit_list_reordering_and_economy_contact_flicker_do_not_reshuffle_cohorts() -> None:

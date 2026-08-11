@@ -188,6 +188,50 @@ class TestCombatOwnership:
         assert region["ready"] is True
         assert set(region["actorTokens"]) <= set(assigned(plan, "garrison"))
 
+    def test_multiple_region_garrisons_are_disjoint_and_each_bind_their_own_aa(self) -> None:
+        snapshot = force_snapshot(40)
+        snapshot["regions"] = [
+            {
+                "key": key,
+                "state": "establishing",
+                "position": position,
+                "requiresGarrison": True,
+                "requiresAntiAir": True,
+            }
+            for key, position in (
+                ("front-a", [160, 0, 160]),
+                ("front-b", [240, 0, 240]),
+            )
+        ]
+
+        plan = invoke(MODULE, GLOBAL, "Assign", snapshot)
+        front_a = plan["regionAssignments"]["front-a"]
+        front_b = plan["regionAssignments"]["front-b"]
+
+        assert front_a["ready"] is True
+        assert front_b["ready"] is True
+        assert front_a["antiAirCount"] >= 1
+        assert front_b["antiAirCount"] >= 1
+        assert set(front_a["actorTokens"]).isdisjoint(front_b["actorTokens"])
+
+    def test_planned_unclaimed_regions_do_not_consume_garrison_ownership(self) -> None:
+        snapshot = force_snapshot(30)
+        snapshot["regions"].append(
+            {
+                "key": "future",
+                "state": "planned",
+                "position": [400, 0, 400],
+                "requiresGarrison": True,
+                "requiresAntiAir": True,
+            }
+        )
+
+        plan = invoke(MODULE, GLOBAL, "Assign", snapshot)
+
+        assert "front" in plan["regionAssignments"]
+        assert "future" not in plan["regionAssignments"]
+        assert len(assigned(plan, "garrison")) <= 6
+
     def test_force_assignment_is_deterministic_under_unit_permutation(self) -> None:
         snapshot = force_snapshot(50)
         expected = invoke(MODULE, GLOBAL, "Assign", snapshot)

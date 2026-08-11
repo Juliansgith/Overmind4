@@ -17,6 +17,9 @@ PRODUCTION_LUA = (
     "lua/AI/Overmind4/Telemetry.lua",
     "lua/AI/Overmind4/Catalog.lua",
     "lua/AI/Overmind4/Policy.lua",
+    "lua/AI/Overmind4/MacroDirector.lua",
+    "lua/AI/Overmind4/Intelligence.lua",
+    "lua/AI/Overmind4/ForceDirector.lua",
     "lua/AI/Overmind4/Controller.lua",
 )
 

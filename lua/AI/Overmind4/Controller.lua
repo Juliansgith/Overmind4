@@ -56,13 +56,17 @@ local LiveOwnedActor
 
 local BUILD_ROLES = {
     acu = { 'air_factory', 'land_factory', 'power_generator', 'mass_extractor' },
-    engineer = { 'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor', 'power_generator' },
+    engineer = {
+        'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor',
+        'point_defense', 'power_generator', 'radar', 'static_anti_air',
+    },
     land_factory = {
         'anti_air', 'artillery', 'engineer', 'lab', 'land_factory_t2',
         'scout', 'tank',
     },
-    air_factory = { 'air_scout', 'interceptor' },
-    land_factory_t2 = { 't2_anti_air', 't2_direct_fire' },
+    air_factory = { 'air_scout', 'bomber', 'interceptor', 'transport' },
+    land_factory_t2 = { 'land_factory_t3', 't2_anti_air', 't2_direct_fire' },
+    land_factory_t3 = { 't3_direct_fire' },
 }
 
 local COMBAT_ROLES = {
@@ -72,9 +76,15 @@ local COMBAT_ROLES = {
     tank = true,
     t2_anti_air = true,
     t2_direct_fire = true,
+    t3_direct_fire = true,
 }
 
 local ESCALATION = {
+    directors = {
+        macro = import('/mods/overmind4/lua/AI/Overmind4/MacroDirector.lua').MacroDirector,
+        intelligence = import('/mods/overmind4/lua/AI/Overmind4/Intelligence.lua').Intelligence,
+        force = import('/mods/overmind4/lua/AI/Overmind4/ForceDirector.lua').ForceDirector,
+    },
     MAX_PLACEMENT_PROBES = 96,
     MAX_PLACEMENT_RADIUS = 64,
     PLACEMENT_RESULTS_PER_ROLE = 13,
@@ -93,6 +103,7 @@ local ESCALATION = {
     ROUTE_PROBE_STUCK_TICKS = 300,
     ROUTE_PROBE_RELEASE_TICKS = 600,
     ROUTE_BLOCK_TICKS = 600,
+    MAX_INTEL_ANCHORS = 8,
     ECONOMY_LEDGER_SAMPLES = 30,
     ECONOMY_LEDGER_INTERVAL_TICKS = 10,
     ALLOCATOR_PLANNING_TICKS = 1200,
@@ -104,11 +115,15 @@ local ESCALATION = {
     requestLanes = {
         air_factory = 'air',
         air_scout = 'air',
+        bomber = 'air',
         hydrocarbon = 'energy',
         interceptor = 'air',
+        transport = 'air',
         land_factory = 'factory',
         land_factory_t2 = 'tech',
         mass_extractor = 'expansion',
+        mass_extractor_t2 = 'tech',
+        mass_extractor_t3 = 'tech',
         power_generator = 'energy',
         engineer = 'engineer',
         anti_air = 'factory',
@@ -118,6 +133,7 @@ local ESCALATION = {
         tank = 'factory',
         t2_anti_air = 'factory',
         t2_direct_fire = 'factory',
+        t3_direct_fire = 'factory',
     },
     antiAirRoles = {
         anti_air = true,
@@ -127,6 +143,7 @@ local ESCALATION = {
         air_factory = true,
         land_factory = true,
         land_factory_t2 = true,
+        land_factory_t3 = true,
         power_generator = true,
     },
     placementObstacleRoles = {
@@ -134,16 +151,21 @@ local ESCALATION = {
         hydrocarbon = true,
         land_factory = true,
         land_factory_t2 = true,
+        land_factory_t3 = true,
         mass_extractor = true,
         power_generator = true,
     },
     factoryProducts = {
-        air_factory = { air_scout = true, interceptor = true },
+        air_factory = {
+            air_scout = true, bomber = true, interceptor = true,
+            transport = true,
+        },
         land_factory = {
             anti_air = true, artillery = true, engineer = true,
             lab = true, scout = true, tank = true,
         },
         land_factory_t2 = { t2_anti_air = true, t2_direct_fire = true },
+        land_factory_t3 = { t3_direct_fire = true },
     },
 }
 
@@ -509,7 +531,10 @@ end
 local function CountRole(units, role)
     local count = 0
     for _, unit in ipairs(units or {}) do
-        if unit.role == role and unit.complete == true then
+        if (unit.role == role
+                or (role == 'mass_extractor' and unit.roleFamily == role))
+            and unit.complete == true
+        then
             count = count + 1
         end
     end
@@ -545,6 +570,8 @@ local function PendingArray(controller)
             lastFraction = operation.lastFraction,
             phase = operation.phase,
             reason = operation.reason,
+            regionKey = operation.regionKey,
+            operationId = operation.operationId,
             clusterKey = operation.clusterKey,
             targetToken = operation.targetToken,
             targetKey = operation.targetKey,
@@ -643,11 +670,17 @@ local function NormalizeOwnUnit(controller, unit)
     local liveVisionRadius = tonumber(SafeCall(nil, unit.GetIntelRadius, unit, 'Vision'))
     if liveVisionRadius and liveVisionRadius >= 0 then visionRadius = liveVisionRadius end
     local visionEnabled = SafeCall(false, unit.IsIntelEnabled, unit, 'Vision') == true
+    local radarRadius = tonumber(intel.RadarRadius) or 0
+    local liveRadarRadius = tonumber(SafeCall(nil, unit.GetIntelRadius, unit, 'Radar'))
+    if liveRadarRadius and liveRadarRadius > 0 then radarRadius = liveRadarRadius end
 
     controller.unitRefs[token] = unit
     return {
         token = token,
         role = role,
+        roleFamily = Catalog.FamilyForRole(role),
+        live = true,
+        owned = true,
         complete = complete,
         fractionComplete = fraction,
         idle = complete and not busy,
@@ -674,6 +707,8 @@ local function NormalizeOwnUnit(controller, unit)
         buildDistance = buildDistance,
         visionRadius = visionRadius,
         visionEnabled = visionEnabled,
+        radarRadius = radarRadius,
+        attached = SafeCall(false, unit.IsUnitState, unit, 'Attached') == true,
         availableForWave = COMBAT_ROLES[role] == true and complete and not assigned and nearStaging,
     }
 end
@@ -681,7 +716,14 @@ end
 local function NormalizeEnemyContact(controller, enemies, ownRecords)
     local positions = {}
     for _, enemy in pairs(enemies or {}) do
-        local position = CopyPosition(SafeCall(nil, enemy.GetPosition, enemy))
+        local blip = SafeCall(nil, enemy.GetBlip, enemy, controller.brain.Army)
+        local seen = blip
+            and SafeCall(false, blip.IsSeenNow, blip, controller.brain.Army) == true
+        local radar = blip
+            and SafeCall(false, blip.IsOnRadar, blip, controller.brain.Army) == true
+        local position = (seen or radar)
+            and CopyPosition(SafeCall(nil, enemy.GetPosition, enemy))
+            or nil
         if position then
             TableInsert(positions, position)
         end
@@ -737,7 +779,10 @@ local function SiteSnapshot(controller, markers, ownRecords)
         local targetToken = nil
         local expectedRole = marker.kind == 'hydro' and 'hydrocarbon' or 'mass_extractor'
         for _, unit in ipairs(ownRecords) do
-            if unit.role == expectedRole and DistanceSquared(unit.position, marker.position) <= 16 then
+            if (unit.role == expectedRole
+                    or Catalog.IsRoleFamily(unit.role, expectedRole))
+                and DistanceSquared(unit.position, marker.position) <= 16
+            then
                 occupied = true
                 local fraction = tonumber(unit.fractionComplete) or 0
                 if unit.complete ~= true
@@ -775,6 +820,86 @@ local function SiteSnapshot(controller, markers, ownRecords)
         return ad < bd
     end)
     return sites
+end
+
+ESCALATION.FairEnemyObservations = function(controller, enemies)
+    local observations = {}
+    controller.enemyRefs = {}
+    for _, enemy in pairs(enemies or {}) do
+        local blip = SafeCall(nil, enemy.GetBlip, enemy, controller.brain.Army)
+        local seen = blip
+            and SafeCall(false, blip.IsSeenNow, blip, controller.brain.Army) == true
+        local radar = blip
+            and SafeCall(false, blip.IsOnRadar, blip, controller.brain.Army) == true
+        local position = (seen or radar)
+            and CopyPosition(SafeCall(nil, enemy.GetPosition, enemy))
+            or nil
+        if position then
+            local role = 'unknown_mobile'
+            local token = 'radar:'
+                .. tostring(math.floor(position[1] * 10 + 0.5)) .. ':'
+                .. tostring(math.floor(position[3] * 10 + 0.5))
+            if seen then
+                local blueprint = SafeCall(nil, enemy.GetBlueprint, enemy)
+                local entityId = SafeCall(nil, enemy.GetEntityId, enemy)
+                role = blueprint and Catalog.RoleFor(blueprint.BlueprintId) or nil
+                if role and entityId ~= nil then
+                    token = UnitToken(controller, enemy, entityId)
+                    controller.enemyRefs[token] = enemy
+                else
+                    role = 'unknown_mobile'
+                end
+            end
+            TableInsert(observations, {
+                token = token,
+                role = seen and role or 'unknown_mobile',
+                position = position,
+                source = seen and 'vision' or 'radar',
+                current = true,
+                currentlyVisual = seen == true,
+                live = true,
+            })
+        end
+    end
+    table.sort(observations, function(a, b) return a.token < b.token end)
+    return observations
+end
+
+ESCALATION.BoundedIntelEnemies = function(controller, ownRecords, baseEnemies)
+    local result = {}
+    local seen = {}
+    for _, enemy in pairs(baseEnemies or {}) do
+        if enemy and not seen[enemy] then
+            seen[enemy] = true
+            TableInsert(result, enemy)
+        end
+    end
+    local anchors = 0
+    for _, record in ipairs(ownRecords or {}) do
+        local radius = 0
+        if record.complete == true and record.role == 'radar' then
+            radius = tonumber(record.radarRadius) or 0
+        elseif record.complete == true and record.role == 'air_scout'
+            and record.visionEnabled == true
+        then
+            radius = tonumber(record.visionRadius) or 0
+        end
+        if radius > 0 and anchors < ESCALATION.MAX_INTEL_ANCHORS then
+            anchors = anchors + 1
+            radius = math.min(256, radius)
+            local nearby = SafeCall(
+                {}, controller.brain.GetUnitsAroundPoint, controller.brain,
+                categories.ALLUNITS, record.position, radius, 'Enemy'
+            ) or {}
+            for _, enemy in pairs(nearby) do
+                if enemy and not seen[enemy] then
+                    seen[enemy] = true
+                    TableInsert(result, enemy)
+                end
+            end
+        end
+    end
+    return result
 end
 
 local function RefreshFoundationReservations(controller, foundations)
@@ -1526,7 +1651,7 @@ ESCALATION.OperationBudget = function(controller, operation, records)
     then
         return nil
     end
-    if operation.kind == 'factory_upgrade'
+    if (operation.kind == 'factory_upgrade' or operation.kind == 'structure_upgrade')
         and economy.DifferentialUpgradeCostCalculation == true
         and actor
     then
@@ -1645,6 +1770,7 @@ ESCALATION.CommitmentKey = function(controller, operation)
     end
     if operation.kind == 'factory_build'
         or operation.kind == 'factory_upgrade'
+        or operation.kind == 'structure_upgrade'
     then
         return role .. ':Actor:' .. tostring(operation.actorToken)
     end
@@ -1728,7 +1854,7 @@ local function MacroSnapshot(controller, units, economy)
         if operation.kind == 'factory_upgrade' then
             for _, unit in ipairs(units or {}) do
                 if unit.token == token
-                    and unit.role == 'land_factory'
+                    and unit.role == ESCALATION.UpgradeSourceRole(operation.upgradeRole)
                     and unit.complete == true
                 then
                     upgradeSourcesCompleted = upgradeSourcesCompleted + 1
@@ -2585,10 +2711,16 @@ end
 
 local function Signature(intent)
     local position = intent.position or {}
+    local tokens = CopyArray(intent.actorTokens or intent.escortTokens or intent.cargoTokens or {})
+    table.sort(tokens)
     return tostring(intent.kind) .. ':'
         .. tostring(intent.actorToken or '') .. ':'
+        .. table.concat(tokens, ',') .. ':'
         .. tostring(intent.buildRole or '') .. ':'
         .. tostring(intent.siteKey or '') .. ':'
+        .. tostring(intent.regionKey or '') .. ':'
+        .. tostring(intent.targetToken or '') .. ':'
+        .. tostring(intent.missionId or '') .. ':'
         .. tostring(math.floor((tonumber(position[1]) or 0) + 0.5)) .. ':'
         .. tostring(math.floor((tonumber(position[3]) or 0) + 0.5))
 end
@@ -2681,7 +2813,7 @@ local function OperationCompleted(controller, operation, observation, record)
             and (freshness.state == 'absent' or freshness.state == 'depleted')
             or false
     end
-    if operation.kind == 'factory_upgrade' then
+    if operation.kind == 'factory_upgrade' or operation.kind == 'structure_upgrade' then
         if record
             and record.role == operation.upgradeRole
             and record.complete == true
@@ -2705,7 +2837,8 @@ local function OperationCompleted(controller, operation, observation, record)
                             and ESCALATION.UpgradeTargetActor(
                                 controller,
                                 token,
-                                target
+                                target,
+                                operation.upgradeRole
                             ) == focus
                         then
                             operation.upgradeTargetToken = token
@@ -2725,7 +2858,8 @@ local function OperationCompleted(controller, operation, observation, record)
                         or not ESCALATION.UpgradeTargetActor(
                             controller,
                             unit.token,
-                            unit
+                            unit,
+                            operation.upgradeRole
                         )
                     then
                         return false
@@ -2933,6 +3067,7 @@ local function RecordPending(controller, intent, record)
         phase = 'reclaiming'
     elseif intent.kind == 'factory_build'
         or intent.kind == 'factory_upgrade'
+        or intent.kind == 'structure_upgrade'
     then
         phase = 'building'
     end
@@ -2954,6 +3089,9 @@ local function RecordPending(controller, intent, record)
         phase = phase,
         accepted = false,
         reason = intent.reason,
+        regionKey = intent.regionKey,
+        operationId = intent.operationId,
+        escortTokens = CopyArray(intent.escortTokens or {}),
         clusterKey = intent.clusterKey,
         targetToken = intent.targetToken,
         targetKey = intent.targetKey,
@@ -3069,19 +3207,28 @@ local function ExecuteFactoryProduction(controller, intent, record)
     return true
 end
 
+ESCALATION.UpgradeSourceRole = function(upgradeRole)
+    if upgradeRole == 'land_factory_t2' then return 'land_factory' end
+    if upgradeRole == 'land_factory_t3' then return 'land_factory_t2' end
+    if upgradeRole == 'mass_extractor_t2' then return 'mass_extractor' end
+    if upgradeRole == 'mass_extractor_t3' then return 'mass_extractor_t2' end
+    return nil
+end
+
 ESCALATION.ExecuteUpgrade = function(controller, intent, record)
+    local sourceRole = ESCALATION.UpgradeSourceRole(intent.upgradeRole)
     if controller.pending[intent.actorToken]
-        or record.role ~= 'land_factory'
-        or intent.upgradeRole ~= 'land_factory_t2'
+        or not sourceRole
+        or record.role ~= sourceRole
         or record.complete ~= true
         or record.idle ~= true
         or not record.canBuild
-        or record.canBuild.land_factory_t2 ~= true
+        or record.canBuild[intent.upgradeRole] ~= true
     then
         return false
     end
     local blueprintId = Catalog.IdFor(intent.upgradeRole)
-    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'land_factory')
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, sourceRole)
     if not actor
         or not blueprintId
         or SafeCall(false, actor.IsIdleState, actor) ~= true
@@ -3340,16 +3487,19 @@ local function LiveOwnedConstructionTarget(controller, token, record, expectedRo
     return target
 end
 
-ESCALATION.UpgradeTargetActor = function(controller, token, record)
+ESCALATION.UpgradeTargetActor = function(controller, token, record, upgradeRole)
+    local targetRole = upgradeRole or 'land_factory_t2'
+    local sourceRole = ESCALATION.UpgradeSourceRole(targetRole)
+    if not sourceRole then return nil end
     local target = nil
     if record and record.complete == true then
-        target = LiveOwnedActor(controller, token, record, 'land_factory_t2')
+        target = LiveOwnedActor(controller, token, record, targetRole)
     else
         target = LiveOwnedConstructionTarget(
             controller,
             token,
             record,
-            'land_factory_t2'
+            targetRole
         )
     end
     if not target then return nil end
@@ -3357,7 +3507,7 @@ ESCALATION.UpgradeTargetActor = function(controller, token, record)
     local general = blueprint and blueprint.General or nil
     if type(general) ~= 'table'
         or tostring(general.UpgradesFrom or '')
-            ~= tostring(Catalog.IdFor('land_factory') or '')
+            ~= tostring(Catalog.IdFor(sourceRole) or '')
     then
         return nil
     end
@@ -3365,11 +3515,12 @@ ESCALATION.UpgradeTargetActor = function(controller, token, record)
 end
 
 ESCALATION.UpgradeInProgress = function(controller, operation, record)
+    local sourceRole = ESCALATION.UpgradeSourceRole(operation.upgradeRole)
     local actor = LiveOwnedActor(
         controller,
         operation.actorToken,
         record,
-        'land_factory'
+        sourceRole
     )
     if not actor
         or SafeCall(false, actor.IsUnitState, actor, 'Upgrading') ~= true
@@ -3387,9 +3538,10 @@ ESCALATION.UpgradeInProgress = function(controller, operation, record)
         operation.upgradeTargetToken,
         {
             token = operation.upgradeTargetToken,
-            role = 'land_factory_t2',
+            role = operation.upgradeRole,
             complete = fraction >= 1,
-        }
+        },
+        operation.upgradeRole
     ) or nil
     local focus = SafeCall(nil, actor.GetFocusUnit, actor)
     if not target or focus ~= target then return false, nil end
@@ -7453,6 +7605,22 @@ Controller.Create = function(brain)
         airScreenCount = 0,
         airScoutAssignments = {},
         airScoutCount = 0,
+        intelState = { epoch = 0, contacts = {}, threat = {}, expansionSafety = {} },
+        macroPlan = { epoch = 0, valid = false, lanes = {}, regions = {}, intents = {} },
+        jobLedger = { epoch = 0, jobs = {}, releasedActorTokens = {} },
+        forcePlan = {
+            epoch = 0,
+            assignments = {},
+            ownershipByToken = {},
+            regionAssignments = {},
+            intents = {},
+        },
+        directorState = { epoch = 0 },
+        transportMissions = {},
+        transportHistory = {},
+        bomberMissions = {},
+        enemyRefs = {},
+        operationLifecycle = {},
         factoryTarget = 2,
         economyLedger = { samples = {}, lastTick = nil, lastStats = nil },
         economyCommitmentLeases = {},
@@ -7520,13 +7688,16 @@ Controller.Observe = function(controller)
     local enemies = controller.brain:GetUnitsAroundPoint(
         categories.MOBILE, controller.basePosition, DEFENSE_RADIUS, 'Enemy'
     ) or {}
+    local intelEnemies = ESCALATION.BoundedIntelEnemies(controller, units, enemies)
     local economy = {
         energyTrend = SafeCall(nil, controller.brain.GetEconomyTrend, controller.brain, 'ENERGY'),
         energyStoredRatio = SafeCall(nil, controller.brain.GetEconomyStoredRatio, controller.brain, 'ENERGY'),
+        energyStored = SafeCall(nil, controller.brain.GetEconomyStored, controller.brain, 'ENERGY'),
         energyIncome = SafeCall(nil, controller.brain.GetEconomyIncome, controller.brain, 'ENERGY'),
         energyUsage = SafeCall(nil, controller.brain.GetEconomyUsage, controller.brain, 'ENERGY'),
         massTrend = SafeCall(nil, controller.brain.GetEconomyTrend, controller.brain, 'MASS'),
         massStoredRatio = SafeCall(nil, controller.brain.GetEconomyStoredRatio, controller.brain, 'MASS'),
+        massStored = SafeCall(nil, controller.brain.GetEconomyStored, controller.brain, 'MASS'),
         massIncome = SafeCall(nil, controller.brain.GetEconomyIncome, controller.brain, 'MASS'),
         massUsage = SafeCall(nil, controller.brain.GetEconomyUsage, controller.brain, 'MASS'),
     }
@@ -7563,6 +7734,7 @@ Controller.Observe = function(controller)
         economy = economy,
         units = units,
         enemyContact = NormalizeEnemyContact(controller, enemies, units),
+        enemyObservations = ESCALATION.FairEnemyObservations(controller, intelEnemies),
         sites = sites,
         foundations = foundations,
         reclaim = reclaim,
@@ -7650,7 +7822,9 @@ Controller.Reconcile = function(controller, observation)
         local elapsed = tick - operation.issuedTick
         if OperationCompleted(controller, operation, observation, record) then
             ReleaseOperation(controller, token, nil)
-        elseif operation.kind == 'factory_upgrade' and not record then
+        elseif (operation.kind == 'factory_upgrade'
+                or operation.kind == 'structure_upgrade') and not record
+        then
             local target = operation.upgradeTargetToken
                 and records[operation.upgradeTargetToken]
                 or nil
@@ -7673,7 +7847,9 @@ Controller.Reconcile = function(controller, observation)
             local actor = LiveOwnedActor(controller, token, record, record.role)
             if not actor then
                 ReleaseOperation(controller, token, 'actor_missing')
-            elseif operation.kind == 'factory_upgrade' then
+            elseif operation.kind == 'factory_upgrade'
+                or operation.kind == 'structure_upgrade'
+            then
                 if SafeCall(false, actor.IsUnitState, actor, 'Upgrading') ~= true then
                     if record.idle == true
                         and tick > (tonumber(operation.cancelRequestedTick) or tick)
@@ -7708,7 +7884,8 @@ Controller.Reconcile = function(controller, observation)
             and (not operation.targetToken or not records[operation.targetToken])
         then
             ReleaseOperation(controller, token, 'target_missing')
-        elseif operation.kind == 'factory_upgrade'
+        elseif (operation.kind == 'factory_upgrade'
+                or operation.kind == 'structure_upgrade')
             and operation.accepted == true
             and not ESCALATION.UpgradeInProgress(controller, operation, record)
         then
@@ -7716,7 +7893,7 @@ Controller.Reconcile = function(controller, observation)
                 controller,
                 token,
                 record,
-                'land_factory'
+                ESCALATION.UpgradeSourceRole(operation.upgradeRole)
             )
             if actor
                 and SafeCall(false, actor.IsUnitState, actor, 'Upgrading') == true
@@ -7734,7 +7911,8 @@ Controller.Reconcile = function(controller, observation)
             end
         else
             OperationProgress(controller, operation, observation, record)
-            if operation.kind == 'factory_upgrade'
+            if (operation.kind == 'factory_upgrade'
+                    or operation.kind == 'structure_upgrade')
                 and record.idle == true
                 and (operation.accepted == true or elapsed > REJECT_TICKS)
             then
@@ -7754,6 +7932,7 @@ Controller.Reconcile = function(controller, observation)
                 if StructureOperation(operation)
                     or operation.kind == 'reclaim'
                     or operation.kind == 'factory_upgrade'
+                    or operation.kind == 'structure_upgrade'
                 then
                     if record.idle == true then
                         ReleaseOperation(controller, token, 'timeout')
@@ -7772,7 +7951,9 @@ Controller.Reconcile = function(controller, observation)
                     ReleaseOperation(controller, token, 'timeout')
                 end
             elseif elapsed >= VERIFY_TICKS then
-                if operation.kind == 'factory_upgrade' then
+                if operation.kind == 'factory_upgrade'
+                    or operation.kind == 'structure_upgrade'
+                then
                     if ESCALATION.UpgradeAccepted(controller, operation, record) then
                         operation.accepted = true
                     end
@@ -7799,7 +7980,8 @@ Controller.Reconcile = function(controller, observation)
                             ReleaseOperation(controller, token, 'actor_missing')
                         end
                     end
-                elseif operation.kind == 'factory_upgrade'
+                elseif (operation.kind == 'factory_upgrade'
+                        or operation.kind == 'structure_upgrade')
                     and operation.accepted == true
                     and operation.phase == 'building'
                     and tick - (tonumber(operation.lastProgressTick)
@@ -7825,6 +8007,7 @@ Controller.Reconcile = function(controller, observation)
                     end
                 elseif not StructureOperation(operation)
                     and operation.kind ~= 'factory_upgrade'
+                    and operation.kind ~= 'structure_upgrade'
                     and elapsed > OPERATION_TIMEOUT_TICKS
                 then
                     ReleaseOperation(controller, token, 'timeout')
@@ -7925,9 +8108,1829 @@ Controller.Reconcile = function(controller, observation)
 
     UpdateFieldCampaign(controller, observation)
 
+    if controller.directorStepActive ~= true then
+        ESCALATION.ReconcileDirectorMissions(controller, observation)
+    end
+
     observation.pending = PendingArray(controller)
     observation.state = StateSnapshot(controller)
     observation.macro = MacroSnapshot(controller, observation.units, observation.economy)
+end
+
+ESCALATION.DeepCopy = function(value)
+    if type(value) ~= 'table' then return value end
+    local result = {}
+    for key, item in pairs(value) do
+        result[key] = ESCALATION.DeepCopy(item)
+    end
+    return result
+end
+
+ESCALATION.DirectorRoleTier = function(role)
+    if role == 'mass_extractor_t3' or role == 'land_factory_t3' then return 3 end
+    if role == 'mass_extractor_t2' or role == 'land_factory_t2' then return 2 end
+    return 1
+end
+
+ESCALATION.TransportTokenClaimed = function(controller, token)
+    for _, mission in pairs(controller.transportMissions or {}) do
+        if mission.transportToken == token then return true end
+        for _, cargoToken in ipairs(mission.cargoTokens or {}) do
+            if cargoToken == token then return true end
+        end
+    end
+    return false
+end
+
+ESCALATION.DirectorUnits = function(controller, observation)
+    local result = {}
+    for _, unit in ipairs(observation.units or {}) do
+        TableInsert(result, {
+            token = unit.token,
+            role = unit.role,
+            roleFamily = unit.roleFamily,
+            tier = ESCALATION.DirectorRoleTier(unit.role),
+            position = CopyPosition(unit.position),
+            complete = unit.complete == true,
+            live = true,
+            owned = true,
+            idle = unit.idle == true,
+            available = unit.complete == true and unit.idle == true
+                and controller.pending[unit.token] == nil
+                and not ESCALATION.TransportTokenClaimed(controller, unit.token),
+            healthRatio = tonumber(unit.healthRatio) or 0,
+            canBuild = ESCALATION.DeepCopy(unit.canBuild or {}),
+            attached = unit.attached == true,
+        })
+    end
+    return result
+end
+
+ESCALATION.DirectorRegions = function(controller, observation, intelState)
+    local sites = {}
+    for _, site in ipairs((observation.sites or {}).mass or {}) do
+        TableInsert(sites, {
+            key = site.key,
+            position = CopyPosition(site.position),
+        })
+    end
+    local clustered = ESCALATION.directors.macro.ClusterRegions(
+        ESCALATION.DeepCopy(sites),
+        { radius = 32 }
+    ) or {}
+    local previous = (controller.directorState or {}).regions or {}
+    local byKey = {}
+    for _, site in ipairs((observation.sites or {}).mass or {}) do byKey[site.key] = site end
+    for _, region in ipairs(clustered) do
+        local old = previous[region.key]
+        local completed = 0
+        local lost = 0
+        local reachable = false
+        local packageRoles = {}
+        for _, key in ipairs(region.memberKeys or {}) do
+            local site = byKey[key]
+            if site then
+                if site.complete == true then completed = completed + 1 end
+                if site.lost == true then lost = lost + 1 end
+                if site.reachable == true or site.engineerReachable == true then
+                    reachable = true
+                end
+            end
+        end
+        region.connected = reachable
+        region.radius = 80
+        region.requiresGarrison = Distance(region.position, controller.basePosition) > 60
+        region.requiresAntiAir = region.requiresGarrison
+        for _, unit in ipairs(observation.units or {}) do
+            if unit.complete == true and Distance(unit.position, region.position) <= 32 then
+                packageRoles[unit.role] = true
+                if unit.roleFamily == 'land_factory' then packageRoles.land_factory = true end
+            end
+        end
+        local packageComplete = completed > 0 and packageRoles.radar == true
+            and packageRoles.static_anti_air == true
+            and packageRoles.point_defense == true
+            and packageRoles.land_factory == true
+        local pressured = false
+        for _, contact in pairs((intelState or {}).contacts or {}) do
+            if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) <= 60
+                and Distance(contact.position, region.position) <= region.radius
+            then
+                pressured = true
+            end
+        end
+        if old then
+            region.state = old.state
+            region.lossCount = old.lossCount
+            region.firstLossTick = old.firstLossTick
+            region.suspendedUntilTick = old.suspendedUntilTick
+            region.productionAnchor = old.productionAnchor
+            region.reclaimAnchor = old.reclaimAnchor
+        elseif Distance(region.position, controller.basePosition) <= 60 then
+            region.state = 'secured'
+            region.productionAnchor = true
+            region.reclaimAnchor = true
+        elseif completed > 0 then
+            region.state = 'establishing'
+        else
+            region.state = 'planned'
+        end
+        if old and old.state == 'secured' and completed == 0 and lost > 0 then
+            region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                event = 'package_lost', tick = observation.tick,
+            })
+        elseif old and old.state == 'suspended'
+            and observation.tick >= (tonumber(old.suspendedUntilTick) or 0)
+        then
+            region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                event = 'suspension_expired', tick = observation.tick,
+            })
+        elseif pressured and (region.state == 'secured'
+                or region.state == 'establishing')
+        then
+            region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                event = 'enemy_pressure', tick = observation.tick,
+            })
+        elseif packageComplete and region.state ~= 'secured' then
+            region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                event = 'package_complete', tick = observation.tick,
+            })
+        elseif completed > 0 and region.state == 'planned' then
+            region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                event = 'package_ordered', tick = observation.tick,
+            })
+        elseif completed > 0 and region.state == 'lost' then
+            region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                event = 'retake_funded', tick = observation.tick,
+            })
+        end
+    end
+    table.sort(clustered, function(a, b) return tostring(a.key) < tostring(b.key) end)
+    controller.directorState.regions = {}
+    for _, region in ipairs(clustered) do
+        controller.directorState.regions[region.key] = ESCALATION.DeepCopy(region)
+    end
+    return clustered
+end
+
+ESCALATION.MapSizeKm = function(controller)
+    local size = type(ScenarioInfo) == 'table' and ScenarioInfo.size or nil
+    local span = type(size) == 'table'
+        and math.max(tonumber(size[1]) or 0, tonumber(size[2]) or 0)
+        or 0
+    if span <= 0 then
+        for _, markerGroup in pairs(controller.markers or {}) do
+            for _, marker in ipairs(markerGroup or {}) do
+                span = math.max(span,
+                    math.abs((marker.position or {})[1] or 0),
+                    math.abs((marker.position or {})[3] or 0))
+            end
+        end
+        span = span * 2
+    end
+    if span <= 0 then return 20 end
+    return math.max(5, math.min(40, math.floor(span / 51.2 + 0.5)))
+end
+
+ESCALATION.DirectorMacroInput = function(controller, observation, intelState, regions)
+    local counts = {
+        engineers = 0,
+        mexT1 = 0,
+        mexT2 = 0,
+        mexT3 = 0,
+        landFactoriesT1 = 0,
+        landFactoriesT2 = 0,
+        airFactoriesT1 = 0,
+        idleFactories = 0,
+    }
+    local constructionBacklog = 0
+    local landBacklog = 0
+    local airBacklog = 0
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.complete == true then
+            if unit.role == 'engineer' then counts.engineers = counts.engineers + 1 end
+            if unit.role == 'mass_extractor' then counts.mexT1 = counts.mexT1 + 1 end
+            if unit.role == 'mass_extractor_t2' then counts.mexT2 = counts.mexT2 + 1 end
+            if unit.role == 'mass_extractor_t3' then counts.mexT3 = counts.mexT3 + 1 end
+            if unit.role == 'land_factory' then counts.landFactoriesT1 = counts.landFactoriesT1 + 1 end
+            if unit.role == 'land_factory_t2' or unit.role == 'land_factory_t3' then
+                counts.landFactoriesT2 = counts.landFactoriesT2 + 1
+            end
+            if unit.role == 'air_factory' then counts.airFactoriesT1 = counts.airFactoriesT1 + 1 end
+            if (unit.role == 'land_factory' or unit.role == 'land_factory_t2'
+                    or unit.role == 'land_factory_t3' or unit.role == 'air_factory')
+                and unit.idle == true
+            then
+                counts.idleFactories = counts.idleFactories + 1
+            end
+        end
+    end
+    local availableSites = 0
+    for _, site in ipairs((observation.sites or {}).mass or {}) do
+        if site.complete ~= true and site.reserved ~= true and site.buildable ~= false
+            and (site.reachable == true or site.engineerReachable == true)
+        then
+            availableSites = availableSites + 1
+        end
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if StructureOperation(operation) then constructionBacklog = constructionBacklog + 1 end
+    end
+    local completedMex = counts.mexT1 + counts.mexT2 + counts.mexT3
+    landBacklog = math.max(0, completedMex * 2 - (counts.landFactoriesT1
+        + counts.landFactoriesT2) * 3)
+    airBacklog = math.max(0, math.floor(completedMex / 2) - counts.airFactoriesT1)
+    local requests = {
+        { id = 'energy-1', lane = 'energy_recovery', massDrain = 0.05,
+            energyDrain = 0, massCost = 75, energyCost = 0, required = true },
+        { id = 'mex-1', lane = 'mex_rebuild', massDrain = 0.3,
+            energyDrain = 3, massCost = 36, energyCost = 360, required = true },
+        { id = 'reclaim-1', lane = 'reclaim', massDrain = 0,
+            energyDrain = 0, massCost = 0, energyCost = 0, required = true },
+        { id = 'engineer-1', lane = 'engineers', massDrain = 0.2,
+            energyDrain = 2, massCost = 52, energyCost = 260 },
+        { id = 'land-1', lane = 'land_production', massDrain = 0.28,
+            energyDrain = 3, massCost = 56, energyCost = 600, required = true },
+        { id = 'air-1', lane = 'air_production', massDrain = 0.2,
+            energyDrain = 9, massCost = 50, energyCost = 2250, required = true },
+        { id = 'factory-1', lane = 'factory_growth', massDrain = 0.35,
+            energyDrain = 4, massCost = 210, energyCost = 2400, optional = true },
+        { id = 'tech-1', lane = 'tech', massDrain = 1.017391,
+            energyDrain = 7.913043, massCost = 1170, energyCost = 9100,
+            durationTicks = 1150, optional = true },
+    }
+    local commitments = {}
+    local records = RecordByToken(observation.units or {})
+    for _, operation in pairs(controller.pending or {}) do
+        local lane = ESCALATION.requestLanes[operation.buildRole or operation.upgradeRole]
+        if lane then
+            local budget = ESCALATION.OperationBudget(controller, operation, records)
+            TableInsert(commitments, {
+                id = operation.actorToken,
+                lane = lane == 'factory' and 'land_production'
+                    or lane == 'air' and 'air_production'
+                    or lane == 'expansion' and 'mex_rebuild'
+                    or lane == 'energy' and 'energy_recovery'
+                    or lane == 'engineer' and 'engineers'
+                    or lane,
+                massDrain = budget and budget.massDrain or 0,
+                energyDrain = budget and budget.energyDrain or 0,
+                massCost = budget and budget.massCost or 0,
+                energyCost = budget and budget.energyCost or 0,
+            })
+        end
+    end
+    return {
+        tick = observation.tick,
+        epoch = (tonumber((controller.macroPlan or {}).epoch) or 0) + 1,
+        mapSizeKm = ESCALATION.MapSizeKm(controller),
+        economy = ESCALATION.DeepCopy(observation.economy or {}),
+        counts = counts,
+        opportunities = {
+            publicMassMarkers = TableGetn((observation.sites or {}).mass or {}),
+            fundableBuilderJobs = math.min(12, availableSites + constructionBacklog),
+            constructionBacklog = constructionBacklog + availableSites,
+            landProductionBacklog = landBacklog,
+            airProductionBacklog = airBacklog,
+            reclaimJobs = TableGetn(observation.reclaim or {}),
+            lostMex = tonumber(controller.lostMexCount) or 0,
+            distinctRegions = TableGetn(regions or {}),
+        },
+        requests = requests,
+        commitments = commitments,
+        campaign = {
+            state = controller.fieldCampaign and controller.fieldCampaign.state or 'idle',
+            ownedCombatRatio = 0,
+        },
+        intelState = ESCALATION.DeepCopy(intelState),
+        regions = ESCALATION.DeepCopy(regions),
+        previousMacroPlan = ESCALATION.DeepCopy(controller.macroPlan),
+    }
+end
+
+ESCALATION.DirectorExpansionInput = function(controller, observation, macroPlan)
+    local regions = macroPlan.regions or {}
+    local regionByMember = {}
+    for _, region in ipairs(regions) do
+        for _, key in ipairs(region.memberKeys or {}) do regionByMember[key] = region.key end
+    end
+    local sites = {}
+    for _, site in ipairs((observation.sites or {}).mass or {}) do
+        TableInsert(sites, {
+            key = site.key,
+            position = CopyPosition(site.position),
+            regionKey = regionByMember[site.key] or site.regionKey,
+            reachable = site.reachable == true or site.engineerReachable == true,
+            buildable = site.buildable ~= false,
+            reserved = site.reserved == true,
+            lost = site.lost == true,
+            owned = site.complete == true,
+            value = 2,
+        })
+    end
+    local engineers = {}
+    local escorts = {}
+    local airliftAvailable = false
+    for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+        if unit.role == 'engineer' then TableInsert(engineers, unit) end
+        if COMBAT_ROLES[unit.role] then TableInsert(escorts, unit) end
+        if unit.role == 'transport' and unit.available == true then airliftAvailable = true end
+    end
+    if airliftAvailable then
+        for _, site in ipairs(sites) do
+            local engineerAtDrop = false
+            for _, engineer in ipairs(engineers) do
+                if Distance(engineer.position, site.position) <= 20 then engineerAtDrop = true end
+            end
+            if not engineerAtDrop and Distance(site.position, controller.basePosition) > 120 then
+                site.reachable = false
+            end
+        end
+    end
+    return {
+        tick = observation.tick,
+        fundedExpansionSlots = tonumber(macroPlan.fundedExpansionSlots) or 0,
+        controlledRadius = 60,
+        engineers = engineers,
+        escorts = escorts,
+        sites = sites,
+        regions = ESCALATION.DeepCopy(regions),
+        intelState = ESCALATION.DeepCopy(controller.intelState),
+    }
+end
+
+ESCALATION.DirectorReclaimInput = function(controller, observation, macroPlan)
+    local candidates = {}
+    for _, candidate in ipairs(observation.reclaim or {}) do
+        TableInsert(candidates, {
+            key = candidate.key,
+            position = CopyPosition(candidate.position),
+            mass = tonumber(candidate.mass) or 0,
+            visible = true,
+            live = true,
+        })
+    end
+    local engineers = {}
+    for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+        if unit.role == 'engineer' then TableInsert(engineers, unit) end
+    end
+    return {
+        tick = observation.tick,
+        regions = ESCALATION.DeepCopy(macroPlan.regions or {}),
+        engineers = engineers,
+        candidates = candidates,
+    }
+end
+
+ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
+    local factories = {}
+    local mex = {}
+    local t2Mobile = 0
+    local activeMexUpgrades = 0
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.roleFamily == 'land_factory' and unit.complete == true then
+            TableInsert(factories, {
+                token = unit.token,
+                tier = ESCALATION.DirectorRoleTier(unit.role),
+                idle = unit.idle == true and controller.pending[unit.token] == nil,
+            })
+        elseif unit.roleFamily == 'mass_extractor' and unit.complete == true then
+            TableInsert(mex, {
+                key = unit.token,
+                token = unit.token,
+                tier = ESCALATION.DirectorRoleTier(unit.role),
+                upgrading = controller.pending[unit.token] ~= nil,
+            })
+            if controller.pending[unit.token] then activeMexUpgrades = activeMexUpgrades + 1 end
+        elseif (unit.role == 't2_direct_fire' or unit.role == 't2_anti_air')
+            and unit.complete == true
+        then
+            t2Mobile = t2Mobile + 1
+        end
+    end
+    local techLane = (macroPlan.lanes or {}).tech or {}
+    local economy = observation.economy or {}
+    local healthy = (tonumber(economy.massTrend) or -1) >= 0
+        and (tonumber(economy.energyTrend) or -1) >= 0
+        and (tonumber(economy.massStoredRatio) or 0) >= 0.2
+        and (tonumber(economy.energyStoredRatio) or 0) >= 0.2
+    return {
+        tick = observation.tick,
+        economyHealthy = healthy,
+        techFunded = techLane.admitted == true,
+        hydroAvailable = CountRole(observation.units, 'hydrocarbon') > 0,
+        t2HqComplete = CountRole(observation.units, 'land_factory_t2') > 0
+            or CountRole(observation.units, 'land_factory_t3') > 0,
+        t2MobileCount = t2Mobile,
+        landFactories = factories,
+        mex = mex,
+        activeMexUpgrades = activeMexUpgrades,
+    }
+end
+
+ESCALATION.TransportEvent = function(controller, mission, observation)
+    local records = RecordByToken(observation.units or {})
+    local transportRecord = records[mission.transportToken]
+    local transport = transportRecord
+        and LiveOwnedActor(controller, mission.transportToken, transportRecord, 'transport')
+        or nil
+    if not transport then
+        return { kind = 'transport_dead', tick = observation.tick }
+    end
+    local attached = {}
+    for _, cargo in pairs(SafeCall({}, transport.GetCargo, transport) or {}) do
+        if cargo
+            and SafeCall(false, cargo.IsUnitState, cargo, 'Attached') == true
+            and SafeCall(-1, cargo.GetArmy, cargo) == controller.brain.Army
+        then
+            local entityId = SafeCall(nil, cargo.GetEntityId, cargo)
+            local generation = entityId and controller.entityGenerations[entityId] or nil
+            if generation and generation.reference == cargo then
+                TableInsert(attached, tostring(entityId) .. ':' .. tostring(generation.generation))
+            end
+        end
+    end
+    table.sort(attached)
+    local cargoPositions = {}
+    for _, token in ipairs(mission.cargoTokens or {}) do
+        local record = records[token]
+        local isAttached = false
+        for _, attachedToken in ipairs(attached) do
+            if attachedToken == token then isAttached = true end
+        end
+        if not record and not isAttached then
+            return { kind = 'cargo_dead', tick = observation.tick }
+        end
+        if record and record.attached ~= true then
+            cargoPositions[token] = CopyPosition(record.position)
+        end
+    end
+    return {
+        kind = 'observed',
+        tick = observation.tick,
+        transportToken = mission.transportToken,
+        attachedCargoTokens = attached,
+        cargoPositions = cargoPositions,
+    }
+end
+
+ESCALATION.ReconcileDirectorMissions = function(controller, observation)
+    for _, missionId in ipairs(SortedKeys(controller.transportMissions)) do
+        local mission = controller.transportMissions[missionId]
+        if mission and (mission.state == 'loading' or mission.state == 'unloading'
+                or mission.state == 'flying')
+        then
+            local event = ESCALATION.TransportEvent(controller, mission, observation)
+            local advanced = ESCALATION.directors.intelligence.AdvanceTransport(
+                ESCALATION.DeepCopy(mission),
+                ESCALATION.DeepCopy(event)
+            )
+            if advanced and (advanced.state == 'completed'
+                    or advanced.state == 'released' or advanced.released == true)
+            then
+                local reservation = mission.siteKey
+                    and controller.reservations[mission.siteKey]
+                    or nil
+                if type(reservation) == 'table'
+                    and reservation.missionId == missionId
+                then
+                    controller.reservations[mission.siteKey] = nil
+                end
+                controller.transportHistory[missionId] = {
+                    state = advanced.state,
+                    tick = observation.tick,
+                    retryable = advanced.retryable == true,
+                    retryAtTick = observation.tick + 100,
+                    retryCount = tonumber(advanced.retryCount) or 0,
+                    siteKey = mission.siteKey,
+                }
+                controller.transportMissions[missionId] = nil
+            elseif advanced then
+                controller.transportMissions[missionId] = ESCALATION.DeepCopy(advanced)
+            end
+        end
+    end
+    local records = RecordByToken(observation.units or {})
+    for _, bomberToken in ipairs(SortedKeys(controller.bomberMissions)) do
+        local mission = controller.bomberMissions[bomberToken]
+        local record = records[bomberToken]
+        if not record or record.role ~= 'bomber' or record.complete ~= true
+            or not mission or not controller.enemyRefs[mission.targetToken]
+        then
+            controller.bomberMissions[bomberToken] = nil
+        end
+    end
+end
+
+ESCALATION.EmitOperationPhase = function(controller, operationId, phase, fields)
+    if type(operationId) ~= 'string' or type(phase) ~= 'string' then return end
+    local emitted = controller.operationLifecycle[operationId]
+    if not emitted then
+        emitted = {}
+        controller.operationLifecycle[operationId] = emitted
+    end
+    if emitted[phase] then return end
+    emitted[phase] = true
+    local payload = {
+        army = controller.brain.Army,
+        tick = CurrentTick(controller),
+        operation = operationId,
+        phase = phase,
+    }
+    for key, value in pairs(fields or {}) do payload[key] = value end
+    Telemetry.Emit('operation', payload)
+end
+
+ESCALATION.AvailableDirectorActor = function(controller, observation, role, buildRole, reserved)
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == role and unit.complete == true and unit.idle == true
+            and not controller.pending[unit.token] and not reserved[unit.token]
+            and (not buildRole or (unit.canBuild and unit.canBuild[buildRole] == true))
+        then
+            return unit
+        end
+    end
+    return nil
+end
+
+ESCALATION.AppendDirectorIntent = function(intents, intent)
+    if type(intent) == 'table' and type(intent.kind) == 'string' then
+        TableInsert(intents, ESCALATION.DeepCopy(intent))
+    end
+end
+
+ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, techPlan, intents, reserved)
+    local currentEngineers = 0
+    local currentLand = 0
+    local currentAir = 0
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.complete == true then
+            if unit.role == 'engineer' then currentEngineers = currentEngineers + 1 end
+            if unit.role == 'land_factory' or unit.role == 'land_factory_t2'
+                or unit.role == 'land_factory_t3'
+            then
+                currentLand = currentLand + 1
+            end
+            if unit.role == 'air_factory' then currentAir = currentAir + 1 end
+        end
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.buildRole == 'engineer' then currentEngineers = currentEngineers + 1 end
+        if operation.buildRole == 'land_factory' then currentLand = currentLand + 1 end
+        if operation.buildRole == 'air_factory' then currentAir = currentAir + 1 end
+    end
+    local lanes = macroPlan.lanes or {}
+    if (lanes.factory_growth or {}).admitted == true then
+        if currentLand < (tonumber(macroPlan.landFactoryTarget) or currentLand) then
+            local actor = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'engineer', 'land_factory', reserved
+            )
+            local positions = (observation.placements or {}).land_factory or {}
+            if actor and positions[1] then
+                reserved[actor.token] = true
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'build_structure', actorToken = actor.token,
+                    buildRole = 'land_factory', position = CopyPosition(positions[1]),
+                    reason = 'funded_land_factory_growth', priority = 4,
+                })
+            end
+        end
+        if currentAir < (tonumber(macroPlan.airFactoryTarget) or currentAir) then
+            local actor = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'engineer', 'air_factory', reserved
+            )
+            local positions = (observation.placements or {}).air_factory or {}
+            if actor and positions[1] then
+                reserved[actor.token] = true
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'build_structure', actorToken = actor.token,
+                    buildRole = 'air_factory', position = CopyPosition(positions[1]),
+                    reason = 'funded_air_factory_growth', priority = 4,
+                })
+            end
+        end
+    end
+    if (lanes.engineers or {}).admitted == true
+        and currentEngineers < (tonumber(macroPlan.engineerTarget) or currentEngineers)
+    then
+        local factory = ESCALATION.AvailableDirectorActor(
+            controller, observation, 'land_factory', 'engineer', reserved
+        )
+        if factory then
+            reserved[factory.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'factory_build', actorToken = factory.token,
+                buildRole = 'engineer', reason = 'funded_engineer_growth', priority = 4,
+            })
+        end
+    end
+    local landLane = (lanes.land_production or {})
+    if landLane.admitted == true or landLane.preserved == true then
+        for _, role in ipairs((techPlan or {}).t2ProductionRoles or {}) do
+            local factory = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'land_factory_t2', role, reserved
+            )
+            if factory then
+                reserved[factory.token] = true
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'factory_build', actorToken = factory.token,
+                    buildRole = role, reason = 'funded_t2_production', priority = 5,
+                })
+            end
+        end
+        if type((techPlan or {}).t3ProductionRole) == 'string' then
+            local factory = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'land_factory_t3',
+                techPlan.t3ProductionRole, reserved
+            )
+            if factory then
+                reserved[factory.token] = true
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'factory_build', actorToken = factory.token,
+                    buildRole = techPlan.t3ProductionRole,
+                    reason = 'funded_t3_production', priority = 5,
+                })
+            end
+        end
+    end
+end
+
+ESCALATION.AdaptPackageIntents = function(controller, observation, region, packagePlan, intents, reserved)
+    local offsets = {
+        radar = { 0, 0 },
+        static_anti_air = { 4, 0 },
+        point_defense = { 0, 4 },
+        land_factory = { 8, 0 },
+    }
+    for _, role in ipairs((packagePlan or {}).requiredRoles or {}) do
+        local present = false
+        for _, unit in ipairs(observation.units or {}) do
+            if unit.role == role and unit.complete == true
+                and Distance(unit.position, region.position) <= 24
+            then
+                present = true
+            end
+        end
+        for _, operation in pairs(controller.pending or {}) do
+            if operation.buildRole == role and operation.regionKey == region.key then present = true end
+        end
+        if not present then
+            local actor = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'engineer', role, reserved
+            )
+            if actor then
+                reserved[actor.token] = true
+                local offset = TableGetn((packagePlan or {}).requiredRoles or {}) == 1
+                    and { 0, 0 }
+                    or (offsets[role] or { 0, 0 })
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'build_structure', actorToken = actor.token,
+                    buildRole = role, regionKey = region.key,
+                    position = {
+                        region.position[1] + offset[1], region.position[2],
+                        region.position[3] + offset[2],
+                    },
+                    reason = 'region_package', priority = 3,
+                })
+            end
+        end
+    end
+end
+
+ESCALATION.AdaptRadarIntents = function(controller, observation, radarIntents, intents, reserved)
+    for _, source in ipairs(radarIntents or {}) do
+        local intent = ESCALATION.DeepCopy(source)
+        if not intent.actorToken then
+            local actor = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'engineer', 'radar', reserved
+            )
+            if actor then intent.actorToken = actor.token end
+        end
+        if intent.actorToken and not reserved[intent.actorToken] then
+            reserved[intent.actorToken] = true
+            intent.kind = 'build_structure'
+            intent.priority = tonumber(intent.priority) or 2
+            ESCALATION.AppendDirectorIntent(intents, intent)
+        elseif not intent.actorToken then
+            intent.kind = 'build_structure'
+            intent.priority = tonumber(intent.priority) or 2
+            ESCALATION.AppendDirectorIntent(intents, intent)
+        end
+    end
+end
+
+ESCALATION.AdaptExpansionIntents = function(controller, expansionPlan, forcePlan, intents, reserved)
+    for _, job in ipairs((expansionPlan or {}).jobs or {}) do
+        if type(job.id) == 'string' and type(job.siteKey) == 'string'
+            and type(job.actorToken) == 'string' and not reserved[job.actorToken]
+            and not controller.pending[job.actorToken]
+            and job.phase ~= 'completed' and job.phase ~= 'retryable'
+            and job.phase ~= 'cancelled'
+            and (job.requiresEscort ~= true or job.escortReady == true)
+        then
+            local intent = {
+                kind = 'build_structure',
+                actorToken = job.actorToken,
+                buildRole = 'mass_extractor',
+                siteKey = job.siteKey,
+                targetKey = job.targetKey,
+                regionKey = job.regionKey,
+                position = CopyPosition(job.position),
+                reason = job.kind == 'rebuild_mex' and 'rebuild_mex' or 'regional_expansion',
+                operationId = job.id,
+                priority = 1,
+            }
+            if TableGetn(job.escortTokens or {}) > 0 then
+                intent.kind = 'escorted_expansion'
+                intent.escortTokens = CopyArray(job.escortTokens)
+                intent.forceRegion = job.regionKey
+                for _, token in ipairs(intent.escortTokens) do reserved[token] = true end
+            end
+            reserved[job.actorToken] = true
+            ESCALATION.AppendDirectorIntent(intents, intent)
+            ESCALATION.EmitOperationPhase(controller, job.id, 'opportunity')
+            ESCALATION.EmitOperationPhase(controller, job.id, 'selected')
+            ESCALATION.EmitOperationPhase(controller, job.id, 'admitted')
+        end
+    end
+end
+
+ESCALATION.BindExpansionEscorts = function(
+    controller, observation, expansionPlan, forcePlan
+)
+    local records = RecordByToken(observation.units or {})
+    local ownership = (forcePlan or {}).ownershipByToken or {}
+    for _, job in ipairs((expansionPlan or {}).jobs or {}) do
+        if job.requiresEscort == true or TableGetn(job.escortTokens or {}) > 0 then
+            job.requiresEscort = true
+            job.escortReady = false
+            job.escortTokens = {}
+            local assignment = ((forcePlan or {}).regionAssignments or {})[job.regionKey]
+            local aa = nil
+            local land = nil
+            if assignment and assignment.ready == true then
+                for _, token in ipairs(assignment.actorTokens or {}) do
+                    local record = records[token]
+                    if record and record.complete == true
+                        and ownership[token] == 'garrison'
+                    then
+                        if ESCALATION.antiAirRoles[record.role] and not aa then
+                            aa = token
+                        elseif COMBAT_ROLES[record.role] and not land then
+                            land = token
+                        end
+                    end
+                end
+            end
+            if aa and land then
+                job.escortTokens = { aa, land }
+                table.sort(job.escortTokens)
+                job.escortReady = true
+            end
+        end
+    end
+    return expansionPlan
+end
+
+ESCALATION.SyncJobLedger = function(controller)
+    local ledger = ESCALATION.DeepCopy(controller.jobLedger or { jobs = {} })
+    ledger.jobs = ledger.jobs or {}
+    for id, job in pairs(ledger.jobs) do
+        local operation = job.actorToken and controller.pending[job.actorToken] or nil
+        if operation and operation.operationId == id then
+            job.phase = operation.phase or job.phase
+            job.deadlineTick = operation.deadlineTick or job.deadlineTick
+            job.lastProgressTick = operation.lastProgressTick or job.lastProgressTick
+            job.lastFraction = operation.lastFraction or job.lastFraction
+        end
+    end
+    return ledger
+end
+
+ESCALATION.LedgerExpansionPlan = function(jobLedger)
+    local result = { jobs = {} }
+    for _, id in ipairs(SortedKeys((jobLedger or {}).jobs or {})) do
+        local job = jobLedger.jobs[id]
+        if job and job.phase ~= 'completed' and job.phase ~= 'retryable'
+            and job.phase ~= 'cancelled'
+        then
+            TableInsert(result.jobs, ESCALATION.DeepCopy(job))
+        end
+    end
+    return result
+end
+
+ESCALATION.AdaptReclaimIntents = function(controller, reclaimPlan, intents, reserved)
+    for _, job in ipairs((reclaimPlan or {}).jobs or {}) do
+        if type(job.actorToken) == 'string' and not reserved[job.actorToken]
+            and not controller.pending[job.actorToken]
+        then
+            reserved[job.actorToken] = true
+            local intent = ESCALATION.DeepCopy(job)
+            intent.kind = 'reclaim'
+            intent.priority = tonumber(intent.priority) or 3
+            ESCALATION.AppendDirectorIntent(intents, intent)
+        end
+    end
+end
+
+ESCALATION.AdaptTechIntents = function(controller, observation, techPlan, intents, reserved)
+    techPlan = techPlan or {}
+    if techPlan.hqAction == 'start_t2' and type(techPlan.hqSourceToken) == 'string'
+        and not reserved[techPlan.hqSourceToken]
+        and not controller.pending[techPlan.hqSourceToken]
+    then
+        reserved[techPlan.hqSourceToken] = true
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'factory_upgrade', actorToken = techPlan.hqSourceToken,
+            upgradeRole = 'land_factory_t2', reason = 'funded_t2_hq', priority = 3,
+        })
+    end
+    local records = RecordByToken(observation.units or {})
+    if techPlan.t3Action == 'admit' and not reserved[techPlan.hqSourceToken] then
+        local source = ESCALATION.AvailableDirectorActor(
+            controller, observation, 'land_factory_t2',
+            techPlan.t3UpgradeRole or 'land_factory_t3', reserved
+        )
+        if source then
+            reserved[source.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'factory_upgrade', actorToken = source.token,
+                upgradeRole = techPlan.t3UpgradeRole or 'land_factory_t3',
+                reason = 'funded_t3_hq', priority = 5,
+            })
+        end
+    end
+    for _, siteKey in ipairs(techPlan.mexUpgradeSiteKeys or {}) do
+        local token = siteKey
+        if not records[token] then
+            for _, unit in ipairs(observation.units or {}) do
+                if unit.roleFamily == 'mass_extractor' and unit.complete == true
+                    and (unit.siteKey == siteKey or unit.token == siteKey)
+                then
+                    token = unit.token
+                    break
+                end
+            end
+        end
+        local record = records[token]
+        local upgradeRole = (techPlan.mexUpgradeRolesBySite or {})[siteKey]
+            or (record and record.role == 'mass_extractor_t2'
+                and 'mass_extractor_t3' or 'mass_extractor_t2')
+        local expectedRole = upgradeRole == 'mass_extractor_t3'
+            and 'mass_extractor_t2' or 'mass_extractor'
+        if record and record.role == expectedRole and not reserved[token]
+            and not controller.pending[token]
+        then
+            reserved[token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'structure_upgrade', actorToken = token,
+                upgradeRole = upgradeRole, siteKey = siteKey,
+                reason = 'stagger_mex_upgrade', priority = 5,
+            })
+        end
+    end
+end
+
+ESCALATION.AdaptScoutIntent = function(controller, observation, scoutPlan, intents, reserved)
+    if not scoutPlan or TableGetn(scoutPlan.waypoints or {}) == 0 then return end
+    local scout = ESCALATION.AvailableDirectorActor(
+        controller, observation, 'air_scout', nil, reserved
+    )
+    if not scout or controller.airScoutAssignments[scout.token] then return end
+    local objectiveKey = scoutPlan.nextObjectiveKey or (scoutPlan.objectiveKeys or {})[1]
+    local position = nil
+    for index, key in ipairs(scoutPlan.objectiveKeys or {}) do
+        if key == objectiveKey then position = scoutPlan.waypoints[index] end
+    end
+    position = position or scoutPlan.waypoints[1]
+    if not CopyPosition(position) then return end
+    reserved[scout.token] = true
+    ESCALATION.AppendDirectorIntent(intents, {
+        kind = 'scout_route', actorToken = scout.token,
+        siteKey = objectiveKey, position = CopyPosition(position),
+        objectiveKeys = CopyArray(scoutPlan.objectiveKeys or {}),
+        waypoints = ESCALATION.DeepCopy(scoutPlan.waypoints or {}),
+        reason = 'coverage_age', priority = 2,
+    })
+end
+
+ESCALATION.AdaptAirIntents = function(controller, observation, airPlan, intents, reserved)
+    for _, order in ipairs((airPlan or {}).orders or {}) do
+        local actorToken = order.actorToken
+        if not actorToken then
+            local factory = ESCALATION.AvailableDirectorActor(
+                controller, observation, 'air_factory', order.buildRole, reserved
+            )
+            actorToken = factory and factory.token or nil
+        end
+        if actorToken and not reserved[actorToken] and not controller.pending[actorToken] then
+            reserved[actorToken] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'factory_build', actorToken = actorToken,
+                buildRole = order.buildRole, reason = 'funded_air_mix', priority = 4,
+            })
+        end
+    end
+end
+
+ESCALATION.AdaptTransportIntent = function(controller, transportPlan, intents)
+    local activeMission = false
+    for _, missionId in ipairs(SortedKeys(controller.transportMissions)) do
+        local mission = controller.transportMissions[missionId]
+        if mission then activeMission = true end
+        if mission and mission.state == 'loaded' then
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'transport_unload', missionId = missionId,
+                transportToken = mission.transportToken,
+                cargoTokens = CopyArray(mission.cargoTokens or {}),
+                dropPosition = CopyPosition(mission.dropPosition),
+                priority = 1,
+            })
+            return
+        end
+    end
+    if activeMission then return end
+    if type(transportPlan) == 'table' and transportPlan.mode == 'airlift'
+        and type(transportPlan.missionId) == 'string'
+        and controller.transportMissions[transportPlan.missionId] == nil
+    then
+        local historyKey = nil
+        local history = nil
+        for _, key in ipairs(SortedKeys(controller.transportHistory or {})) do
+            local candidate = controller.transportHistory[key]
+            if key == transportPlan.missionId
+                or (candidate.siteKey and candidate.siteKey == transportPlan.siteKey)
+            then
+                if not history or (tonumber(candidate.tick) or 0) > (tonumber(history.tick) or 0) then
+                    historyKey = key
+                    history = candidate
+                end
+            end
+        end
+        if history and history.retryable == true
+            and CurrentTick(controller) >= (tonumber(history.retryAtTick) or 0)
+        then
+            transportPlan.retryCount = (tonumber(history.retryCount) or 0) + 1
+            transportPlan.missionId = transportPlan.missionId .. ':retry:'
+                .. tostring(transportPlan.retryCount)
+            controller.transportHistory[historyKey] = nil
+            history = nil
+        end
+        if history then return end
+        local intent = ESCALATION.DeepCopy(transportPlan)
+        intent.kind = 'transport_load'
+        intent.priority = 1
+        ESCALATION.AppendDirectorIntent(intents, intent)
+    end
+end
+
+ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved)
+    for _, intent in ipairs((forcePlan or {}).intents or {}) do
+        ESCALATION.AppendDirectorIntent(intents, intent)
+    end
+    if forcePlan and forcePlan.responseIntent then
+        local intent = ESCALATION.DeepCopy(forcePlan.responseIntent)
+        intent.kind = 'home_response'
+        intent.priority = 0
+        ESCALATION.AppendDirectorIntent(intents, intent)
+    end
+    local activeEscorts = {}
+    for _, operation in pairs(controller.pending or {}) do
+        for _, token in ipairs(operation.escortTokens or {}) do activeEscorts[token] = true end
+    end
+    for _, regionKey in ipairs(SortedKeys((forcePlan or {}).regionAssignments or {})) do
+        local assignment = forcePlan.regionAssignments[regionKey]
+        if assignment.ready == true and TableGetn(assignment.actorTokens or {}) > 0 then
+            local position = nil
+            for _, region in ipairs((forcePlan or {}).regions or {}) do
+                if region.key == regionKey then position = region.position end
+            end
+            if position then
+                local tokens = {}
+                for _, token in ipairs(assignment.actorTokens or {}) do
+                    if not reserved[token] and not activeEscorts[token] then
+                        TableInsert(tokens, token)
+                    end
+                end
+                table.sort(tokens)
+                if TableGetn(tokens) > 0 then
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'region_garrison', regionKey = regionKey,
+                    actorTokens = tokens,
+                    position = CopyPosition(position), priority = 2,
+                })
+                end
+            end
+        end
+    end
+    local targetRegion = nil
+    local targetDistance = nil
+    for _, region in ipairs((forcePlan or {}).regions or {}) do
+        local urgent = region.state == 'contested' or region.state == 'retake'
+            or region.state == 'establishing'
+        local distance = DistanceSquared(region.position, controller.basePosition)
+        if (urgent and (not targetRegion
+                or targetRegion.state == 'secured'
+                or tostring(region.key) < tostring(targetRegion.key)))
+            or (not urgent and (not targetRegion or targetRegion.state == 'secured')
+                and (targetDistance == nil or distance > targetDistance
+                    or (distance == targetDistance
+                        and tostring(region.key) < tostring(targetRegion.key))))
+        then
+            targetRegion = region
+            targetDistance = distance
+        end
+    end
+    local fieldTokens = {}
+    for _, token in ipairs(((forcePlan or {}).assignments or {}).field or {}) do
+        if not reserved[token] and not activeEscorts[token] then
+            TableInsert(fieldTokens, token)
+        end
+    end
+    table.sort(fieldTokens)
+    if targetRegion and TableGetn(fieldTokens) > 0 then
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'regional_field', regionKey = targetRegion.key,
+            actorTokens = fieldTokens, position = CopyPosition(targetRegion.position),
+            priority = 6,
+        })
+    end
+end
+
+ESCALATION.DirectorScoutInput = function(controller, observation, macroPlan)
+    local objectives = {}
+    for _, site in ipairs((observation.sites or {}).mass or {}) do
+        TableInsert(objectives, {
+            key = site.key, position = CopyPosition(site.position), public = true,
+        })
+    end
+    for _, marker in ipairs((controller.markers or {}).spawn or {}) do
+        TableInsert(objectives, {
+            key = 'spawn:' .. tostring(marker.name),
+            position = CopyPosition(marker.position), public = true,
+        })
+    end
+    for _, region in ipairs(macroPlan.regions or {}) do
+        TableInsert(objectives, {
+            key = region.key, position = CopyPosition(region.position), public = true,
+        })
+    end
+    local covered = ESCALATION.DeepCopy(
+        (controller.directorState or {}).lastCoveredTicks or {}
+    )
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'air_scout' and unit.complete == true then
+            for _, objective in ipairs(objectives) do
+                if Distance(unit.position, objective.position)
+                    <= math.max(10, tonumber(unit.visionRadius) or 0)
+                then
+                    covered[objective.key] = observation.tick
+                end
+            end
+        end
+    end
+    controller.directorState.lastCoveredTicks = ESCALATION.DeepCopy(covered)
+    return {
+        tick = observation.tick,
+        objectives = objectives,
+        lastCoveredTicks = covered,
+    }
+end
+
+ESCALATION.DirectorAirInput = function(
+    controller, observation, macroPlan, intelState, bomberTarget
+)
+    local completed = { air_scout = 0, interceptor = 0, bomber = 0, transport = 0 }
+    local factories = {}
+    for _, unit in ipairs(observation.units or {}) do
+        if completed[unit.role] ~= nil and unit.complete == true then
+            completed[unit.role] = completed[unit.role] + 1
+        elseif unit.role == 'air_factory' and unit.complete == true then
+            TableInsert(factories, {
+                token = unit.token, idle = unit.idle == true
+                    and controller.pending[unit.token] == nil, tier = 1,
+            })
+        end
+    end
+    local funded = ((macroPlan.lanes or {}).air_production or {}).admitted == true
+    return {
+        fundedSlots = funded and math.max(1, TableGetn(factories)) or 0,
+        completed = completed,
+        pending = PendingArray(controller),
+        needs = {
+            scoutCoverageStale = true,
+            airThreat = (tonumber((intelState.threat or {}).air) or 0) > 0,
+            visibleRaidTarget = bomberTarget ~= nil,
+            remoteSafeExpansion = TableGetn(macroPlan.regions or {}) > 1,
+        },
+        factories = factories,
+    }
+end
+
+ESCALATION.AdaptBomberIntent = function(
+    controller, observation, bomberTarget, intents, reserved
+)
+    if type(bomberTarget) ~= 'table'
+        or type(bomberTarget.targetToken) ~= 'string'
+        or type(bomberTarget.targetRole) ~= 'string'
+        or not CopyPosition(bomberTarget.position)
+    then
+        return
+    end
+    local bomber = ESCALATION.AvailableDirectorActor(
+        controller, observation, 'bomber', nil, reserved
+    )
+    if not bomber or controller.bomberMissions[bomber.token] then return end
+    reserved[bomber.token] = true
+    ESCALATION.AppendDirectorIntent(intents, {
+        kind = 'bomber_raid', actorToken = bomber.token,
+        targetToken = bomberTarget.targetToken,
+        targetRole = bomberTarget.targetRole,
+        position = CopyPosition(bomberTarget.position),
+        reason = 'current_visual_raid', priority = 3,
+    })
+end
+
+ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
+    local engineer = nil
+    local transport = nil
+    for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+        if not engineer and unit.role == 'engineer' and unit.available == true then engineer = unit end
+        if not transport and unit.role == 'transport' and unit.available == true then transport = unit end
+    end
+    local site = nil
+    local completedTransportSites = {}
+    for _, history in pairs(controller.transportHistory or {}) do
+        if history.state == 'completed' and history.siteKey then
+            completedTransportSites[history.siteKey] = true
+        end
+    end
+    for _, candidate in ipairs((observation.sites or {}).mass or {}) do
+        if candidate.complete ~= true and candidate.buildable ~= false
+            and candidate.reserved ~= true
+            and not completedTransportSites[candidate.key]
+            and Distance(candidate.position, controller.basePosition) > 120
+        then
+            local safe = true
+            for _, contact in pairs((controller.intelState or {}).contacts or {}) do
+                if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) < 300
+                    and Distance(contact.position, candidate.position) <= 80
+                then
+                    safe = false
+                end
+            end
+            site = {
+                key = candidate.key,
+                position = CopyPosition(candidate.position),
+                landEtaTicks = math.ceil(Distance(candidate.position, controller.basePosition) * 10),
+                safe = safe,
+                profitMass = 2,
+                reachable = candidate.reachable == true or candidate.engineerReachable == true,
+            }
+            break
+        end
+    end
+    return {
+        tick = observation.tick,
+        engineer = engineer,
+        transport = transport,
+        site = site,
+        transportMissions = ESCALATION.DeepCopy(controller.transportMissions),
+        regions = ESCALATION.DeepCopy(macroPlan.regions or {}),
+    }
+end
+
+ESCALATION.DirectorForceInput = function(controller, observation, macroPlan, intelState, previousAssignments)
+    local units = {}
+    for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+        if COMBAT_ROLES[unit.role] then TableInsert(units, unit) end
+    end
+    return {
+        tick = observation.tick,
+        epoch = (tonumber((controller.forcePlan or {}).epoch) or 0),
+        units = units,
+        home = {
+            position = CopyPosition(controller.basePosition),
+            breached = (tonumber((intelState.threat or {}).home) or 0) > 0,
+            requiredDefenders = math.max(4,
+                tonumber((intelState.threat or {}).home) or 0),
+        },
+        regions = ESCALATION.DeepCopy(macroPlan.regions or {}),
+        campaign = {
+            state = controller.fieldCampaign and controller.fieldCampaign.state or 'idle',
+            maxOwnedRatio = 0.60,
+        },
+        previousAssignments = ESCALATION.DeepCopy(previousAssignments),
+        macroPlan = ESCALATION.DeepCopy(macroPlan),
+        intelState = ESCALATION.DeepCopy(intelState),
+    }
+end
+
+ESCALATION.DirectorJobInput = function(controller, observation, expansionPlan)
+    local newJobs = {}
+    for _, job in ipairs((expansionPlan or {}).jobs or {}) do
+        local existing = type(job.id) == 'string'
+            and (controller.jobLedger.jobs or {})[job.id]
+            or nil
+        if type(job.id) == 'string'
+            and (not existing or existing.phase == 'retryable'
+                or existing.phase == 'cancelled')
+        then
+            TableInsert(newJobs, ESCALATION.DeepCopy(job))
+        end
+    end
+    local targets = {}
+    for _, site in ipairs((observation.sites or {}).mass or {}) do
+        TableInsert(targets, {
+            key = site.key, position = CopyPosition(site.position),
+            live = true, completed = site.complete == true,
+            fractionComplete = tonumber(site.fractionComplete) or 0,
+        })
+    end
+    return {
+        tick = observation.tick,
+        newJobs = newJobs,
+        actors = ESCALATION.DirectorUnits(controller, observation),
+        targets = targets,
+    }
+end
+
+ESCALATION.UpdateDirectors = function(controller, observation)
+    local intelThreat = { air = 0, home = 0 }
+    for _, contact in ipairs(observation.enemyObservations or {}) do
+        if contact.role == 'bomber' or contact.role == 'interceptor' then
+            intelThreat.air = intelThreat.air + 1
+        end
+        if Distance(contact.position, controller.basePosition) <= DEFENSE_RADIUS then
+            intelThreat.home = intelThreat.home + 1
+        end
+    end
+    local intelState = ESCALATION.directors.intelligence.UpdateMemory(
+        ESCALATION.DeepCopy(controller.intelState),
+        {
+            tick = observation.tick,
+            observations = ESCALATION.DeepCopy(observation.enemyObservations or {}),
+            threat = intelThreat,
+            expansionSafety = {},
+        }
+    ) or { contacts = {}, threat = {}, expansionSafety = {} }
+    intelState = ESCALATION.DeepCopy(intelState)
+    local regions = ESCALATION.DirectorRegions(controller, observation, intelState)
+    local macroInput = ESCALATION.DirectorMacroInput(
+        controller, observation, intelState, regions
+    )
+    local macroPlan = ESCALATION.directors.macro.BuildPortfolio(
+        ESCALATION.DeepCopy(macroInput)
+    ) or {}
+    macroPlan = ESCALATION.DeepCopy(macroPlan)
+    if TableGetn(macroPlan.regions or {}) == 0 then
+        macroPlan.regions = ESCALATION.DeepCopy(regions)
+    end
+    macroPlan.intents = macroPlan.intents or {}
+
+    local expansionPlan = ESCALATION.directors.macro.PlanExpansion(
+        ESCALATION.DirectorExpansionInput(controller, observation, macroPlan)
+    ) or { jobs = {}, denials = {} }
+    expansionPlan = ESCALATION.DeepCopy(expansionPlan)
+    for _, job in ipairs(expansionPlan.jobs or {}) do
+        for index, region in ipairs(macroPlan.regions or {}) do
+            if region.key == job.regionKey and region.state == 'lost' then
+                region = ESCALATION.directors.macro.AdvanceRegion(region, {
+                    event = 'retake_funded', tick = observation.tick,
+                })
+                macroPlan.regions[index] = ESCALATION.DeepCopy(region)
+                controller.directorState.regions[region.key] = ESCALATION.DeepCopy(region)
+            end
+        end
+    end
+    local packagePlans = {}
+    for _, region in ipairs(macroPlan.regions or {}) do
+        if region.state == 'establishing' or region.state == 'secured'
+            or region.state == 'contested' or region.state == 'retake'
+        then
+            local completedRoles = {}
+            local pendingRoles = {}
+            for _, unit in ipairs(observation.units or {}) do
+                if unit.complete == true and Distance(unit.position, region.position) <= 32 then
+                    TableInsert(completedRoles, unit.role)
+                end
+            end
+            for _, operation in pairs(controller.pending or {}) do
+                if operation.regionKey == region.key and operation.buildRole then
+                    TableInsert(pendingRoles, operation.buildRole)
+                end
+            end
+            local package = ESCALATION.directors.macro.PlanRegionPackage(
+                ESCALATION.DeepCopy(region),
+                {
+                    tick = observation.tick,
+                    completedRoles = completedRoles,
+                    pendingRoles = pendingRoles,
+                    enemyAirPressure = (tonumber((intelState.threat or {}).air) or 0) > 0,
+                }
+            ) or {}
+            TableInsert(packagePlans, {
+                region = ESCALATION.DeepCopy(region),
+                plan = ESCALATION.DeepCopy(package),
+            })
+        end
+    end
+    local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
+        ESCALATION.DirectorReclaimInput(controller, observation, macroPlan)
+    ) or { jobs = {} }
+    reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
+    local techPlan = ESCALATION.directors.macro.PlanTech(
+        ESCALATION.DirectorTechInput(controller, observation, macroPlan)
+    ) or {}
+    techPlan = ESCALATION.DeepCopy(techPlan)
+
+    local coverage = {}
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'radar' then
+            local best = nil
+            local bestDistance = nil
+            for _, region in ipairs(macroPlan.regions or {}) do
+                local distance = DistanceSquared(unit.position, region.position)
+                if bestDistance == nil or distance < bestDistance then
+                    best = region
+                    bestDistance = distance
+                end
+            end
+            if best then
+                TableInsert(coverage, {
+                    regionKey = best.key, role = 'radar', live = unit.complete == true,
+                })
+            end
+        end
+    end
+    local radarIntents = ESCALATION.directors.intelligence.PlanRadar(
+        ESCALATION.DeepCopy(macroPlan.regions or {}),
+        ESCALATION.DeepCopy(coverage)
+    ) or {}
+    radarIntents = ESCALATION.DeepCopy(radarIntents)
+    local scoutPlan = ESCALATION.directors.intelligence.PlanScoutRoute(
+        ESCALATION.DirectorScoutInput(controller, observation, macroPlan)
+    ) or {}
+    scoutPlan = ESCALATION.DeepCopy(scoutPlan)
+    local bomberTarget = ESCALATION.directors.intelligence.SelectBomberTarget(
+        ESCALATION.DeepCopy(observation.enemyObservations or {})
+    )
+    bomberTarget = ESCALATION.DeepCopy(bomberTarget)
+    local airPlan = ESCALATION.directors.intelligence.PlanAir(
+        ESCALATION.DirectorAirInput(
+            controller, observation, macroPlan, intelState, bomberTarget
+        )
+    ) or { orders = {} }
+    airPlan = ESCALATION.DeepCopy(airPlan)
+    local transportInput = ESCALATION.DirectorTransportInput(
+        controller, observation, macroPlan
+    )
+    local transportPlan = ESCALATION.directors.intelligence.PlanTransport(
+        ESCALATION.DeepCopy(transportInput)
+    ) or { mode = 'hold' }
+    transportPlan = ESCALATION.DeepCopy(transportPlan)
+    if transportInput.site and transportPlan.siteKey == transportInput.site.key then
+        transportPlan.requireLiveDropValidation = true
+    end
+
+    local previousAssignments = nil
+    if controller.forcePlan and (tonumber(controller.forcePlan.epoch) or 0) > 0 then
+        local reconciled = ESCALATION.directors.force.Reconcile(
+            ESCALATION.DeepCopy(controller.forcePlan),
+            {
+                tick = observation.tick,
+                units = ESCALATION.DirectorUnits(controller, observation),
+            }
+        )
+        previousAssignments = reconciled and reconciled.assignments or nil
+    end
+    local forceInput = ESCALATION.DirectorForceInput(
+        controller, observation, macroPlan, intelState, previousAssignments
+    )
+    local forcePlan = ESCALATION.directors.force.Assign(
+        ESCALATION.DeepCopy(forceInput)
+    ) or {}
+    forcePlan = ESCALATION.DeepCopy(forcePlan)
+    forcePlan.regions = ESCALATION.DeepCopy(macroPlan.regions or {})
+    forcePlan = ESCALATION.directors.force.HandleHomeBreach(
+        ESCALATION.DeepCopy(forceInput),
+        ESCALATION.DeepCopy(forcePlan)
+    ) or forcePlan
+    forcePlan = ESCALATION.DeepCopy(forcePlan)
+    forcePlan.regions = ESCALATION.DeepCopy(macroPlan.regions or {})
+
+    expansionPlan = ESCALATION.BindExpansionEscorts(
+        controller, observation, expansionPlan, forcePlan
+    )
+
+    local jobInput = ESCALATION.DirectorJobInput(controller, observation, expansionPlan)
+    local jobLedger = ESCALATION.directors.macro.UpdateJobLedger(
+        ESCALATION.SyncJobLedger(controller),
+        ESCALATION.DeepCopy(jobInput)
+    ) or { jobs = {} }
+    jobLedger = ESCALATION.DeepCopy(jobLedger)
+    local ledgerExpansionPlan = ESCALATION.BindExpansionEscorts(
+        controller, observation,
+        ESCALATION.LedgerExpansionPlan(jobLedger), forcePlan
+    )
+
+    -- Planning observes the prior mission phase.  Lifecycle reconciliation
+    -- then advances attachment state before the next low-level command is
+    -- adapted, keeping each command at-most-once.
+    ESCALATION.ReconcileDirectorMissions(controller, observation)
+
+    local intents = {}
+    local reserved = {}
+    for _, intent in ipairs(macroPlan.intents or {}) do
+        ESCALATION.AppendDirectorIntent(intents, intent)
+    end
+    ESCALATION.AdaptExpansionIntents(
+        controller, ledgerExpansionPlan, forcePlan, intents, reserved
+    )
+    for _, entry in ipairs(packagePlans) do
+        ESCALATION.AdaptPackageIntents(
+            controller, observation, entry.region, entry.plan, intents, reserved
+        )
+    end
+    ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
+    ESCALATION.AdaptTechIntents(controller, observation, techPlan, intents, reserved)
+    ESCALATION.AdaptScoutIntent(controller, observation, scoutPlan, intents, reserved)
+    ESCALATION.AdaptRadarIntents(controller, observation, radarIntents, intents, reserved)
+    ESCALATION.AdaptAirIntents(controller, observation, airPlan, intents, reserved)
+    ESCALATION.AdaptBomberIntent(
+        controller, observation, bomberTarget, intents, reserved
+    )
+    ESCALATION.AdaptGrowthIntents(
+        controller, observation, macroPlan, techPlan, intents, reserved
+    )
+    ESCALATION.AdaptTransportIntent(controller, transportPlan, intents)
+    ESCALATION.AdaptForceIntents(controller, forcePlan, intents, reserved)
+
+    controller.intelState = intelState
+    controller.macroPlan = macroPlan
+    controller.jobLedger = jobLedger
+    controller.forcePlan = forcePlan
+    controller.factoryTarget = tonumber(macroPlan.factoryTarget) or controller.factoryTarget
+    controller.directorState.epoch = (tonumber(controller.directorState.epoch) or 0) + 1
+    observation.intelState = ESCALATION.DeepCopy(intelState)
+    observation.macroPlan = ESCALATION.DeepCopy(macroPlan)
+    observation.jobLedger = ESCALATION.DeepCopy(jobLedger)
+    observation.forcePlan = ESCALATION.DeepCopy(forcePlan)
+    observation.directorIntents = ESCALATION.DeepCopy(intents)
+    observation.expansionPlan = expansionPlan
+    observation.reclaimPlan = reclaimPlan
+    observation.techPlan = techPlan
+    observation.scoutPlan = scoutPlan
+    observation.airPlan = airPlan
+    observation.transportPlan = transportPlan
+    return intents
+end
+
+ESCALATION.ExecuteStructureUpgrade = function(controller, intent, record)
+    local expectedSource = intent.upgradeRole == 'mass_extractor_t2'
+        and 'mass_extractor' or 'mass_extractor_t2'
+    if controller.pending[intent.actorToken]
+        or record.role ~= expectedSource
+        or (intent.upgradeRole ~= 'mass_extractor_t2'
+            and intent.upgradeRole ~= 'mass_extractor_t3')
+        or record.complete ~= true or record.idle ~= true
+    then
+        return false
+    end
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, expectedSource)
+    local blueprintId = Catalog.IdFor(intent.upgradeRole)
+    if not actor or not blueprintId
+        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or SafeCall(false, actor.IsUnitState, actor, 'Upgrading') == true
+        or not CanUnitBuild(actor, blueprintId)
+    then
+        return false
+    end
+    intent.buildRole = intent.upgradeRole
+    intent.position = CopyPosition(record.position)
+    RecordPending(controller, intent, record)
+    local ok = pcall(function() IssueUpgrade({ actor }, blueprintId) end)
+    if not ok then
+        ReleaseOperation(controller, intent.actorToken, 'command_error')
+        return false
+    end
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'structure_upgrade',
+        role = intent.upgradeRole,
+    })
+    return true
+end
+
+ESCALATION.PublicScoutObjective = function(controller, observation, key, position)
+    local public = false
+    for _, site in ipairs((observation.sites or {}).mass or {}) do
+        if site.key == key and DistanceSquared(site.position, position) <= 0.01
+        then
+            public = true
+        end
+    end
+    for _, marker in ipairs((controller.markers or {}).spawn or {}) do
+        if ('spawn:' .. tostring(marker.name)) == key
+            and DistanceSquared(marker.position, position) <= 0.01
+        then
+            public = true
+        end
+    end
+    for _, region in ipairs((controller.macroPlan or {}).regions or {}) do
+        if region.key == key and DistanceSquared(region.position, position) <= 0.01
+        then
+            public = true
+        end
+    end
+    return public
+end
+
+ESCALATION.ExecuteScoutRoute = function(controller, intent, records, usedActors, observation)
+    local record = records[intent.actorToken]
+    if usedActors[intent.actorToken] or controller.airScoutAssignments[intent.actorToken]
+        or not record or record.role ~= 'air_scout' or record.complete ~= true
+        or record.idle ~= true or not CopyPosition(intent.position)
+        or not ESCALATION.PublicScoutObjective(
+            controller, observation, intent.siteKey, intent.position)
+    then
+        return false
+    end
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'air_scout')
+    if not actor then return false end
+    local keys = intent.objectiveKeys or { intent.siteKey }
+    local waypoints = intent.waypoints or { intent.position }
+    if TableGetn(keys) ~= TableGetn(waypoints) or TableGetn(keys) == 0 then return false end
+    local startIndex = 1
+    for index, key in ipairs(keys) do
+        if key == intent.siteKey then startIndex = index end
+        if not ESCALATION.PublicScoutObjective(
+            controller, observation, key, waypoints[index])
+        then
+            return false
+        end
+    end
+    if not pcall(function() IssueClearCommands({ actor }) end) then return false end
+    for offset = 0, TableGetn(keys) - 1 do
+        local index = startIndex + offset
+        while index > TableGetn(keys) do index = index - TableGetn(keys) end
+        local position = TerrainPosition(waypoints[index])
+        if not position or not pcall(function() IssuePatrol({ actor }, position) end) then
+            pcall(function() IssueClearCommands({ actor }) end)
+            return false
+        end
+    end
+    controller.airScoutAssignments[intent.actorToken] = true
+    controller.airScoutCount = CountArray(controller.airScoutAssignments)
+    usedActors[intent.actorToken] = true
+    return true
+end
+
+ESCALATION.ExecuteBomberRaid = function(controller, intent, records, usedActors, observation)
+    local record = records[intent.actorToken]
+    if usedActors[intent.actorToken] or controller.bomberMissions[intent.actorToken]
+        or not record or record.role ~= 'bomber' or record.complete ~= true
+    then
+        return false
+    end
+    local contact = nil
+    for _, candidate in ipairs(observation.enemyObservations or {}) do
+        if candidate.token == intent.targetToken then contact = candidate break end
+    end
+    if not contact or contact.currentlyVisual ~= true or contact.live ~= true
+        or contact.role ~= intent.targetRole
+    then
+        return false
+    end
+    local target = controller.enemyRefs[intent.targetToken]
+    local blip = target and SafeCall(nil, target.GetBlip, target, controller.brain.Army) or nil
+    local currentlyVisual = blip
+        and SafeCall(false, blip.IsSeenNow, blip, controller.brain.Army) == true
+    local targetPosition = currentlyVisual
+        and CopyPosition(SafeCall(nil, target.GetPosition, target))
+        or nil
+    local targetBlueprint = currentlyVisual and SafeCall(nil, target.GetBlueprint, target) or nil
+    if not targetPosition or not targetBlueprint
+        or Catalog.RoleFor(targetBlueprint.BlueprintId) ~= intent.targetRole
+    then
+        return false
+    end
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'bomber')
+    if not actor then return false end
+    if not pcall(function() IssueAggressiveMove({ actor }, targetPosition) end) then
+        return false
+    end
+    controller.bomberMissions[intent.actorToken] = {
+        bomberToken = intent.actorToken,
+        targetToken = intent.targetToken,
+        targetRole = intent.targetRole,
+        issuedTick = CurrentTick(controller),
+    }
+    usedActors[intent.actorToken] = true
+    return true
+end
+
+ESCALATION.ExecuteTransportLoad = function(controller, intent, records, usedActors)
+    if type(intent.missionId) ~= 'string' or controller.transportMissions[intent.missionId]
+        or type(intent.transportToken) ~= 'string'
+        or TableGetn(intent.cargoTokens or {}) == 0
+        or usedActors[intent.transportToken]
+    then
+        return false
+    end
+    local transportRecord = records[intent.transportToken]
+    local transport = transportRecord
+        and LiveOwnedActor(controller, intent.transportToken, transportRecord, 'transport')
+        or nil
+    if not transport or transportRecord.idle ~= true then return false end
+    local cargo = {}
+    local seen = {}
+    for _, token in ipairs(intent.cargoTokens or {}) do
+        local record = records[token]
+        if type(token) ~= 'string' or seen[token] or usedActors[token]
+            or not record or record.role ~= 'engineer' or record.complete ~= true
+            or record.attached == true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, 'engineer')
+        if not actor then return false end
+        seen[token] = true
+        TableInsert(cargo, actor)
+    end
+    local mission = ESCALATION.DeepCopy(intent)
+    mission.kind = nil
+    mission.priority = nil
+    mission.state = 'planned'
+    mission.retryCount = tonumber(mission.retryCount) or 0
+    if type(intent.siteKey) == 'string' and controller.reservations[intent.siteKey] then
+        return false
+    end
+    local ok = pcall(function() IssueTransportLoad(cargo, transport) end)
+    if not ok then return false end
+    mission = ESCALATION.directors.intelligence.AdvanceTransport(
+        mission, { kind = 'load_ordered', tick = CurrentTick(controller) }
+    ) or mission
+    controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
+    if type(intent.siteKey) == 'string' then
+        controller.reservations[intent.siteKey] = {
+            actorToken = intent.cargoTokens[1],
+            missionId = intent.missionId,
+            issuedTick = CurrentTick(controller),
+        }
+    end
+    usedActors[intent.transportToken] = true
+    for _, token in ipairs(intent.cargoTokens or {}) do usedActors[token] = true end
+    return true
+end
+
+ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedActors, observation)
+    local mission = type(intent.missionId) == 'string'
+        and controller.transportMissions[intent.missionId]
+        or nil
+    if not mission or mission.transportToken ~= intent.transportToken
+        or usedActors[intent.transportToken]
+    then
+        return false
+    end
+    if mission.state == 'loading' then
+        mission = ESCALATION.directors.intelligence.AdvanceTransport(
+            ESCALATION.DeepCopy(mission),
+            ESCALATION.TransportEvent(controller, mission, observation)
+        ) or mission
+        controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
+    end
+    if mission.state ~= 'loaded' then return false end
+    if not SameArray(mission.cargoTokens or {}, intent.cargoTokens or {})
+        or DistanceSquared(mission.dropPosition, intent.dropPosition) > 0.01
+    then
+        return false
+    end
+    local transportRecord = records[intent.transportToken]
+    local transport = transportRecord
+        and LiveOwnedActor(controller, intent.transportToken, transportRecord, 'transport')
+        or nil
+    local position = CopyPosition(intent.dropPosition)
+    local site = nil
+    for _, candidate in ipairs((observation.sites or {}).mass or {}) do
+        if candidate.key == mission.siteKey then site = candidate end
+    end
+    local safe = mission.requireLiveDropValidation ~= true
+    if mission.requireLiveDropValidation == true then
+        safe = site ~= nil and site.complete ~= true and site.buildable ~= false
+            and (site.reachable == true or site.engineerReachable == true)
+            and DistanceSquared(site.position, position) <= 0.01
+        for _, contact in pairs((controller.intelState or {}).contacts or {}) do
+            if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) < 300
+                and Distance(contact.position, position) <= 80
+            then
+                safe = false
+            end
+        end
+    end
+    if not transport or not position or not safe then return false end
+    local ok = pcall(function() IssueTransportUnload({ transport }, position) end)
+    if not ok then return false end
+    mission = ESCALATION.directors.intelligence.AdvanceTransport(
+        ESCALATION.DeepCopy(mission),
+        { kind = 'unload_ordered', tick = CurrentTick(controller) }
+    ) or mission
+    controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
+    usedActors[intent.transportToken] = true
+    return true
+end
+
+ESCALATION.ExecuteForceMove = function(
+    controller, intent, records, usedActors, bucket, aggressive
+)
+    if type(intent.actorTokens) ~= 'table' or not CopyPosition(intent.position) then return false end
+    local signature = Signature(intent)
+    if OrderCoolingDown(controller, signature) then return false end
+    local actors = {}
+    local tokens = {}
+    local seen = {}
+    local ownership = (controller.forcePlan or {}).ownershipByToken or {}
+    for _, token in ipairs(intent.actorTokens) do
+        local record = records[token]
+        if type(token) ~= 'string' or seen[token] or usedActors[token]
+            or not record or COMBAT_ROLES[record.role] ~= true or record.complete ~= true
+            or (CountArray(ownership) > 0 and ownership[token] ~= bucket)
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, record.role)
+        if not actor then return false end
+        seen[token] = true
+        TableInsert(tokens, token)
+        TableInsert(actors, actor)
+    end
+    if TableGetn(actors) == 0 then return false end
+    if bucket == 'response'
+        and not pcall(function() IssueClearCommands(actors) end)
+    then
+        return false
+    end
+    local ok = aggressive == true
+        and pcall(function() IssueAggressiveMove(actors, CopyPosition(intent.position)) end)
+        or pcall(function() IssueMove(actors, CopyPosition(intent.position)) end)
+    if not ok then
+        return false
+    end
+    RememberOrder(controller, signature)
+    for _, token in ipairs(tokens) do usedActors[token] = true end
+    return true
+end
+
+ESCALATION.ExecuteEscortedExpansion = function(
+    controller, intent, records, usedActors
+)
+    local engineerRecord = records[intent.actorToken]
+    local engineer = engineerRecord
+        and LiveOwnedActor(controller, intent.actorToken, engineerRecord, 'engineer')
+        or nil
+    local region = ((controller.forcePlan or {}).regionAssignments or {})[intent.forceRegion]
+    if not engineer or not region or region.ready ~= true
+        or usedActors[intent.actorToken] or controller.pending[intent.actorToken]
+        or TableGetn(intent.escortTokens or {}) < 2
+    then
+        return false
+    end
+    local allowed = {}
+    for _, token in ipairs(region.actorTokens or {}) do allowed[token] = true end
+    local escorts = {}
+    local aa = 0
+    local land = 0
+    for _, token in ipairs(intent.escortTokens or {}) do
+        local record = records[token]
+        if not allowed[token] or usedActors[token] or not record
+            or COMBAT_ROLES[record.role] ~= true or record.complete ~= true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, record.role)
+        if not actor then return false end
+        if ESCALATION.antiAirRoles[record.role] then aa = aa + 1 else land = land + 1 end
+        TableInsert(escorts, actor)
+    end
+    if aa < 1 or land < 1 then return false end
+    if not pcall(function() IssueGuard(escorts, engineer) end) then return false end
+    ESCALATION.EmitOperationPhase(controller, intent.operationId, 'ordered')
+    local buildIntent = ESCALATION.DeepCopy(intent)
+    buildIntent.kind = 'build_structure'
+    if not ExecuteStructure(controller, buildIntent, engineerRecord) then
+        pcall(function() IssueClearCommands(escorts) end)
+        return false
+    end
+    local ledgerJob = (controller.jobLedger.jobs or {})[intent.operationId]
+    if ledgerJob then
+        ledgerJob.ordered = true
+        ledgerJob.phase = 'travelling'
+    end
+    ESCALATION.EmitOperationPhase(controller, intent.operationId, 'travelling')
+    usedActors[intent.actorToken] = true
+    for _, token in ipairs(intent.escortTokens or {}) do usedActors[token] = true end
+    return true
 end
 
 Controller.Execute = function(controller, intents, observation)
@@ -7944,7 +9947,39 @@ Controller.Execute = function(controller, intents, observation)
     local usedActors = {}
 
     for _, intent in ipairs(ordered) do
-        if intent.kind == 'field_campaign'
+        if intent.kind == 'escorted_expansion' then
+            ESCALATION.ExecuteEscortedExpansion(
+                controller, intent, records, usedActors
+            )
+        elseif intent.kind == 'transport_load' then
+            ESCALATION.ExecuteTransportLoad(
+                controller, intent, records, usedActors
+            )
+        elseif intent.kind == 'transport_unload' then
+            ESCALATION.ExecuteTransportUnload(
+                controller, intent, records, usedActors, observation
+            )
+        elseif intent.kind == 'region_garrison' then
+            ESCALATION.ExecuteForceMove(
+                controller, intent, records, usedActors, 'garrison'
+            )
+        elseif intent.kind == 'home_response' then
+            ESCALATION.ExecuteForceMove(
+                controller, intent, records, usedActors, 'response'
+            )
+        elseif intent.kind == 'regional_field' then
+            ESCALATION.ExecuteForceMove(
+                controller, intent, records, usedActors, 'field', true
+            )
+        elseif intent.kind == 'bomber_raid' then
+            ESCALATION.ExecuteBomberRaid(
+                controller, intent, records, usedActors, observation
+            )
+        elseif intent.kind == 'scout_route' then
+            ESCALATION.ExecuteScoutRoute(
+                controller, intent, records, usedActors, observation
+            )
+        elseif intent.kind == 'field_campaign'
             and controller.fieldCampaignEnabled == true
         then
             ExecuteFieldCampaign(
@@ -8027,6 +10062,10 @@ Controller.Execute = function(controller, intents, observation)
                     issued = ExecuteFactoryProduction(controller, intent, record)
                 elseif intent.kind == 'factory_upgrade' then
                     issued = ESCALATION.ExecuteUpgrade(controller, intent, record)
+                elseif intent.kind == 'structure_upgrade' then
+                    issued = ESCALATION.ExecuteStructureUpgrade(
+                        controller, intent, record
+                    )
                 elseif intent.kind == 'rally' then
                     issued = ExecuteRally(controller, intent, record)
                 elseif intent.kind == 'reclaim' then
@@ -8037,6 +10076,13 @@ Controller.Execute = function(controller, intents, observation)
                 if issued
                     or intent.kind == 'retreat'
                 then
+                    local ledgerJob = intent.operationId
+                        and (controller.jobLedger.jobs or {})[intent.operationId]
+                        or nil
+                    if issued and ledgerJob then
+                        ledgerJob.ordered = true
+                        ledgerJob.phase = 'travelling'
+                    end
                     usedActors[intent.actorToken] = true
                 end
             end
@@ -8044,11 +10090,93 @@ Controller.Execute = function(controller, intents, observation)
     end
 end
 
+ESCALATION.IntentPortfolioLane = function(intent)
+    local role = intent.buildRole or intent.upgradeRole
+    if intent.kind == 'reclaim' then return 'reclaim' end
+    if intent.kind == 'factory_upgrade' or intent.kind == 'structure_upgrade' then
+        return 'tech'
+    end
+    if intent.kind == 'build_structure' or intent.kind == 'assist_structure' then
+        if role == 'power_generator' or role == 'hydrocarbon' then
+            return 'energy_recovery'
+        end
+        if role == 'mass_extractor' or role == 'radar'
+            or role == 'point_defense' or role == 'static_anti_air'
+        then
+            return 'mex_rebuild'
+        end
+        if role == 'land_factory' or role == 'air_factory' then
+            return 'factory_growth'
+        end
+    elseif intent.kind == 'factory_build' then
+        if role == 'engineer' then return 'engineers' end
+        if role == 'air_scout' or role == 'interceptor'
+            or role == 'bomber' or role == 'transport'
+        then
+            return 'air_production'
+        end
+        if COMBAT_ROLES[role] or role == 'scout' then return 'land_production' end
+    end
+    return nil
+end
+
 Controller.Step = function(controller)
     if controller.stopped or controller.unsupported then return end
     local observation = Controller.Observe(controller)
+    controller.directorStepActive = true
     Controller.Reconcile(controller, observation)
-    local intents = Policy.Decide(observation)
+    controller.directorStepActive = false
+    local directorIntents = ESCALATION.UpdateDirectors(controller, observation)
+    local policyIntents = Policy.Decide(observation) or {}
+    local intents = {}
+    local directorClaims = {}
+    for _, job in pairs((controller.jobLedger or {}).jobs or {}) do
+        if type(job.actorToken) == 'string'
+            and job.phase ~= 'completed' and job.phase ~= 'retryable'
+            and job.phase ~= 'cancelled'
+        then
+            directorClaims[job.actorToken] = true
+        end
+    end
+    for _, intent in ipairs(directorIntents or {}) do
+        if type(intent.actorToken) == 'string' then
+            directorClaims[intent.actorToken] = true
+        end
+        for _, token in ipairs(intent.actorTokens or intent.escortTokens or intent.cargoTokens or {}) do
+            directorClaims[token] = true
+        end
+    end
+    for _, intent in ipairs(policyIntents) do
+        local claimed = type(intent.actorToken) == 'string'
+            and directorClaims[intent.actorToken] == true
+        for _, token in ipairs(intent.actorTokens or {}) do
+            if directorClaims[token] then claimed = true end
+        end
+        for _, token in ipairs(intent.escortTokens or {}) do
+            if directorClaims[token] then claimed = true end
+        end
+        for _, token in ipairs(intent.cargoTokens or {}) do
+            if directorClaims[token] then claimed = true end
+        end
+        local forceOwned = CountArray((controller.forcePlan or {}).ownershipByToken or {}) > 0
+        local legacyOffense = forceOwned and (intent.kind == 'field_campaign'
+            or intent.kind == 'frontier_screen'
+            or intent.kind == 'commander_push'
+            or intent.kind == 'mobilize_commander'
+            or intent.kind == 'reinforce_commander'
+            or intent.kind == 'attack_wave')
+        local laneId = ESCALATION.IntentPortfolioLane(intent)
+        local lane = ((controller.macroPlan or {}).lanes or {})[laneId]
+        local fundingActive = (tonumber((controller.macroPlan or {}).epoch) or 0) > 0
+        local funded = not fundingActive or not laneId
+            or (lane and (lane.admitted == true or lane.preserved == true))
+        if not claimed and not legacyOffense and funded then
+            TableInsert(intents, intent)
+        end
+    end
+    for _, intent in ipairs(directorIntents or {}) do
+        TableInsert(intents, intent)
+    end
     Controller.Execute(controller, intents, observation)
 
     local phase = Phase(observation)
@@ -8114,7 +10242,7 @@ Controller.Step = function(controller)
         end
         for _, unit in ipairs(observation.units) do
             if unit.complete == true then
-                if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
+                if unit.roleFamily == 'mass_extractor' then completedMex = completedMex + 1 end
                 if unit.role == 'land_factory'
                     or unit.role == 'land_factory_t2'
                     or unit.role == 'air_factory'
@@ -8125,7 +10253,7 @@ Controller.Step = function(controller)
                 if unit.role == 'power_generator' then completedPgen = completedPgen + 1 end
                 if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
             else
-                if unit.role == 'mass_extractor' then buildingMex = buildingMex + 1 end
+                if unit.roleFamily == 'mass_extractor' then buildingMex = buildingMex + 1 end
                 if unit.role == 'land_factory'
                     or unit.role == 'land_factory_t2'
                     or unit.role == 'air_factory'

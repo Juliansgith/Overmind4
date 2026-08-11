@@ -181,6 +181,31 @@ def test_controller_assembles_director_snapshot_in_dependency_order_and_persists
     assert plain(harness.controller.forcePlan)["epoch"] == 1
 
 
+def test_observation_uses_bounded_remote_radar_and_scout_sensor_anchors() -> None:
+    harness = make_harness()
+    radar = harness.unit(
+        entityId=10,
+        blueprintId="ueb3101",
+        position=[300, 2, 300],
+        blueprintIntel={"RadarRadius": 90, "VisionRadius": 10},
+    )
+    scout = harness.unit(
+        entityId=11,
+        blueprintId="uea0101",
+        position=[500, 20, 500],
+        blueprintIntel={"VisionRadius": 45},
+    )
+    harness.brain.units = harness.lua.table_from([radar, scout])
+
+    harness.observe()
+
+    queries = [plain(harness.calls.enemy[index]) for index in range(1, len(harness.calls.enemy) + 1)]
+    assert ["MOBILE", [10, 10.2, 20], 65, "Enemy"] in queries
+    assert ["ALLUNITS", [300, 2, 300], 90, "Enemy"] in queries
+    assert ["ALLUNITS", [500, 20, 500], 45, "Enemy"] in queries
+    assert len(queries) <= 9
+
+
 def test_step_default_merge_adapts_every_planner_output_once_and_persists_lifecycle() -> None:
     harness = make_harness()
     harness.controller.crossMapOffenseEnabled = False
@@ -1010,6 +1035,7 @@ def test_region_package_and_mex_upgrade_intents_issue_exact_blueprints_and_persi
         entityId=20,
         blueprintId="ueb1103",
         position=[15, 2, 15],
+        canBuild={"ueb1202": True},
     )
     harness.brain.units = harness.lua.table_from([*engineers, mex])
     observation = harness.observe()
@@ -1189,6 +1215,96 @@ def test_bomber_transport_garrison_and_home_response_issue_exact_low_level_order
     completed = harness.observe()
     harness.lua.globals().Controller.Reconcile(harness.controller, completed)
     assert harness.controller.transportMissions["airlift:front"] is None
+
+
+def test_step_adapts_a_current_visual_bomber_target_into_one_live_raid() -> None:
+    harness = make_harness()
+    bomber = harness.unit(
+        entityId=30,
+        blueprintId="uea0103",
+        position=[10, 20, 20],
+    )
+    enemy_engineer = harness.unit(
+        entityId=90,
+        blueprintId="uel0105",
+        army=2,
+        position=[40, 2, 40],
+        seenNow=True,
+        onRadar=True,
+    )
+    harness.brain.units = harness.lua.table_from([bomber])
+    harness.brain.enemies = harness.lua.table_from([enemy_engineer])
+    harness.lua.execute(
+        "IntelligenceStub.SelectBomberTarget = function() "
+        "return { targetToken = '90:1', targetRole = 'engineer', "
+        "position = { 40, 2, 40 } } end"
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    harness.brain.tick = 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 1
+    assert plain(harness.controller.bomberMissions)["30:1"]["targetToken"] == "90:1"
+
+
+def test_structure_upgrade_supports_the_staggered_t2_to_t3_mex_step() -> None:
+    harness = make_harness()
+    mex = harness.unit(
+        entityId=20,
+        blueprintId="ueb1202",
+        position=[15, 2, 15],
+        canBuild={"ueb1302": True},
+    )
+    harness.brain.units = harness.lua.table_from([mex])
+    observation = harness.observe()
+
+    execute_intents(
+        harness,
+        [
+            {
+                "kind": "structure_upgrade",
+                "actorToken": "20:1",
+                "upgradeRole": "mass_extractor_t3",
+                "siteKey": "front-mex",
+                "reason": "stagger_mex_upgrade",
+            }
+        ],
+        observation,
+    )
+
+    assert len(harness.calls.upgrade) == 1
+    assert harness.calls.upgrade[1].blueprintId == "ueb1302"
+    assert plain(harness.controller.pending)["20:1"]["buildRole"] == "mass_extractor_t3"
+
+
+def test_factory_upgrade_supports_funded_t2_to_t3_hq_admission() -> None:
+    harness = make_harness()
+    factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0201",
+        position=[15, 2, 15],
+        canBuild={"ueb0301": True},
+    )
+    harness.brain.units = harness.lua.table_from([factory])
+    observation = harness.observe()
+
+    execute_intents(
+        harness,
+        [
+            {
+                "kind": "factory_upgrade",
+                "actorToken": "20:1",
+                "upgradeRole": "land_factory_t3",
+                "reason": "funded_t3_hq",
+            }
+        ],
+        observation,
+    )
+
+    assert len(harness.calls.upgrade) == 1
+    assert harness.calls.upgrade[1].blueprintId == "ueb0301"
+    assert plain(harness.controller.pending)["20:1"]["buildRole"] == "land_factory_t3"
 
 
 def test_cross_map_commander_push_and_attack_wave_remain_disabled_in_live_director_mode() -> None:

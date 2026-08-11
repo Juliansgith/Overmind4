@@ -44,6 +44,7 @@ class TestFairIntel:
             {"key": "home", "state": "secured", "position": [0, 0, 0]},
             {"key": "front", "state": "establishing", "position": [200, 0, 0]},
             {"key": "new", "state": "establishing", "position": [300, 0, 0]},
+            {"key": "planned", "state": "planned", "position": [350, 0, 0]},
             {"key": "lost", "state": "lost", "position": [400, 0, 0]},
         ]
         coverage = [
