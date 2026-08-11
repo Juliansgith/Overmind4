@@ -570,6 +570,41 @@ def test_nine_mex_income_sustains_four_land_factories_before_storage_overflows()
     assert all(reason == "continuous_land_production" for _, reason in orders)
 
 
+def test_first_hydro_is_not_starved_by_future_commitment_reservations() -> None:
+    snapshot = _policy_allocator_snapshot("engineer")
+    snapshot["sites"]["hydro"] = [
+        {
+            "key": "home-hydro",
+            "name": "home-hydro",
+            "position": [20, 2, 20],
+            "distance": 14,
+            "reachable": True,
+            "engineerReachable": True,
+            "occupied": False,
+            "reserved": False,
+            "buildable": True,
+        }
+    ]
+    snapshot["macro"].update(
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+        factoryFundedCount=0,
+    )
+
+    hydro = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("buildRole") == "hydrocarbon"
+    ]
+
+    assert len(hydro) == 1
+    assert hydro[0]["reason"] == "first_hydro"
+
+
 def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:
     snapshot = _policy_allocator_snapshot()
     snapshot["macro"].update(

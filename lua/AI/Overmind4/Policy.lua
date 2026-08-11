@@ -2669,6 +2669,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local requestDuration = request and request.duration or 0
             local structureRequest = intent.kind == 'build_structure'
                 or intent.kind == 'assist_structure'
+            local strategicHydro = structureRequest and role == 'hydrocarbon'
             local protectedCombat = intent == protectedCombatIntent
             local protectedAirScreen = intent.kind == 'factory_build'
                 and intent.reason == 'persistent_air_screen'
@@ -2768,7 +2769,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     energyFit = availableEnergy + fitTolerance >= requestEnergyDrain
                         and energyFit
                 end
-                allowed = overflowCombat or sustainedCombat
+                allowed = strategicHydro or overflowCombat or sustainedCombat
                     or (massFit and energyFit)
             end
             if allowed then
