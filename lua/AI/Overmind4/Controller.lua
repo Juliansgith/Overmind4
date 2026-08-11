@@ -11225,7 +11225,6 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     local mexBlueprint = Catalog.IdFor('mass_extractor')
     local buildPosition = site and TerrainPosition(site.position) or nil
     local buildQueued = cargoActor and mexBlueprint and buildPosition
-        and CanUnitBuild(cargoActor, mexBlueprint)
         and SafeCall(false, controller.brain.CanBuildStructureAt,
             controller.brain, mexBlueprint, buildPosition) == true
         and pcall(function()

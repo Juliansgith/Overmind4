@@ -2569,7 +2569,7 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
         blueprintId="uel0105",
         position=[10, 2, 22],
         attached=True,
-        canBuild={"ueb1103": True},
+        canBuild={},
     )
     transport = harness.unit(
         entityId=31,
