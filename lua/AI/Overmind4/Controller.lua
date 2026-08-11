@@ -8242,10 +8242,15 @@ Controller.Reconcile = function(controller, observation)
                 and record.idle == true
                 and (tonumber(operation.lastFraction) or 0) <= 0
             then
-                ESCALATION.TraceAirliftMexRejection(
-                    controller, operation, record, records
-                )
-                ReleaseOperation(controller, token, 'rejected')
+                if operation.reason ~= 'airlift_mex'
+                    or tick - (tonumber(operation.lastProgressTick)
+                        or operation.issuedTick) > 100
+                then
+                    ESCALATION.TraceAirliftMexRejection(
+                        controller, operation, record, records
+                    )
+                    ReleaseOperation(controller, token, 'rejected')
+                end
             elseif operation.kind == 'reclaim'
                 and operation.accepted == true
                 and record.idle == true

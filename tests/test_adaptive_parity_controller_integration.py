@@ -2757,6 +2757,17 @@ def test_airlift_delivery_builds_the_prevalidated_mex_despite_its_own_footprint(
     assert harness.controller.transportDeliveries["front"] is not None
     assert harness.controller.blockedSites["front"] is None
 
+    harness.controller.pending["32:1"].accepted = True
+    cargo.options.position = lua_value(harness.lua, [296, 2, 300])
+    harness.brain.tick = harness.brain.tick + 27
+    harness.lua.globals().Controller.Reconcile(
+        harness.controller,
+        harness.observe(),
+    )
+
+    assert harness.controller.pending["32:1"] is not None
+    assert harness.controller.blockedSites["front"] is None
+
 
 def test_airlift_skips_the_nearest_physically_unbuildable_mex() -> None:
     harness = make_harness()
