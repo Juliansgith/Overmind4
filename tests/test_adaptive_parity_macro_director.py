@@ -682,6 +682,42 @@ class TestRegionalMacro:
         assert result["jobs"][0]["actorToken"] == "eng-z"
         assert result["jobs"][0]["siteKey"] == "site"
 
+    def test_site_quarantine_pairing_is_stable_under_all_input_orders(self) -> None:
+        engineers = [
+            {"token": "72:2", "position": [11, 0, 20], "available": True},
+            {"token": "73:1", "position": [13, 0, 20], "available": True},
+        ]
+        sites = [
+            mass_site("near", 12, 20, region="near-region"),
+            mass_site("far", 40, 40, region="far-region"),
+        ]
+
+        for reverse_engineers in (False, True):
+            for reverse_sites in (False, True):
+                ordered_engineers = copy.deepcopy(engineers)
+                ordered_sites = copy.deepcopy(sites)
+                if reverse_engineers:
+                    ordered_engineers.reverse()
+                if reverse_sites:
+                    ordered_sites.reverse()
+                jobs = invoke(
+                    MODULE,
+                    GLOBAL,
+                    "PlanExpansion",
+                    {
+                        "fundedExpansionSlots": 2,
+                        "engineers": ordered_engineers,
+                        "sites": ordered_sites,
+                        "regions": [],
+                        "blockedActorTokensBySite": {"near": {"72:2": True}},
+                    },
+                )["jobs"]
+
+                assert {job["siteKey"]: job["actorToken"] for job in jobs} == {
+                    "near": "73:1",
+                    "far": "72:2",
+                }
+
     def test_multiple_funded_slots_choose_distinct_sites_and_regions(self) -> None:
         snapshot = {
             "fundedExpansionSlots": 2,

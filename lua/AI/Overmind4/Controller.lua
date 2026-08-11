@@ -8529,6 +8529,8 @@ ESCALATION.DirectorExpansionInput = function(controller, observation, macroPlan)
         engineers = engineers,
         escorts = escorts,
         sites = sites,
+        blockedActorTokensBySite =
+            ESCALATION.ExpansionBlockedActorTokensBySite(controller, engineers),
         regions = ESCALATION.DeepCopy(regions),
         intelState = ESCALATION.DeepCopy(controller.intelState),
     }
@@ -9676,18 +9678,6 @@ ESCALATION.JobActorLineage = function(job)
     return lineage
 end
 
-ESCALATION.JobEpoch = function(job)
-    if type(job) ~= 'table' then return nil end
-    if job.jobEpoch == nil then return 0 end
-    local epoch = job.jobEpoch
-    if type(epoch) ~= 'number' or epoch ~= epoch
-        or epoch < 0 or epoch > 1000000000 or epoch ~= math.floor(epoch)
-    then
-        return nil
-    end
-    return epoch
-end
-
 ESCALATION.JobSiteKey = function(job)
     if type(job) ~= 'table' or type(job.targetKey) ~= 'string'
         or job.targetKey == ''
@@ -9702,6 +9692,34 @@ ESCALATION.JobSiteKey = function(job)
     return job.siteKey or job.targetKey
 end
 
+ESCALATION.ExpansionBlockedActorTokensBySite = function(controller, engineers)
+    local result = {}
+    local jobs = type(controller) == 'table'
+        and type(controller.jobLedger) == 'table'
+        and type(controller.jobLedger.jobs) == 'table'
+        and controller.jobLedger.jobs or {}
+    for _, job in pairs(jobs) do
+        if type(job) == 'table' and job.phase == 'retryable' then
+            local siteKey = ESCALATION.JobSiteKey(job)
+            if siteKey then
+                local blocked = result[siteKey] or {}
+                local lineage = ESCALATION.JobActorLineage(job)
+                for _, engineer in ipairs(engineers or {}) do
+                    local token = type(engineer) == 'table' and engineer.token or nil
+                    local identity = ESCALATION.JobActorIdentity(token)
+                    if identity and ((lineage and lineage[identity]
+                            and lineage[identity] ~= token) or not lineage)
+                    then
+                        blocked[token] = true
+                    end
+                end
+                result[siteKey] = blocked
+            end
+        end
+    end
+    return result
+end
+
 ESCALATION.ValidExpansionJob = function(job)
     local position = type(job) == 'table' and CopyPosition(job.position) or nil
     return type(job) == 'table'
@@ -9709,7 +9727,6 @@ ESCALATION.ValidExpansionJob = function(job)
         and ESCALATION.JobActorIdentity(job.actorToken) ~= nil
         and ESCALATION.JobActorLineage(job) ~= nil
         and ESCALATION.JobSiteKey(job) ~= nil
-        and ESCALATION.JobEpoch(job) ~= nil
         and position ~= nil
         and ESCALATION.FiniteEconomyNumber(position[1], true)
         and ESCALATION.FiniteEconomyNumber(position[2], true)
@@ -9730,12 +9747,7 @@ ESCALATION.JobRestartDecision = function(existing, incoming)
     then
         return false, false
     end
-    local existingEpoch = ESCALATION.JobEpoch(existing)
-    local incomingEpoch = ESCALATION.JobEpoch(incoming)
-    if incomingEpoch < existingEpoch then return false, false end
-    if incomingEpoch > existingEpoch
-        or existing.phase == 'completed' or existing.phase == 'cancelled'
-    then
+    if existing.phase == 'completed' then
         return true, true
     end
     local incomingIdentity = ESCALATION.JobActorIdentity(incoming.actorToken)
@@ -9748,31 +9760,105 @@ ESCALATION.JobRestartDecision = function(existing, incoming)
     return true, false
 end
 
+ESCALATION.ExpansionPayloadSignature = function(value, seen, state, depth)
+    local kind = type(value)
+    if kind == 'nil' then return 'n' end
+    if kind == 'boolean' then return value and 'b1' or 'b0' end
+    if kind == 'number' then
+        if not ESCALATION.FiniteEconomyNumber(value, true) then return nil end
+        return 'd' .. tostring(value)
+    end
+    if kind == 'string' then
+        if string.len(value) > 100000 then return nil end
+        return 's' .. tostring(string.len(value)) .. ':' .. value
+    end
+    if kind ~= 'table' then return nil end
+    seen = seen or {}
+    state = state or { count = 0 }
+    depth = tonumber(depth) or 0
+    if depth >= 16 or seen[value] then return nil end
+    seen[value] = true
+    local entries = {}
+    for key, item in pairs(value) do
+        local keyKind = type(key)
+        if keyKind ~= 'boolean' and keyKind ~= 'number' and keyKind ~= 'string' then
+            seen[value] = nil
+            return nil
+        end
+        state.count = state.count + 1
+        if state.count > 256 then
+            seen[value] = nil
+            return nil
+        end
+        local keySignature = ESCALATION.ExpansionPayloadSignature(
+            key, seen, state, depth + 1
+        )
+        local itemSignature = ESCALATION.ExpansionPayloadSignature(
+            item, seen, state, depth + 1
+        )
+        if not keySignature or not itemSignature then
+            seen[value] = nil
+            return nil
+        end
+        TableInsert(entries,
+            tostring(string.len(keySignature)) .. ':' .. keySignature
+            .. tostring(string.len(itemSignature)) .. ':' .. itemSignature)
+    end
+    seen[value] = nil
+    table.sort(entries)
+    local body = table.concat(entries, '')
+    return 't' .. tostring(string.len(body)) .. ':' .. body
+end
+
 ESCALATION.OrderedExpansionJobs = function(jobs)
-    local ordered = {}
+    local candidates = {}
     if type(jobs) == 'table' then
         for key, job in pairs(jobs) do
             if type(key) == 'number' and key >= 1 and key <= 1000000
                 and key == math.floor(key)
+                and ESCALATION.ValidExpansionJob(job)
             then
-                TableInsert(ordered, ESCALATION.DeepCopy(job))
+                local signature = ESCALATION.ExpansionPayloadSignature(job)
+                if signature then
+                    TableInsert(candidates, {
+                        id = job.id,
+                        actorToken = job.actorToken,
+                        siteKey = ESCALATION.JobSiteKey(job),
+                        signature = signature,
+                        job = job,
+                    })
+                end
             end
         end
     end
-    table.sort(ordered, function(a, b)
-        local aId = type(a) == 'table' and tostring(a.id or '') or ''
-        local bId = type(b) == 'table' and tostring(b.id or '') or ''
-        if aId ~= bId then return aId < bId end
-        local aEpoch = ESCALATION.JobEpoch(a) or -1
-        local bEpoch = ESCALATION.JobEpoch(b) or -1
-        if aEpoch ~= bEpoch then return aEpoch > bEpoch end
-        local aActor = type(a) == 'table' and tostring(a.actorToken or '') or ''
-        local bActor = type(b) == 'table' and tostring(b.actorToken or '') or ''
-        if aActor ~= bActor then return aActor < bActor end
-        local aSite = type(a) == 'table' and tostring(a.siteKey or '') or ''
-        local bSite = type(b) == 'table' and tostring(b.siteKey or '') or ''
-        return aSite < bSite
+    table.sort(candidates, function(a, b)
+        if a.id ~= b.id then return a.id < b.id end
+        if a.actorToken ~= b.actorToken then return a.actorToken < b.actorToken end
+        if a.siteKey ~= b.siteKey then return a.siteKey < b.siteKey end
+        return a.signature < b.signature
     end)
+
+    local ordered = {}
+    local index = 1
+    while index <= TableGetn(candidates) do
+        local candidate = candidates[index]
+        local nextIndex = index + 1
+        local conflict = false
+        while nextIndex <= TableGetn(candidates)
+            and candidates[nextIndex].id == candidate.id
+            and candidates[nextIndex].actorToken == candidate.actorToken
+            and candidates[nextIndex].siteKey == candidate.siteKey
+        do
+            if candidates[nextIndex].signature ~= candidate.signature then
+                conflict = true
+            end
+            nextIndex = nextIndex + 1
+        end
+        if not conflict then
+            TableInsert(ordered, ESCALATION.DeepCopy(candidate.job))
+        end
+        index = nextIndex
+    end
     return ordered
 end
 

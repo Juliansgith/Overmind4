@@ -388,6 +388,8 @@ MacroDirector.PlanExpansion = function(snapshot)
     local slots = Clamp(Number(snapshot.fundedExpansionSlots, 0) or 0, 0, 4)
     local engineers = AvailableEngineers(snapshot.engineers)
     local sites = EligibleSites(snapshot)
+    local blockedBySite = type(snapshot.blockedActorTokensBySite) == 'table'
+        and snapshot.blockedActorTokensBySite or {}
     local usedEngineers = {}
     local usedSites = {}
     local usedRegions = {}
@@ -396,8 +398,12 @@ MacroDirector.PlanExpansion = function(snapshot)
         local best = nil
         for _, site in ipairs(sites) do
             if not usedSites[site.key] and not usedRegions[site.regionKey or site.key] then
+                local blockedActors = type(blockedBySite[site.key]) == 'table'
+                    and blockedBySite[site.key] or {}
                 for _, engineer in ipairs(engineers) do
-                    if not usedEngineers[engineer.token] then
+                    if not usedEngineers[engineer.token]
+                        and blockedActors[engineer.token] ~= true
+                    then
                         local distance = Distance(engineer.position, site.position)
                         local candidate = {
                             engineer = engineer,
