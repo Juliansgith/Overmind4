@@ -87,6 +87,29 @@ local ESCALATION = {
     CAMPAIGN_ATTRITION_TICKS = 600,
     CAMPAIGN_ATTRITION_RATIO = 0.25,
     CAMPAIGN_ROLLBACK_COOLDOWN_TICKS = 600,
+    ECONOMY_LEDGER_SAMPLES = 30,
+    ECONOMY_LEDGER_INTERVAL_TICKS = 10,
+    ALLOCATOR_PLANNING_TICKS = 1200,
+    MIN_FACTORY_TARGET = 2,
+    MASS_EXPANSION_RESERVE = 0.3,
+    ENERGY_EXPANSION_RESERVE = 3,
+    requestLanes = {
+        air_factory = 'air',
+        hydrocarbon = 'energy',
+        interceptor = 'air',
+        land_factory = 'factory',
+        land_factory_t2 = 'tech',
+        mass_extractor = 'expansion',
+        power_generator = 'energy',
+        engineer = 'engineer',
+        anti_air = 'factory',
+        artillery = 'factory',
+        lab = 'factory',
+        scout = 'factory',
+        tank = 'factory',
+        t2_anti_air = 'factory',
+        t2_direct_fire = 'factory',
+    },
     antiAirRoles = {
         anti_air = true,
         t2_anti_air = true,
@@ -1282,6 +1305,243 @@ local function RefreshReclaim(controller, ownRecords, massSites)
     return ReclaimSnapshot(controller)
 end
 
+ESCALATION.FiniteEconomyNumber = function(value, allowNegative)
+    return type(value) == 'number'
+        and value == value
+        and math.abs(value) <= 1000000000
+        and (allowNegative == true or value >= 0)
+end
+
+ESCALATION.Median = function(values)
+    if type(values) ~= 'table' or TableGetn(values) == 0 then return nil end
+    local ordered = CopyArray(values)
+    table.sort(ordered)
+    local length = TableGetn(ordered)
+    local middle = math.floor((length + 1) / 2)
+    if length - math.floor(length / 2) == math.floor(length / 2) then
+        return (ordered[middle] + ordered[middle + 1]) * 0.5
+    end
+    return ordered[middle]
+end
+
+ESCALATION.UpdateEconomyLedger = function(controller, economy)
+    local tick = CurrentTick(controller)
+    local valid = ESCALATION.FiniteEconomyNumber(economy.massIncome)
+        and ESCALATION.FiniteEconomyNumber(economy.massRequested)
+        and ESCALATION.FiniteEconomyNumber(economy.massUsage)
+        and ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
+        and ESCALATION.FiniteEconomyNumber(economy.energyIncome)
+        and ESCALATION.FiniteEconomyNumber(economy.energyRequested)
+        and ESCALATION.FiniteEconomyNumber(economy.energyUsage)
+        and ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.energyTrend, true)
+        and economy.massStoredRatio <= 1
+        and economy.energyStoredRatio <= 1
+    local ledger = controller.economyLedger
+    if type(ledger) ~= 'table' then
+        ledger = { samples = {}, lastTick = nil, lastStats = nil }
+        controller.economyLedger = ledger
+    end
+    if ledger.lastTick ~= nil and ledger.lastTick == tick then
+        economy.ledgerValid = ledger.valid == true
+        economy.recurringMassIncome = tonumber(
+            ledger.recurringMassIncome) or 0
+        economy.recurringEnergyIncome = tonumber(
+            ledger.recurringEnergyIncome) or 0
+        economy.rollingMassRequested = tonumber(ledger.massRequested) or 0
+        economy.rollingEnergyRequested = tonumber(ledger.energyRequested) or 0
+        economy.massDemandSatisfaction = tonumber(
+            ledger.massDemandSatisfaction) or 0
+        economy.energyDemandSatisfaction = tonumber(
+            ledger.energyDemandSatisfaction) or 0
+        economy.oneTimeMassReserve = tonumber(
+            ledger.oneTimeMassReserve) or 0
+        economy.oneTimeEnergyReserve = tonumber(
+            ledger.oneTimeEnergyReserve) or 0
+        return
+    end
+    local stats = {
+        producedMass = SafeArmyStat(controller.brain, 'Economy_TotalProduced_Mass'),
+        reclaimedMass = SafeArmyStat(controller.brain, 'Economy_Reclaimed_Mass'),
+        excessMass = SafeArmyStat(controller.brain, 'Economy_AccumExcess_Mass'),
+        producedEnergy = SafeArmyStat(controller.brain, 'Economy_TotalProduced_Energy'),
+        reclaimedEnergy = SafeArmyStat(controller.brain, 'Economy_Reclaimed_Energy'),
+        excessEnergy = SafeArmyStat(controller.brain, 'Economy_AccumExcess_Energy'),
+    }
+    for _, value in pairs(stats) do
+        if not ESCALATION.FiniteEconomyNumber(value) then valid = false end
+    end
+    local recurringMass = valid and economy.massIncome or 0
+    local recurringEnergy = valid and economy.energyIncome or 0
+    local reclaimedDeltaMass = 0
+    local reclaimedDeltaEnergy = 0
+    local dt = ledger.lastTick and tick - ledger.lastTick or 0
+    if valid and ledger.lastStats and dt > 0 then
+        local producedMass = stats.producedMass - ledger.lastStats.producedMass
+        local reclaimedMass = stats.reclaimedMass - ledger.lastStats.reclaimedMass
+        local producedEnergy = stats.producedEnergy - ledger.lastStats.producedEnergy
+        local reclaimedEnergy = stats.reclaimedEnergy - ledger.lastStats.reclaimedEnergy
+        local excessMass = stats.excessMass - ledger.lastStats.excessMass
+        local excessEnergy = stats.excessEnergy - ledger.lastStats.excessEnergy
+        if producedMass < 0 or reclaimedMass < 0 or excessMass < 0
+            or producedEnergy < 0 or reclaimedEnergy < 0 or excessEnergy < 0
+        then
+            valid = false
+            ledger.samples = {}
+            ledger.lastTick = tick
+            ledger.lastStats = stats
+        else
+            reclaimedDeltaMass = reclaimedMass
+            reclaimedDeltaEnergy = reclaimedEnergy
+            -- FAF's own score path defines generated recurring production as
+            -- TotalProduced minus Reclaimed. Excess is overflow diagnostic;
+            -- it is neither recurring demand nor stored reserve.
+            recurringMass = math.max(0,
+                (producedMass - reclaimedMass) / dt)
+            recurringEnergy = math.max(0,
+                (producedEnergy - reclaimedEnergy) / dt)
+        end
+    elseif ledger.lastTick and dt <= 0 and tick ~= ledger.lastTick then
+        valid = false
+    end
+
+    if valid and ledger.lastTick ~= nil
+        and tick - ledger.lastTick >= ESCALATION.ECONOMY_LEDGER_INTERVAL_TICKS
+    then
+        TableInsert(ledger.samples, {
+            tick = tick,
+            recurringMass = recurringMass,
+            recurringEnergy = recurringEnergy,
+            massRequested = economy.massRequested,
+            energyRequested = economy.energyRequested,
+            massUsage = economy.massUsage,
+            energyUsage = economy.energyUsage,
+            massStoredRatio = economy.massStoredRatio,
+            energyStoredRatio = economy.energyStoredRatio,
+            massTrend = economy.massTrend,
+            energyTrend = economy.energyTrend,
+        })
+        while TableGetn(ledger.samples) > ESCALATION.ECONOMY_LEDGER_SAMPLES do
+            table.remove(ledger.samples, 1)
+        end
+        ledger.lastTick = tick
+        ledger.lastStats = stats
+    elseif valid and ledger.lastTick == nil then
+        -- A first GetEconomyIncome sample may be reclaim-contaminated.  It is
+        -- baseline evidence only; capacity opens after a positive-dt
+        -- TotalProduced-minus-Reclaimed sample.
+        ledger.lastTick = tick
+        ledger.lastStats = stats
+    end
+
+    local massIncome = {}
+    local energyIncome = {}
+    local massRequested = {}
+    local energyRequested = {}
+    local massUsage = {}
+    local energyUsage = {}
+    local massStoredRatio = {}
+    local energyStoredRatio = {}
+    local massTrend = {}
+    local energyTrend = {}
+    for _, sample in ipairs(ledger.samples or {}) do
+        TableInsert(massIncome, sample.recurringMass)
+        TableInsert(energyIncome, sample.recurringEnergy)
+        TableInsert(massRequested, sample.massRequested)
+        TableInsert(energyRequested, sample.energyRequested)
+        TableInsert(massUsage, sample.massUsage)
+        TableInsert(energyUsage, sample.energyUsage)
+        TableInsert(massStoredRatio, sample.massStoredRatio)
+        TableInsert(energyStoredRatio, sample.energyStoredRatio)
+        TableInsert(massTrend, sample.massTrend)
+        TableInsert(energyTrend, sample.energyTrend)
+    end
+    local storedMass = SafeCall(-1,
+        controller.brain.GetEconomyStored, controller.brain, 'MASS')
+    local storedEnergy = SafeCall(-1,
+        controller.brain.GetEconomyStored, controller.brain, 'ENERGY')
+    ledger.valid = valid and TableGetn(ledger.samples) > 0
+    ledger.inputValid = valid
+    ledger.recurringMassIncome = ESCALATION.Median(massIncome) or 0
+    ledger.recurringEnergyIncome = ESCALATION.Median(energyIncome) or 0
+    ledger.massRequested = ESCALATION.Median(massRequested) or 0
+    ledger.energyRequested = ESCALATION.Median(energyRequested) or 0
+    ledger.massUsage = ESCALATION.Median(massUsage) or 0
+    ledger.energyUsage = ESCALATION.Median(energyUsage) or 0
+    ledger.massDemandSatisfaction = ledger.massRequested > 0
+        and math.min(1, ledger.massUsage / ledger.massRequested) or 1
+    ledger.energyDemandSatisfaction = ledger.energyRequested > 0
+        and math.min(1, ledger.energyUsage / ledger.energyRequested) or 1
+    ledger.massStoredRatio = ESCALATION.Median(massStoredRatio) or 0
+    ledger.energyStoredRatio = ESCALATION.Median(energyStoredRatio) or 0
+    ledger.massTrend = ESCALATION.Median(massTrend) or 0
+    ledger.energyTrend = ESCALATION.Median(energyTrend) or 0
+    -- Realized reclaim is already reflected in current storage or consumption.
+    -- Keep it as one-time flow telemetry, never add it to the spendable bank.
+    ledger.oneTimeMassReserve = ESCALATION.FiniteEconomyNumber(storedMass)
+        and storedMass or 0
+    ledger.oneTimeEnergyReserve = ESCALATION.FiniteEconomyNumber(storedEnergy)
+        and storedEnergy or 0
+    ledger.reclaimedMassDelta = reclaimedDeltaMass
+    ledger.reclaimedEnergyDelta = reclaimedDeltaEnergy
+    ledger.sampleCount = TableGetn(ledger.samples)
+    economy.ledgerValid = ledger.valid
+    economy.recurringMassIncome = ledger.recurringMassIncome
+    economy.recurringEnergyIncome = ledger.recurringEnergyIncome
+    economy.rollingMassRequested = ledger.massRequested
+    economy.rollingEnergyRequested = ledger.energyRequested
+    economy.massDemandSatisfaction = ledger.massDemandSatisfaction
+    economy.energyDemandSatisfaction = ledger.energyDemandSatisfaction
+    economy.oneTimeMassReserve = ledger.oneTimeMassReserve
+    economy.oneTimeEnergyReserve = ledger.oneTimeEnergyReserve
+end
+
+ESCALATION.OperationBudget = function(controller, operation, records)
+    if type(operation) ~= 'table' then return nil end
+    local role = operation.upgradeRole or operation.buildRole
+    local blueprintId = role and Catalog.IdFor(role) or nil
+    local target = blueprintId
+        and SafeCall(nil, controller.brain.GetUnitBlueprint,
+            controller.brain, blueprintId)
+        or nil
+    local economy = type(target) == 'table' and target.Economy or nil
+    local actor = records[operation.actorToken]
+    local buildRate = actor and tonumber(actor.buildRate) or nil
+    local buildTime = economy and tonumber(economy.BuildTime) or nil
+    local massCost = economy and tonumber(economy.BuildCostMass) or nil
+    local energyCost = economy and tonumber(economy.BuildCostEnergy) or nil
+    if not buildRate or buildRate <= 0 or not buildTime or buildTime <= 0
+        or not massCost or massCost < 0 or not energyCost or energyCost < 0
+    then
+        return nil
+    end
+    if operation.kind == 'factory_upgrade'
+        and economy.DifferentialUpgradeCostCalculation == true
+        and actor
+    then
+        local sourceId = Catalog.IdFor(actor.role)
+        local source = sourceId and SafeCall(nil,
+            controller.brain.GetUnitBlueprint, controller.brain, sourceId) or nil
+        local sourceEconomy = type(source) == 'table' and source.Economy or nil
+        massCost = math.max(0,
+            massCost - (sourceEconomy and tonumber(sourceEconomy.BuildCostMass) or 0))
+        energyCost = math.max(0,
+            energyCost - (sourceEconomy and tonumber(sourceEconomy.BuildCostEnergy) or 0))
+    end
+    local durationTicks = buildTime / buildRate * 10
+    if durationTicks <= 0 then return nil end
+    local lane = ESCALATION.requestLanes[role] or 'construction'
+    return {
+        lane = lane,
+        massDrain = massCost / durationTicks,
+        energyDrain = energyCost / durationTicks,
+        massCost = massCost,
+        energyCost = energyCost,
+        durationTicks = durationTicks,
+    }
+end
+
 local function UpdateMassSurplus(controller, economy)
     local valid = type(economy.massIncome) == 'number'
         and type(economy.massRequested) == 'number'
@@ -1327,6 +1587,26 @@ end
 
 local function StructureWorkKey(controller, operation)
     if operation.siteKey then return 'Site:' .. tostring(operation.siteKey) end
+    local currentSites = controller.currentSites or {}
+    local siteGroups = {
+        { role = 'mass_extractor', sites = currentSites.mass or {} },
+        { role = 'hydrocarbon', sites = currentSites.hydro or {} },
+    }
+    for _, group in ipairs(siteGroups) do
+        if operation.buildRole == group.role then
+            for _, site in ipairs(group.sites) do
+                local exactTarget = type(operation.targetToken) == 'string'
+                    and operation.targetToken == site.targetToken
+                local positionMatch = operation.targetToken == nil
+                    and operation.position
+                    and DistanceSquared(operation.position, site.position)
+                        <= PLACEMENT_MATCH_DISTANCE * PLACEMENT_MATCH_DISTANCE
+                if exactTarget or positionMatch then
+                    return 'Site:' .. tostring(site.key)
+                end
+            end
+        end
+    end
     for _, foundation in ipairs(controller.currentFoundations or {}) do
         if operation.buildRole == foundation.role
             and ((operation.targetToken
@@ -1344,6 +1624,21 @@ local function StructureWorkKey(controller, operation)
     return operation.placementKey
         or (operation.targetToken and ('Foundation:' .. operation.targetToken))
         or ('Actor:' .. tostring(operation.actorToken))
+end
+
+ESCALATION.CommitmentKey = function(controller, operation)
+    if type(operation) ~= 'table' then return nil end
+    local role = operation.upgradeRole or operation.buildRole
+    if type(role) ~= 'string' then return nil end
+    if StructureOperation(operation) then
+        return role .. ':' .. tostring(StructureWorkKey(controller, operation))
+    end
+    if operation.kind == 'factory_build'
+        or operation.kind == 'factory_upgrade'
+    then
+        return role .. ':Actor:' .. tostring(operation.actorToken)
+    end
+    return nil
 end
 
 local function MacroSnapshot(controller, units, economy)
@@ -1412,7 +1707,6 @@ local function MacroSnapshot(controller, units, economy)
         end
     end
     local constructionBacklog = CountArray(constructionWork)
-    local engineerDemand = math.max(2, 2 + math.floor((constructionBacklog + 1) / 2))
     economy = type(economy) == 'table' and economy or {}
     local completedMex = CountRole(units, 'mass_extractor')
     local completedLandT1 = CountRole(units, 'land_factory')
@@ -1437,37 +1731,264 @@ local function MacroSnapshot(controller, units, economy)
         completedFactories,
         completedFactories + CountArray(factoryWork) - upgradeSourcesCompleted
     )
-    local desiredCapacity = math.max(2, factories)
-    local income = tonumber(economy.massIncome)
-    local requested = tonumber(economy.massRequested)
-    local stored = tonumber(economy.massStoredRatio)
-    local trend = tonumber(economy.massTrend)
-    if income and requested and stored and trend
-        and income == income and requested == requested
-        and stored == stored and trend == trend
-        and math.abs(income) <= 1000000000
-        and math.abs(requested) <= 1000000000
-        and math.abs(stored) <= 1000000000
-        and math.abs(trend) <= 1000000000
-        and income >= 0
-        and requested >= 0
-        and requested <= income
-        and stored >= ESCALATION.FULL_STORAGE
-        and trend >= 0
+    local expansionOpportunities = 0
+    for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
+        if site.complete ~= true
+            and site.occupied ~= true
+            and site.reserved ~= true
+            and site.buildable == true
+            and (site.engineerReachable == true or site.reachable == true)
+            and CopyPosition(site.position)
+        then
+            expansionOpportunities = expansionOpportunities + 1
+        end
+    end
+    local reclaimOpportunityCount = TableGetn(controller.reclaimCandidates or {})
+    local engineerTarget = math.max(2, math.min(12,
+        2 + math.ceil(math.sqrt(expansionOpportunities
+            + constructionBacklog + reclaimOpportunityCount))))
+    local completedEngineers = CountRole(units, 'engineer')
+    local records = RecordByToken(units)
+    local committed = {
+        expansion = { mass = 0, energy = 0 },
+        energy = { mass = 0, energy = 0 },
+        engineer = { mass = 0, energy = 0 },
+        factory = { mass = 0, energy = 0 },
+        air = { mass = 0, energy = 0 },
+        tech = { mass = 0, energy = 0 },
+        construction = { mass = 0, energy = 0 },
+    }
+    local activeMassDrain = 0
+    local activeEnergyDrain = 0
+    local reservedFutureMassDrain = 0
+    local reservedFutureEnergyDrain = 0
+    local currentCommitments = {}
+    local expansionScheduled = 0
+    for _, token in ipairs(SortedKeys(controller.pending or {})) do
+        local operation = controller.pending[token]
+        local budget = ESCALATION.OperationBudget(controller, operation, records)
+        local commitmentKey = ESCALATION.CommitmentKey(controller, operation)
+        if commitmentKey then
+            local commitment = currentCommitments[commitmentKey]
+            if not commitment then
+                commitment = {
+                    owners = {},
+                    massCost = nil,
+                    energyCost = nil,
+                    maximumFraction = nil,
+                    budgetValid = false,
+                }
+                currentCommitments[commitmentKey] = commitment
+            end
+            commitment.owners[token] = true
+            local fraction = tonumber(operation.lastFraction)
+            if ESCALATION.FiniteEconomyNumber(fraction)
+                and fraction >= 0 and fraction <= 1
+                and (commitment.maximumFraction == nil
+                    or fraction > commitment.maximumFraction)
+            then
+                commitment.maximumFraction = fraction
+            end
+            if budget then
+                commitment.budgetValid = true
+                commitment.massCost = math.max(
+                    tonumber(commitment.massCost) or 0,
+                    budget.massCost
+                )
+                commitment.energyCost = math.max(
+                    tonumber(commitment.energyCost) or 0,
+                    budget.energyCost
+                )
+            end
+        end
+        if budget then
+            local lane = committed[budget.lane] and budget.lane or 'construction'
+            committed[lane].mass = committed[lane].mass + budget.massDrain
+            committed[lane].energy = committed[lane].energy + budget.energyDrain
+            activeMassDrain = activeMassDrain + budget.massDrain
+            activeEnergyDrain = activeEnergyDrain + budget.energyDrain
+            if operation.accepted ~= true
+                or operation.phase == 'travelling'
+            then
+                reservedFutureMassDrain = reservedFutureMassDrain
+                    + budget.massDrain
+                reservedFutureEnergyDrain = reservedFutureEnergyDrain
+                    + budget.energyDrain
+            end
+        end
+        if StructureOperation(operation)
+            and operation.buildRole == 'mass_extractor'
+        then
+            expansionScheduled = expansionScheduled + 1
+        end
+    end
+    local previousLeases = type(controller.economyCommitmentLeases) == 'table'
+        and controller.economyCommitmentLeases or {}
+    local nextLeases = {}
+    local reservedCommittedMassCost = 0
+    local reservedCommittedEnergyCost = 0
+    local commitmentBudgetsValid = true
+    for _, commitmentKey in ipairs(SortedKeys(currentCommitments)) do
+        local current = currentCommitments[commitmentKey]
+        local previous = previousLeases[commitmentKey]
+        local continuousOwner = false
+        if type(previous) == 'table' and type(previous.owners) == 'table' then
+            for token, _ in pairs(current.owners) do
+                if previous.owners[token] == true then
+                    continuousOwner = true
+                    break
+                end
+            end
+        end
+        if not continuousOwner then previous = nil end
+        local maximumFraction = previous
+            and ESCALATION.FiniteEconomyNumber(previous.maximumFraction)
+            and previous.maximumFraction >= 0
+            and previous.maximumFraction <= 1
+            and previous.maximumFraction
+            or 0
+        if ESCALATION.FiniteEconomyNumber(current.maximumFraction)
+            and current.maximumFraction >= maximumFraction
+        then
+            maximumFraction = current.maximumFraction
+        end
+        local massCost = current.budgetValid == true
+            and current.massCost
+            or (previous and previous.massCost or nil)
+        local energyCost = current.budgetValid == true
+            and current.energyCost
+            or (previous and previous.energyCost or nil)
+        local budgetValid = ESCALATION.FiniteEconomyNumber(massCost)
+            and ESCALATION.FiniteEconomyNumber(energyCost)
+            and massCost >= 0 and energyCost >= 0
+        if not budgetValid then
+            commitmentBudgetsValid = false
+            massCost = 0
+            energyCost = 0
+            maximumFraction = 0
+        end
+        local lease = {
+            owners = current.owners,
+            massCost = massCost,
+            energyCost = energyCost,
+            maximumFraction = maximumFraction,
+            budgetValid = budgetValid,
+        }
+        nextLeases[commitmentKey] = lease
+        reservedCommittedMassCost = reservedCommittedMassCost
+            + massCost * (1 - maximumFraction)
+        reservedCommittedEnergyCost = reservedCommittedEnergyCost
+            + energyCost * (1 - maximumFraction)
+    end
+    controller.economyCommitmentLeases = nextLeases
+    local ledger = type(controller.economyLedger) == 'table'
+        and controller.economyLedger or {}
+    local allocatorValid = ledger.valid == true
+    local recurringMass = allocatorValid
+        and (tonumber(ledger.recurringMassIncome) or 0) or 0
+    local recurringEnergy = allocatorValid
+        and (tonumber(ledger.recurringEnergyIncome) or 0) or 0
+    local rollingMassRequested = allocatorValid
+        and (tonumber(ledger.massRequested) or 0) or 0
+    local rollingEnergyRequested = allocatorValid
+        and (tonumber(ledger.energyRequested) or 0) or 0
+    local requiredMassReserve = expansionOpportunities > 0
+        and ESCALATION.MASS_EXPANSION_RESERVE or 0
+    local requiredEnergyReserve = expansionOpportunities > 0
+        and ESCALATION.ENERGY_EXPANSION_RESERVE or 0
+    local currentMassRequested = ESCALATION.FiniteEconomyNumber(
+        economy.massRequested) and economy.massRequested or 0
+    local currentEnergyRequested = ESCALATION.FiniteEconomyNumber(
+        economy.energyRequested) and economy.energyRequested or 0
+    local expansionAvailableMass = allocatorValid and math.max(0,
+        recurringMass - math.max(rollingMassRequested, currentMassRequested)
+            - reservedFutureMassDrain) or 0
+    local expansionAvailableEnergy = allocatorValid and math.max(0,
+        recurringEnergy - math.max(rollingEnergyRequested, currentEnergyRequested)
+            - reservedFutureEnergyDrain) or 0
+    local availableMass = math.max(0,
+        expansionAvailableMass - requiredMassReserve)
+    local availableEnergy = math.max(0,
+        expansionAvailableEnergy - requiredEnergyReserve)
+    local supportedFactories = ESCALATION.MIN_FACTORY_TARGET
+    if allocatorValid then
+        supportedFactories = math.max(ESCALATION.MIN_FACTORY_TARGET,
+            math.floor(math.max(0, recurringMass - requiredMassReserve)
+                / NEXT_FACTORY_SAFE_DRAIN_PER_TICK + 0.00001))
+    end
+    controller.factoryTarget = supportedFactories
+    local factoryDemand = supportedFactories
+    local idleFactories = 0
+    for _, unit in ipairs(units or {}) do
+        if (unit.role == 'land_factory'
+                or unit.role == 'land_factory_t2'
+                or unit.role == 'air_factory')
+            and unit.complete == true and unit.idle == true
+            and not controller.pending[unit.token]
+        then
+            idleFactories = idleFactories + 1
+        end
+    end
+    local fundedFactories = 0
+    local factoryMassBudget = availableMass
+    local factoryEnergyBudget = availableEnergy
+    if allocatorValid then
+        for _, unit in ipairs(units or {}) do
+            local requestMass = unit.role == 'air_factory' and 0.2
+                or (unit.role == 'land_factory_t2' and 0.9 or 0.5)
+            local requestEnergy = unit.role == 'air_factory' and 9
+                or (unit.role == 'land_factory_t2' and 4.5 or 2.5)
+            if (unit.role == 'land_factory'
+                    or unit.role == 'land_factory_t2'
+                    or unit.role == 'air_factory')
+                and unit.complete == true and unit.idle == true
+                and not controller.pending[unit.token]
+                and factoryMassBudget + 0.000001 >= requestMass
+                and factoryEnergyBudget + 0.000001 >= requestEnergy
+            then
+                fundedFactories = fundedFactories + 1
+                factoryMassBudget = factoryMassBudget - requestMass
+                factoryEnergyBudget = factoryEnergyBudget - requestEnergy
+            end
+        end
+    end
+    local oneTimeMass = commitmentBudgetsValid
+        and (allocatorValid or ledger.inputValid == true)
+        and math.max(0, (tonumber(ledger.oneTimeMassReserve) or 0)
+            - reservedCommittedMassCost) or 0
+    local oneTimeEnergy = commitmentBudgetsValid
+        and (allocatorValid or ledger.inputValid == true)
+        and math.max(0, (tonumber(ledger.oneTimeEnergyReserve) or 0)
+            - reservedCommittedEnergyCost) or 0
+    local techAdmission = 'structural_prerequisite'
+    local techEtaTicks = -1
+    if not allocatorValid then
+        techAdmission = 'invalid_economy'
+    elseif completedLandT1 >= 1
+        and completedLandT1 + completedLandT2 >= 2
+        and completedAirT1 >= 1
+        and completedLandT2 < 1
+        and CountArray(factoryWorkByRole.land_factory_t2) < 1
     then
-        desiredCapacity = math.max(desiredCapacity, math.min(
-            8,
-            math.floor(income / NEXT_FACTORY_SAFE_DRAIN_PER_TICK + 0.00001)
-        ))
+        local massNeed = math.max(0, 1170 - oneTimeMass)
+        local energyNeed = math.max(0, 9100 - oneTimeEnergy)
+        local massEta = availableMass > 0 and math.ceil(massNeed / availableMass) or 1000000000
+        local energyEta = availableEnergy > 0 and math.ceil(energyNeed / availableEnergy) or 1000000000
+        techEtaTicks = math.max(massEta, energyEta)
+        if availableMass >= 1.017391
+            and availableEnergy >= 7.913043
+            and techEtaTicks <= ESCALATION.ALLOCATOR_PLANNING_TICKS
+        then
+            techAdmission = 'admitted'
+        else
+            techAdmission = 'commitment_deferred'
+        end
     end
-    controller.factoryTarget = math.max(
-        tonumber(controller.factoryTarget) or 2,
-        desiredCapacity
-    )
-    local factoryDemand = math.max(2, controller.factoryTarget, factories)
-    if controller.massSurplusTicks >= MASS_SURPLUS_TICKS then
-        factoryDemand = math.max(factoryDemand, factories + 1)
-    end
+    controller.allocatorDeniedRequest = idleFactories > fundedFactories
+        and 'factory_queue' or 'none'
+    controller.allocatorDeniedReason = idleFactories > fundedFactories
+        and (not allocatorValid and 'invalid_economy' or 'recurring_budget')
+        or 'none'
     local combatCompleted = 0
     local aaCompleted = 0
     for _, unit in ipairs(units or {}) do
@@ -1614,9 +2135,71 @@ local function MacroSnapshot(controller, units, economy)
         activeReclaimJobs = reclaimJobs,
         constructionBacklog = constructionBacklog,
         frontierWork = frontierWork,
-        engineerDemand = engineerDemand,
+        allocatorEnabled = true,
+        economyLedgerValid = allocatorValid,
+        economyInputValid = ledger.inputValid == true,
+        economyLedgerSamples = tonumber(ledger.sampleCount) or 0,
+        recurringMassIncome = recurringMass,
+        recurringEnergyIncome = recurringEnergy,
+        rollingMassRequested = rollingMassRequested,
+        rollingEnergyRequested = rollingEnergyRequested,
+        rollingMassUsage = allocatorValid
+            and (tonumber(ledger.massUsage) or 0) or 0,
+        rollingEnergyUsage = allocatorValid
+            and (tonumber(ledger.energyUsage) or 0) or 0,
+        rollingMassStoredRatio = allocatorValid
+            and (tonumber(ledger.massStoredRatio) or 0) or 0,
+        rollingEnergyStoredRatio = allocatorValid
+            and (tonumber(ledger.energyStoredRatio) or 0) or 0,
+        rollingMassTrend = allocatorValid
+            and (tonumber(ledger.massTrend) or 0) or 0,
+        rollingEnergyTrend = allocatorValid
+            and (tonumber(ledger.energyTrend) or 0) or 0,
+        massDemandSatisfaction = allocatorValid
+            and (tonumber(ledger.massDemandSatisfaction) or 0) or 0,
+        energyDemandSatisfaction = allocatorValid
+            and (tonumber(ledger.energyDemandSatisfaction) or 0) or 0,
+        oneTimeMassReserve = oneTimeMass,
+        oneTimeEnergyReserve = oneTimeEnergy,
+        reclaimedMassDelta = tonumber(ledger.reclaimedMassDelta) or 0,
+        reclaimedEnergyDelta = tonumber(ledger.reclaimedEnergyDelta) or 0,
+        activeCommittedMassDrain = activeMassDrain,
+        activeCommittedEnergyDrain = activeEnergyDrain,
+        committedMassExpansion = committed.expansion.mass,
+        committedEnergyExpansion = committed.expansion.energy,
+        committedMassEnergy = committed.energy.mass,
+        committedEnergyEnergy = committed.energy.energy,
+        committedMassEngineer = committed.engineer.mass,
+        committedEnergyEngineer = committed.engineer.energy,
+        committedMassConstruction = committed.construction.mass,
+        committedEnergyConstruction = committed.construction.energy,
+        committedMassFactory = committed.factory.mass,
+        committedEnergyFactory = committed.factory.energy,
+        committedMassAir = committed.air.mass,
+        committedEnergyAir = committed.air.energy,
+        committedMassTech = committed.tech.mass,
+        committedEnergyTech = committed.tech.energy,
+        availableRecurringMass = availableMass,
+        availableRecurringEnergy = availableEnergy,
+        expansionRecurringMassBudget = expansionAvailableMass,
+        expansionRecurringEnergyBudget = expansionAvailableEnergy,
+        expansionOpportunityCount = expansionOpportunities,
+        expansionScheduledCount = expansionScheduled,
+        engineerTarget = engineerTarget,
+        unlockingEngineerNeeded = expansionOpportunities > 0
+            and completedEngineers < engineerTarget,
+        engineerDemand = engineerTarget,
         factoryDemand = factoryDemand,
         factoryTarget = controller.factoryTarget,
+        factoryFundedCount = fundedFactories,
+        factoryIdleCount = idleFactories,
+        factoryPhysicalCount = factories,
+        completedFactories = completedFactories,
+        buildingFactories = math.max(0, factories - completedFactories),
+        allocatorDeniedRequest = controller.allocatorDeniedRequest or 'none',
+        allocatorDeniedReason = controller.allocatorDeniedReason or 'none',
+        techAdmission = techAdmission,
+        techEtaTicks = techEtaTicks,
         economyStage = economyStage,
         completedMex = completedMex,
         completedLandT1Factories = completedLandT1,
@@ -3928,6 +4511,7 @@ local function CampaignCohortsStable(
     end
     if full
         and campaign.fullCohorts ~= true
+        and campaign.state ~= 'rebuilding'
         and (campaign.state ~= 'recalled' or allowRecalledUpgrade == true)
     then
         return false
@@ -3983,6 +4567,7 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade, tick)
     end
     if full
         and campaign.fullCohorts ~= true
+        and campaign.state ~= 'rebuilding'
         and (campaign.state ~= 'recalled' or allowRecalledUpgrade == true)
     then
         local fieldSet = {}
@@ -4067,12 +4652,14 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade, tick)
                 local homeDeficit = (TableGetn(records) - fieldTarget) - TableGetn(home)
                 local chooseField = false
                 if campaign.state ~= 'recalled'
+                    and campaign.state ~= 'rebuilding'
                     and ESCALATION.antiAirRoles[record.role]
                     and fieldDeficit > 0
                     and fieldAa < fieldAaTarget
                 then
                     chooseField = true
                 elseif campaign.state ~= 'recalled'
+                    and campaign.state ~= 'rebuilding'
                     and fieldDeficit > homeDeficit
                 then
                     chooseField = true
@@ -4486,6 +5073,9 @@ local function UpdateFieldCampaign(controller, observation)
         if campaign.pendingMode == 'resume' and not readinessReady then
             campaign.pendingMode = nil
             campaign.pendingTokens = {}
+            campaign.pendingResumeFieldTokens = nil
+            campaign.pendingResumeHomeTokens = nil
+            campaign.pendingResumeFull = nil
         end
         local rollbackCooldownReady = campaign.lastRollbackTick == nil
             or tick - (tonumber(campaign.lastRollbackTick) or tick)
@@ -4497,7 +5087,19 @@ local function UpdateFieldCampaign(controller, observation)
                 or (campaign.rollbackReason == 'repeated_no_progress'
                     and CampaignClusterComplete(controller, campaign)))
         if canResume and liveField > 0 then
+            campaign.pendingResumeFieldTokens = nil
+            campaign.pendingResumeHomeTokens = nil
+            campaign.pendingResumeFull = nil
             CampaignSetPending(campaign, 'resume', campaign.fieldTokens)
+        elseif canResume then
+            local resumedField, resumedHome, resumedFull =
+                InitialCampaignCohorts(CampaignCombatRecords(observation.units))
+            if TableGetn(resumedField) > 0 then
+                campaign.pendingResumeFieldTokens = resumedField
+                campaign.pendingResumeHomeTokens = resumedHome
+                campaign.pendingResumeFull = resumedFull == true
+                CampaignSetPending(campaign, 'resume', resumedField)
+            end
         end
         return
     end
@@ -4782,6 +5384,41 @@ local function ExecuteFieldCampaign(
     local expected = CopyArray(campaign.pendingTokens)
     table.sort(expected)
     if not SameArray(tokens, expected) or TableGetn(tokens) == 0 then return false end
+    local stagedResume = intent.mode == 'resume'
+        and campaign.state == 'rebuilding'
+        and type(campaign.pendingResumeFieldTokens) == 'table'
+        and type(campaign.pendingResumeHomeTokens) == 'table'
+    local stagedFieldSet = nil
+    local stagedHomeSet = nil
+    if stagedResume then
+        stagedFieldSet, stagedHomeSet = CohortTokenSets(
+            campaign.pendingResumeFieldTokens,
+            campaign.pendingResumeHomeTokens
+        )
+        local combatRecords = CampaignCombatRecords(observation.units)
+        if not stagedFieldSet
+            or not SameArray(tokens, campaign.pendingResumeFieldTokens)
+            or TableGetn(campaign.pendingResumeFieldTokens)
+                + TableGetn(campaign.pendingResumeHomeTokens)
+                ~= TableGetn(combatRecords)
+        then
+            return false
+        end
+        for _, record in ipairs(combatRecords) do
+            local fieldMember = stagedFieldSet[record.token] == true
+            local homeMember = stagedHomeSet[record.token] == true
+            if fieldMember == homeMember
+                or not LiveOwnedActor(
+                    controller,
+                    record.token,
+                    record,
+                    record.role
+                )
+            then
+                return false
+            end
+        end
+    end
     local expectedPosition = CampaignExpectedPosition(controller, campaign, intent.mode)
     if not expectedPosition
         or not IsCampaignPosition(intent.position)
@@ -4800,7 +5437,9 @@ local function ExecuteFieldCampaign(
     for _, token in ipairs(tokens) do
         local record = recordByToken[token]
         if usedActors[token]
-            or not CampaignFieldContains(campaign, token)
+            or (not stagedResume
+                and not CampaignFieldContains(campaign, token))
+            or (stagedResume and stagedFieldSet[token] ~= true)
             or controller.pending[token]
             or controller.waveAssignments[token]
             or not record
@@ -4870,6 +5509,18 @@ local function ExecuteFieldCampaign(
             pcall(function() IssueClearCommands(actors) end)
         end
         return false
+    end
+
+    if stagedResume then
+        if not CommitCampaignCohorts(
+            campaign,
+            campaign.pendingResumeFieldTokens,
+            campaign.pendingResumeHomeTokens
+        ) then
+            return false
+        end
+        campaign.fullCohorts = campaign.pendingResumeFull == true
+        campaign.orderedTokens = {}
     end
 
     local tick = CurrentTick(controller)
@@ -4993,6 +5644,9 @@ local function ExecuteFieldCampaign(
         campaign.attritionWindowTick = tick
         campaign.attritionLost = 0
         campaign.attritionWindow = 0
+        campaign.pendingResumeFieldTokens = nil
+        campaign.pendingResumeHomeTokens = nil
+        campaign.pendingResumeFull = nil
     elseif mode == 'rollback' then
         campaign.state = 'rebuilding'
         campaign.rollbackReason = campaign.pendingRollbackReason or 'unknown'
@@ -5074,6 +5728,10 @@ Controller.Create = function(brain)
         airAssignments = {},
         airScreenCount = 0,
         factoryTarget = 2,
+        economyLedger = { samples = {}, lastTick = nil, lastStats = nil },
+        economyCommitmentLeases = {},
+        allocatorDeniedRequest = 'none',
+        allocatorDeniedReason = 'none',
         upgradeState = 'none',
         lastPlacementProbeCount = 0,
         lastPlacementCapacity = 0,
@@ -5150,6 +5808,7 @@ Controller.Observe = function(controller)
         controller.brain.GetEconomyRequested, controller.brain, 'ENERGY')
     economy.massRequested = SafeCall(nil,
         controller.brain.GetEconomyRequested, controller.brain, 'MASS')
+    ESCALATION.UpdateEconomyLedger(controller, economy)
     UpdateMassSurplus(controller, economy)
     local sites = {
         mass = SiteSnapshot(controller, controller.markers.mass, units),
@@ -5444,6 +6103,7 @@ Controller.Reconcile = function(controller, observation)
     for _, collection in pairs(observation.sites or {}) do
         for _, site in ipairs(collection or {}) do
             site.reserved = controller.reservations[site.key] ~= nil
+            site.buildable = not SiteIsBlocked(controller, site.key)
         end
     end
     RefreshFoundationReservations(controller, observation.foundations)
@@ -5838,6 +6498,78 @@ Controller.Step = function(controller)
             factory_demand = tonumber(macro.factoryDemand) or 0,
             economy_stage = tostring(macro.economyStage or 'opening'),
             factory_target = tonumber(macro.factoryTarget) or 0,
+            recurring_mass_income_per_tick = tonumber(
+                macro.recurringMassIncome) or 0,
+            recurring_energy_income_per_tick = tonumber(
+                macro.recurringEnergyIncome) or 0,
+            rolling_mass_requested_per_tick = tonumber(
+                macro.rollingMassRequested) or 0,
+            rolling_energy_requested_per_tick = tonumber(
+                macro.rollingEnergyRequested) or 0,
+            rolling_mass_usage_per_tick = tonumber(
+                macro.rollingMassUsage) or 0,
+            rolling_energy_usage_per_tick = tonumber(
+                macro.rollingEnergyUsage) or 0,
+            rolling_mass_stored_ratio = tonumber(
+                macro.rollingMassStoredRatio) or 0,
+            rolling_energy_stored_ratio = tonumber(
+                macro.rollingEnergyStoredRatio) or 0,
+            rolling_mass_trend_per_tick = tonumber(
+                macro.rollingMassTrend) or 0,
+            rolling_energy_trend_per_tick = tonumber(
+                macro.rollingEnergyTrend) or 0,
+            mass_demand_satisfaction = tonumber(
+                macro.massDemandSatisfaction) or 0,
+            energy_demand_satisfaction = tonumber(
+                macro.energyDemandSatisfaction) or 0,
+            active_committed_mass_per_tick = tonumber(
+                macro.activeCommittedMassDrain) or 0,
+            active_committed_energy_per_tick = tonumber(
+                macro.activeCommittedEnergyDrain) or 0,
+            committed_mass_expansion_per_tick = tonumber(
+                macro.committedMassExpansion) or 0,
+            committed_energy_expansion_per_tick = tonumber(
+                macro.committedEnergyExpansion) or 0,
+            committed_mass_energy_per_tick = tonumber(
+                macro.committedMassEnergy) or 0,
+            committed_energy_energy_per_tick = tonumber(
+                macro.committedEnergyEnergy) or 0,
+            committed_mass_engineer_per_tick = tonumber(
+                macro.committedMassEngineer) or 0,
+            committed_energy_engineer_per_tick = tonumber(
+                macro.committedEnergyEngineer) or 0,
+            committed_mass_factory_per_tick = tonumber(
+                macro.committedMassFactory) or 0,
+            committed_energy_factory_per_tick = tonumber(
+                macro.committedEnergyFactory) or 0,
+            committed_mass_air_per_tick = tonumber(
+                macro.committedMassAir) or 0,
+            committed_energy_air_per_tick = tonumber(
+                macro.committedEnergyAir) or 0,
+            committed_mass_tech_per_tick = tonumber(
+                macro.committedMassTech) or 0,
+            committed_energy_tech_per_tick = tonumber(
+                macro.committedEnergyTech) or 0,
+            committed_mass_construction_per_tick = tonumber(
+                macro.committedMassConstruction) or 0,
+            committed_energy_construction_per_tick = tonumber(
+                macro.committedEnergyConstruction) or 0,
+            one_time_mass_reserve = tonumber(macro.oneTimeMassReserve) or 0,
+            one_time_energy_reserve = tonumber(macro.oneTimeEnergyReserve) or 0,
+            reclaim_windfall_mass = tonumber(macro.reclaimedMassDelta) or 0,
+            allocator_denied_request = tostring(
+                macro.allocatorDeniedRequest or 'none'),
+            allocator_denied_reason = tostring(
+                macro.allocatorDeniedReason or 'none'),
+            expansion_opportunities = tonumber(
+                macro.expansionOpportunityCount) or 0,
+            expansion_scheduled = tonumber(
+                macro.expansionScheduledCount) or 0,
+            engineer_target = tonumber(macro.engineerTarget) or 0,
+            factory_funded = tonumber(macro.factoryFundedCount) or 0,
+            factory_idle = tonumber(macro.factoryIdleCount) or 0,
+            tech_eta_ticks = tonumber(macro.techEtaTicks) or -1,
+            tech_admission = tostring(macro.techAdmission or 'none'),
             land_t1_completed = tonumber(macro.completedLandT1Factories) or 0,
             land_t1_building = tonumber(macro.buildingLandT1Factories) or 0,
             air_t1_completed = tonumber(macro.completedAirT1Factories) or 0,

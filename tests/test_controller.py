@@ -44,39 +44,49 @@ def make_harness() -> ControllerHarness:
                 BlueprintId = 'ueb0101',
                 Footprint = { SizeX = 5, SizeZ = 5 },
                 Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
-                Economy = { BuildTime = 300, BuildRate = 20 },
+                Economy = { BuildTime = 300, BuildCostMass = 240, BuildCostEnergy = 2100, BuildRate = 20 },
             },
             ueb0102 = {
                 BlueprintId = 'ueb0102',
                 Footprint = { SizeX = 5, SizeZ = 5 },
                 Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
-                Economy = { BuildTime = 300, BuildRate = 20 },
+                Economy = { BuildTime = 300, BuildCostMass = 210, BuildCostEnergy = 2400, BuildRate = 20 },
             },
             ueb0201 = {
                 BlueprintId = 'ueb0201',
                 General = { UpgradesFrom = 'ueb0101' },
                 Footprint = { SizeX = 5, SizeZ = 5 },
                 Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
-                Economy = { BuildTime = 2300, BuildRate = 40 },
+                Economy = { BuildTime = 2300, BuildCostMass = 1410, BuildCostEnergy = 11200, BuildRate = 40, DifferentialUpgradeCostCalculation = true },
             },
             ueb1101 = {
                 BlueprintId = 'ueb1101',
                 Footprint = { SizeX = 1, SizeZ = 1 },
                 Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
-                Economy = { BuildTime = 125 },
+                Economy = { BuildTime = 125, BuildCostMass = 75, BuildCostEnergy = 750, ProductionPerSecondEnergy = 20 },
             },
             ueb1102 = {
                 BlueprintId = 'ueb1102',
                 Footprint = { SizeX = 3, SizeZ = 3 },
                 Physics = { SkirtSizeX = 6, SkirtSizeZ = 6, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
-                Economy = { BuildTime = 400 },
+                Economy = { BuildTime = 400, BuildCostMass = 160, BuildCostEnergy = 800, ProductionPerSecondEnergy = 100 },
             },
             ueb1103 = {
                 BlueprintId = 'ueb1103',
                 Footprint = { SizeX = 1, SizeZ = 1 },
                 Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
-                Economy = { BuildTime = 60 },
+                Economy = { BuildTime = 60, BuildCostMass = 36, BuildCostEnergy = 360, ProductionPerSecondMass = 2, MaintenanceConsumptionPerSecondEnergy = 2 },
             },
+            uel0001 = { BlueprintId = 'uel0001', Economy = { BuildRate = 10, ProductionPerSecondMass = 1, ProductionPerSecondEnergy = 20 } },
+            uel0101 = { BlueprintId = 'uel0101', Economy = { BuildTime = 60, BuildCostMass = 12, BuildCostEnergy = 80 } },
+            uel0103 = { BlueprintId = 'uel0103', Economy = { BuildTime = 200, BuildCostMass = 36, BuildCostEnergy = 180 } },
+            uel0104 = { BlueprintId = 'uel0104', Economy = { BuildTime = 220, BuildCostMass = 55, BuildCostEnergy = 275 } },
+            uel0105 = { BlueprintId = 'uel0105', Economy = { BuildTime = 260, BuildCostMass = 52, BuildCostEnergy = 260, BuildRate = 5 } },
+            uel0106 = { BlueprintId = 'uel0106', Economy = { BuildTime = 120, BuildCostMass = 30, BuildCostEnergy = 120 } },
+            uel0201 = { BlueprintId = 'uel0201', Economy = { BuildTime = 300, BuildCostMass = 56, BuildCostEnergy = 266 } },
+            uea0102 = { BlueprintId = 'uea0102', Economy = { BuildTime = 500, BuildCostMass = 50, BuildCostEnergy = 2250 } },
+            uel0202 = { BlueprintId = 'uel0202', Economy = { BuildTime = 880, BuildCostMass = 198, BuildCostEnergy = 990 } },
+            uel0205 = { BlueprintId = 'uel0205', Economy = { BuildTime = 800, BuildCostMass = 160, BuildCostEnergy = 800 } },
         }
 
         function Count(tableValue)
@@ -189,16 +199,22 @@ def make_harness() -> ControllerHarness:
             energyIncome = 20,
             energyUsage = 21,
             energyRequested = 21,
+            energyStored = 3900,
             massTrend = 1,
             massStoredRatio = 0.5,
             massIncome = 2,
             massUsage = 1,
             massRequested = 1,
+            massStored = 650,
             armyStats = {
                 Economy_TotalProduced_Mass = 0,
                 Economy_TotalConsumed_Mass = 0,
                 Economy_Reclaimed_Mass = 0,
                 Economy_AccumExcess_Mass = 0,
+                Economy_TotalProduced_Energy = 0,
+                Economy_TotalConsumed_Energy = 0,
+                Economy_Reclaimed_Energy = 0,
+                Economy_AccumExcess_Energy = 0,
             },
         }
         function brain:GetArmyStartPos() return self.startX, self.startZ end
@@ -216,6 +232,7 @@ def make_harness() -> ControllerHarness:
         end
         function brain:GetEconomyTrend(resource) return resource == 'ENERGY' and self.energyTrend or self.massTrend end
         function brain:GetEconomyStoredRatio(resource) return resource == 'ENERGY' and self.energyStoredRatio or self.massStoredRatio end
+        function brain:GetEconomyStored(resource) return resource == 'ENERGY' and self.energyStored or self.massStored end
         function brain:GetEconomyIncome(resource) return resource == 'ENERGY' and self.energyIncome or self.massIncome end
         function brain:GetEconomyUsage(resource) return resource == 'ENERGY' and self.energyUsage or self.massUsage end
         function brain:GetEconomyRequested(resource) return resource == 'ENERGY' and self.energyRequested or self.massRequested end
@@ -721,6 +738,10 @@ def test_rally_only_queue_is_idle_but_active_build_and_moving_actor_are_busy() -
 
 def test_rally_integration_leaves_factory_eligible_for_production_next_step() -> None:
     harness = make_harness()
+    harness.brain.energyIncome = 30
+    harness.brain.energyRequested = 10
+    harness.brain.energyUsage = 10
+    harness.brain.energyTrend = 20
     factory = harness.unit(
         entityId=1,
         blueprintId="ueb0101",

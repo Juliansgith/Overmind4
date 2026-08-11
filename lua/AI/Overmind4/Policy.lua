@@ -443,6 +443,16 @@ local function CountClaimedLocalSites(sites, virtualReserved)
 end
 
 local function BuildAtSite(actor, role, site, priority, reason)
+    local speed = tonumber(actor and actor.moveSpeed) or 1.9
+    if speed <= 0 then speed = 1.9 end
+    local distance = math.sqrt(PositionDistanceSquared(
+        actor and actor.position,
+        site and site.position
+    ))
+    local travelTicks = distance / speed * 10
+    local buildTicks = role == 'mass_extractor' and 120
+        or (role == 'hydrocarbon' and 800 or 0)
+    local paybackTicks = role == 'mass_extractor' and 180 or 0
     return {
         kind = site.occupied == true and site.complete ~= true
             and type(site.targetToken) == 'string'
@@ -456,6 +466,10 @@ local function BuildAtSite(actor, role, site, priority, reason)
         position = site.position,
         priority = priority,
         reason = reason,
+        estimatedTravelTicks = travelTicks,
+        estimatedBuildTicks = buildTicks,
+        estimatedPaybackTicks = paybackTicks,
+        estimatedRoiTicks = travelTicks + buildTicks + paybackTicks,
     }
 end
 
@@ -1020,18 +1034,9 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         return true
     end
 
-    local completedMex = 0
-    local completedLand = 0
-    local completedHydro = 0
-    for _, unit in ipairs(units or {}) do
-        if unit.complete == true then
-            if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
-            if unit.role == 'land_factory' or unit.role == 'land_factory_t2' then
-                completedLand = completedLand + 1
-            end
-            if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
-        end
-    end
+    -- Required energy recovery owns its builder before speculative expansion
+    -- lanes are assigned.  The allocator may later deny either request, but
+    -- an unfunded/remote mex must never strand the power-recovery actor.
     if not underContact and allowPlacement and lowEnergy then
         if AssignPlacement(
             'power_generator',
@@ -1042,6 +1047,104 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             plannedPower = true
             placementIndex.power_generator = placementIndex.power_generator + 1
             counts.power_generator = (counts.power_generator or 0) + 1
+        end
+    end
+
+    -- The secured campaign may reserve one member job, but it is not a global
+    -- economy mutex.  Build a deterministic nearest-builder assignment over
+    -- every other reachable opportunity after required energy recovery.
+    local expansionAssignments = {}
+    local reservedReclaimActor = nil
+    if macro and macro.allocatorEnabled == true then
+        for _, candidate in ipairs(reclaimCandidates) do
+            for _, engineer in ipairs(engineers) do
+                if not assignedEngineers[engineer.token]
+                    and candidate.observerToken == engineer.token
+                    and ReclaimVisibleToEngineer(candidate, engineer)
+                then
+                    reservedReclaimActor = engineer.token
+                    break
+                end
+            end
+            if reservedReclaimActor then break end
+        end
+        local expansionMassBudget = tonumber(
+            macro.expansionRecurringMassBudget)
+            or tonumber(macro.availableRecurringMass)
+            or 0
+        local expansionBudget = math.floor(
+            expansionMassBudget / 0.3 + 0.00001)
+        if expansionBudget < 1
+            and (tonumber(macro.oneTimeMassReserve) or 0) >= 36
+            and (tonumber(macro.oneTimeEnergyReserve) or 0) >= 360
+        then
+            expansionBudget = 1
+        end
+        local assignedCount = 0
+        for _, site in ipairs(SortSites(massSites)) do
+            local connectedCampaignSite = campaignActive
+                and KeyInArray(macro.campaignMemberKeys, site.key)
+                and SiteSupportsLandCampaign(site)
+            if assignedCount < expansionBudget
+                and site.lost ~= true
+                and SiteIsAvailable(site, virtualReserved, false)
+                and (not connectedCampaignSite or not campaignJobPlanned)
+            then
+                local best = nil
+                local bestDistance = nil
+                for _, engineer in ipairs(engineers) do
+                    if not assignedEngineers[engineer.token]
+                        and engineer.token ~= reservedReclaimActor
+                        and CanBuild(engineer, 'mass_extractor')
+                    then
+                        local distance = PositionDistanceSquared(
+                            engineer.position,
+                            site.position
+                        )
+                        if not best or distance < bestDistance
+                            or (distance == bestDistance
+                                and tostring(engineer.token) < tostring(best.token))
+                        then
+                            best = engineer
+                            bestDistance = distance
+                        end
+                    end
+                end
+                if not best and reservedReclaimActor
+                    and TableGetn(engineers) == 1
+                then
+                    for _, engineer in ipairs(engineers) do
+                        if engineer.token == reservedReclaimActor
+                            and CanBuild(engineer, 'mass_extractor')
+                        then
+                            best = engineer
+                            break
+                        end
+                    end
+                end
+                if best and ReserveSitePlacement(
+                    'mass_extractor', site, virtualPlacements
+                ) then
+                    expansionAssignments[best.token] = site
+                    assignedEngineers[best.token] = true
+                    virtualReserved[site.key] = true
+                    assignedCount = assignedCount + 1
+                    if connectedCampaignSite then campaignJobPlanned = true end
+                end
+            end
+        end
+    end
+
+    local completedMex = 0
+    local completedLand = 0
+    local completedHydro = 0
+    for _, unit in ipairs(units or {}) do
+        if unit.complete == true then
+            if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
+            if unit.role == 'land_factory' or unit.role == 'land_factory_t2' then
+                completedLand = completedLand + 1
+            end
+            if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
         end
     end
     if not underContact and (counts.hydrocarbon or 0) < 1 then
@@ -1165,6 +1268,25 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         if not intent and placementAssignments[engineer.token] then
             intent = placementAssignments[engineer.token]
         end
+        if not intent and expansionAssignments[engineer.token] then
+            local assignedSite = expansionAssignments[engineer.token]
+            counts.mass_extractor = (counts.mass_extractor or 0) + 1
+            intent = BuildAtSite(
+                engineer,
+                'mass_extractor',
+                assignedSite,
+                22,
+                'frontier_expansion'
+            )
+            if campaignActive
+                and KeyInArray(macro.campaignMemberKeys, assignedSite.key)
+                and SiteSupportsLandCampaign(assignedSite)
+            then
+                intent.clusterKey = macro.campaignCluster
+            elseif campaignActive then
+                intent.clusterKey = nil
+            end
+        end
         if not intent and campaignActive
             and not campaignJobPlanned
             and not underContact
@@ -1283,7 +1405,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 campaignJobPlanned = true
             end
         end
-        if campaignActor and not intent then reserveCampaignActor = true end
+        if campaignActor and not intent
+            and not (macro and macro.allocatorEnabled == true)
+        then
+            reserveCampaignActor = true
+        end
 
         if not intent
             and not reserveCampaignActor
@@ -1344,7 +1470,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
 
         if not intent
             and not reserveCampaignActor
-            and not lostOutstanding
+            and (not lostOutstanding or (macro and macro.allocatorEnabled == true))
             and lowEnergy
             and allowPlacement
             and not plannedPower
@@ -1361,7 +1487,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
 
         if not intent
             and not reserveCampaignActor
-            and not lostOutstanding
+            and (not lostOutstanding or (macro and macro.allocatorEnabled == true))
             and not underContact
             and (counts.hydrocarbon or 0) < 1
             and CanBuild(engineer, 'hydrocarbon')
@@ -1448,7 +1574,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
 
         if not intent
             and not reserveCampaignActor
-            and not lostOutstanding
+            and (not lostOutstanding or (macro and macro.allocatorEnabled == true))
             and not underContact
             and CanBuild(engineer, 'mass_extractor')
         then
@@ -1474,7 +1600,8 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     )
                 elseif campaignJobPlanned then
                     for _, candidate in ipairs(SortSites(massSites)) do
-                        if candidate.frontierSelected == true
+                        if (macro.allocatorEnabled == true
+                                or candidate.frontierSelected == true)
                             and candidate.lost ~= true
                             and not KeyInArray(
                                 macro.campaignMemberKeys,
@@ -1510,6 +1637,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             if not site then
                 for _, candidate in ipairs(SortSites(massSites)) do
                     local frontierAllowed = not macro
+                        or macro.allocatorEnabled == true
                         or (candidate.frontierSelected == true
                             and candidate.lost ~= true)
                     local campaignAllowed = not campaignActive
@@ -1672,6 +1800,10 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
         and energyStored >= 0.5
         and massTrend >= 0
         and energyTrend >= 0
+    if macro and macro.allocatorEnabled == true then
+        t2Ready = macro.economyLedgerValid == true
+            and macro.techAdmission == 'admitted'
+    end
     local rallyPosition = macro and macro.rallyPosition
         or snapshot.rallyPosition
         or snapshot.basePosition
@@ -1749,6 +1881,17 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     reason = 'recovery_engineer_floor'
                     plannedEngineer = true
                     recoveryOutstanding = true
+                elseif not recoveryMode
+                    and not plannedEngineer
+                    and macro
+                    and macro.allocatorEnabled == true
+                    and macro.unlockingEngineerNeeded == true
+                    and (counts.engineer or 0) < engineerDemand
+                    and CanBuild(factory, 'engineer')
+                then
+                    role = 'engineer'
+                    reason = 'unlock_profitable_expansion'
+                    plannedEngineer = true
                 elseif not recoveryMode
                     and not plannedEngineer
                     and not massStalled
@@ -2136,6 +2279,198 @@ end
 
 Policy = {}
 
+Policy.requestEconomy = {
+    mass_extractor = { massDrain = 0.3, energyDrain = 3, massCost = 36, energyCost = 360, duration = 120 },
+    power_generator = { massDrain = 0.3, energyDrain = 3, massCost = 75, energyCost = 750, duration = 250 },
+    hydrocarbon = { massDrain = 0.2, energyDrain = 1, massCost = 160, energyCost = 800, duration = 800 },
+    land_factory = { massDrain = 0.4, energyDrain = 3.5, massCost = 240, energyCost = 2100, duration = 600 },
+    air_factory = { massDrain = 0.35, energyDrain = 4, massCost = 210, energyCost = 2400, duration = 600 },
+    land_factory_t2 = { massDrain = 1.017391, energyDrain = 7.913043, massCost = 1170, energyCost = 9100, duration = 1150 },
+    scout = { massDrain = 0.4, energyDrain = 2.666667, massCost = 12, energyCost = 80, duration = 30 },
+    artillery = { massDrain = 0.36, energyDrain = 1.8, massCost = 36, energyCost = 180, duration = 100 },
+    anti_air = { massDrain = 0.5, energyDrain = 2.5, massCost = 55, energyCost = 275, duration = 110 },
+    engineer = { massDrain = 0.4, energyDrain = 2, massCost = 52, energyCost = 260, duration = 130 },
+    lab = { massDrain = 0.5, energyDrain = 2, massCost = 30, energyCost = 120, duration = 60 },
+    tank = { massDrain = 0.373333, energyDrain = 1.773333, massCost = 56, energyCost = 266, duration = 150 },
+    interceptor = { massDrain = 0.2, energyDrain = 9, massCost = 50, energyCost = 2250, duration = 250 },
+    t2_direct_fire = { massDrain = 0.9, energyDrain = 4.5, massCost = 198, energyCost = 990, duration = 220 },
+    t2_anti_air = { massDrain = 0.8, energyDrain = 4, massCost = 160, energyCost = 800, duration = 200 },
+}
+Policy.expansionPlanningTicks = 12000
+
+Policy.ApplyAllocator = function(snapshot, intents)
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
+    if not macro or macro.allocatorEnabled ~= true then return intents end
+    local accepted = {}
+    local availableMass = math.max(0,
+        tonumber(macro.availableRecurringMass) or 0)
+    local availableEnergy = math.max(0,
+        tonumber(macro.availableRecurringEnergy) or 0)
+    local bankMass = math.max(0, tonumber(macro.oneTimeMassReserve) or 0)
+    local bankEnergy = math.max(0, tonumber(macro.oneTimeEnergyReserve) or 0)
+    local expansionMassCredit = math.max(0,
+        (tonumber(macro.expansionRecurringMassBudget) or availableMass)
+            - availableMass)
+    local expansionEnergyCredit = math.max(0,
+        (tonumber(macro.expansionRecurringEnergyBudget) or availableEnergy)
+            - availableEnergy)
+    local factorySlots = math.max(0,
+        math.floor(tonumber(macro.factoryFundedCount) or 0))
+    local factoryAccepted = 0
+    local actors = {}
+    for _, unit in ipairs(snapshot.units or {}) do
+        if type(unit.token) == 'string' then actors[unit.token] = unit end
+    end
+    local ordered = CopyArray(intents)
+    table.sort(ordered, function(a, b)
+        local ap = tonumber(a.priority) or 1000
+        local bp = tonumber(b.priority) or 1000
+        if a.kind == 'factory_build'
+            and a.reason == 'unlock_profitable_expansion'
+        then ap = 17 end
+        if a.kind == 'factory_build'
+            and a.reason == 'recovery_engineer_floor'
+        then ap = 16 end
+        if a.kind == 'factory_build'
+            and a.reason == 'persistent_air_screen'
+        then ap = 25 end
+        if b.kind == 'factory_build'
+            and b.reason == 'unlock_profitable_expansion'
+        then bp = 17 end
+        if b.kind == 'factory_build'
+            and b.reason == 'recovery_engineer_floor'
+        then bp = 16 end
+        if b.kind == 'factory_build'
+            and b.reason == 'persistent_air_screen'
+        then bp = 25 end
+        if ap == bp then
+            local aRoi = tonumber(a.estimatedRoiTicks) or 1000000000
+            local bRoi = tonumber(b.estimatedRoiTicks) or 1000000000
+            if aRoi ~= bRoi then return aRoi < bRoi end
+            return IntentActorKey(a) < IntentActorKey(b)
+        end
+        return ap < bp
+    end)
+    for _, intent in ipairs(ordered) do
+        local economic = intent.kind == 'build_structure'
+            or intent.kind == 'assist_structure'
+            or intent.kind == 'factory_build'
+            or intent.kind == 'factory_upgrade'
+        if not economic or intent.kind == 'reclaim' then
+            TableInsert(accepted, intent)
+        elseif macro.economyLedgerValid ~= true
+            and macro.economyInputValid ~= true
+        then
+            -- Fail closed on malformed or first-sample economy. Safety,
+            -- campaign movement, rally, and reclaim remain independent.
+        else
+            local role = intent.upgradeRole or intent.buildRole
+            local request = Policy.requestEconomy[role]
+            local allowed = request ~= nil
+            local requestMassDrain = request and request.massDrain or 0
+            local requestEnergyDrain = request and request.energyDrain or 0
+            local requestDuration = request and request.duration or 0
+            local structureRequest = intent.kind == 'build_structure'
+                or intent.kind == 'assist_structure'
+            if allowed and structureRequest then
+                local actor = actors[intent.actorToken]
+                local buildRate = actor and tonumber(actor.buildRate) or nil
+                if not actor
+                    or (actor.role ~= 'acu' and actor.role ~= 'engineer')
+                    or not FiniteNumber(buildRate)
+                    or buildRate <= 0
+                then
+                    allowed = false
+                else
+                    local scale = buildRate / 5
+                    requestMassDrain = requestMassDrain * scale
+                    requestEnergyDrain = requestEnergyDrain * scale
+                    requestDuration = requestDuration / scale
+                end
+            end
+            if role == 'mass_extractor'
+                and tonumber(intent.estimatedRoiTicks)
+                and tonumber(intent.estimatedRoiTicks)
+                    > Policy.expansionPlanningTicks
+            then
+                allowed = false
+            end
+            if intent.kind == 'factory_upgrade'
+                and macro.techAdmission ~= 'admitted'
+            then
+                allowed = false
+            end
+            if intent.kind == 'factory_build'
+                and intent.reason ~= 'unlock_profitable_expansion'
+                and intent.reason ~= 'recovery_engineer_floor'
+                and factoryAccepted >= factorySlots
+            then
+                allowed = false
+            end
+            if allowed then
+                local expansionRequest = structureRequest
+                    and role == 'mass_extractor'
+                local laneMass = availableMass
+                    + (expansionRequest and expansionMassCredit or 0)
+                local laneEnergy = availableEnergy
+                    + (expansionRequest and expansionEnergyCredit or 0)
+                local massGap = math.max(0,
+                    request.massCost - laneMass * requestDuration)
+                local energyGap = math.max(0,
+                    request.energyCost - laneEnergy * requestDuration)
+                local massFit = bankMass + 0.000001 >= massGap
+                local energyFit = bankEnergy + 0.000001 >= energyGap
+                if intent.kind == 'factory_build'
+                    and intent.reason ~= 'unlock_profitable_expansion'
+                    and intent.reason ~= 'recovery_engineer_floor'
+                then
+                    massFit = availableMass + 0.000001 >= requestMassDrain
+                        and massFit
+                    energyFit = availableEnergy + 0.000001 >= requestEnergyDrain
+                        and energyFit
+                elseif intent.kind == 'factory_upgrade' then
+                    massFit = availableMass + 0.000001 >= requestMassDrain
+                        and massFit
+                    energyFit = availableEnergy + 0.000001 >= requestEnergyDrain
+                        and energyFit
+                end
+                allowed = massFit and energyFit
+            end
+            if allowed then
+                local expansionRequest = structureRequest
+                    and role == 'mass_extractor'
+                local laneMass = availableMass
+                    + (expansionRequest and expansionMassCredit or 0)
+                local laneEnergy = availableEnergy
+                    + (expansionRequest and expansionEnergyCredit or 0)
+                local massGap = math.max(0,
+                    request.massCost - laneMass * requestDuration)
+                local energyGap = math.max(0,
+                    request.energyCost - laneEnergy * requestDuration)
+                local massCreditUsed = expansionRequest
+                    and math.min(expansionMassCredit, requestMassDrain)
+                    or 0
+                local energyCreditUsed = expansionRequest
+                    and math.min(expansionEnergyCredit, requestEnergyDrain)
+                    or 0
+                expansionMassCredit = expansionMassCredit - massCreditUsed
+                expansionEnergyCredit = expansionEnergyCredit - energyCreditUsed
+                availableMass = math.max(0,
+                    availableMass - (requestMassDrain - massCreditUsed))
+                availableEnergy = math.max(0,
+                    availableEnergy - (requestEnergyDrain - energyCreditUsed))
+                bankMass = math.max(0, bankMass - massGap)
+                bankEnergy = math.max(0, bankEnergy - energyGap)
+                if intent.kind == 'factory_build' then
+                    factoryAccepted = factoryAccepted + 1
+                end
+                TableInsert(accepted, intent)
+            end
+        end
+    end
+    return accepted
+end
+
 Policy.Decide = function(snapshot)
     snapshot = snapshot or {}
     local units = SortRecords(snapshot.units or {})
@@ -2231,5 +2566,5 @@ Policy.Decide = function(snapshot)
     if not underContact and not emergency and not commanderRecovery then
         RegroupDecision(snapshot, units, intents)
     end
-    return SortIntents(intents)
+    return SortIntents(Policy.ApplyAllocator(snapshot, intents))
 end

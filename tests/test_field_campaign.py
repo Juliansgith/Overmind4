@@ -1975,9 +1975,12 @@ def test_campaign_engineer_finishes_cached_area_members_before_unrelated_work() 
     assert builds[0].get("reason") == "frontier_expansion"
 
 
-def test_only_one_campaign_connected_frontier_job_is_planned_at_a_time() -> None:
+def test_one_campaign_connected_job_does_not_serialize_independent_expansion() -> None:
     second = marker("cluster-a-2", 90, 20)
-    harness, acu, engineer, combat, observation = start_campaign(extra_markers=[second])
+    independent = marker("independent", 140, 20)
+    harness, acu, engineer, combat, observation = start_campaign(
+        extra_markers=[second, independent]
+    )
     extra_engineer = harness.unit(
         entityId=3,
         blueprintId="uel0105",
@@ -1985,13 +1988,26 @@ def test_only_one_campaign_connected_frontier_job_is_planned_at_a_time() -> None
         canBuild={"ueb1103": True},
     )
     harness.brain.units = harness.lua.table_from([acu, engineer, extra_engineer, *combat])
+    harness.brain.massIncome = 2
+    harness.brain.massRequested = 0.5
+    harness.brain.massUsage = 0.5
+    harness.brain.massTrend = 1.5
+    harness.brain.energyIncome = 30
+    harness.brain.energyRequested = 10
+    harness.brain.energyUsage = 10
+    harness.brain.energyTrend = 20
+    harness.brain.massStored = 100
+    harness.brain.energyStored = 1000
     harness.brain.tick = 10
     current = reconcile(harness)
     frontier = [
         intent for intent in policy_intents(harness, current)
         if intent.get("reason") == "frontier_expansion"
     ]
-    assert frontier == []
+    assert len(frontier) == 1
+    assert frontier[0]["actorToken"] == "3:1"
+    assert frontier[0]["siteKey"] == "independent"
+    assert frontier[0].get("clusterKey") is None
 
 
 def test_cached_member_rebuild_with_cluster_none_keeps_same_campaign_identity() -> None:

@@ -637,14 +637,39 @@ def test_engineer_demand_scales_with_real_backlog_beyond_old_fixed_cap() -> None
     assert next(intent for intent in production if intent["buildRole"] == "engineer")["reason"] == "construction_capacity"
 
 
-def test_engineer_growth_is_suppressed_during_mass_stall() -> None:
+def test_mass_stall_funds_one_engineer_when_it_unlocks_profitable_mex_work() -> None:
     snapshot = macro_snapshot("engineer", "engineer")
-    snapshot["macro"].update(constructionBacklog=20, frontierWork=20, engineerDemand=12)
-    snapshot["economy"].update(massTrend=-0.1, massStoredRatio=0.05, unusedMass=0)
+    snapshot["macro"].update(
+        allocatorEnabled=True,
+        economyLedgerValid=True,
+        recurringMassIncome=0.4,
+        recurringEnergyIncome=20,
+        rollingMassRequested=0.8,
+        rollingEnergyRequested=10,
+        availableRecurringMass=0.4,
+        availableRecurringEnergy=10,
+        constructionBacklog=20,
+        frontierWork=20,
+        expansionOpportunityCount=1,
+        engineerTarget=12,
+        engineerDemand=12,
+        unlockingEngineerNeeded=True,
+        factoryFundedCount=1,
+    )
+    snapshot["sites"]["mass"].append(mass_site("unlock", 200, 20, frontier=True))
+    snapshot["economy"].update(
+        massIncome=0.4,
+        massRequested=0.8,
+        massUsage=0.4,
+        massTrend=-0.4,
+        massStoredRatio=0,
+        unusedMass=0,
+    )
 
     production = intents_of(decide(snapshot), "factory_build")
 
-    assert not [intent for intent in production if intent["buildRole"] == "engineer"]
+    assert [intent["buildRole"] for intent in production] == ["engineer"]
+    assert production[0]["reason"] == "unlock_profitable_expansion"
 
 
 def test_multiple_idle_factories_admit_only_one_engineer_increment_per_decision() -> None:

@@ -295,7 +295,7 @@ def test_economy_getter_exception_blocks_campaign_and_capacity_escalation() -> N
     assert observation.macro.campaignReady is False
     assert "economy_invalid" in plain(observation.macro.campaignReadinessBlockers)
     assert harness.controller.fieldCampaign is None
-    assert observation.macro.factoryTarget == 3
+    assert observation.macro.factoryTarget == 2
 
 
 def test_campaign_allows_one_connected_job_without_suppressing_other_idle_engineers() -> None:
@@ -537,51 +537,72 @@ def test_lost_mex_uses_nearest_builder_while_two_spares_reclaim_unique_props() -
     } == {("20:1", "prop-a"), ("10:1", "prop-b")}
 
 
-def test_income_capacity_target_is_sticky_across_busy_and_storage_oscillation() -> None:
+def test_income_capacity_target_is_rolling_and_falls_after_sustained_normalization() -> None:
     harness = make_harness()
+    harness.controller.markers.mass = lua_value(harness.lua, [])
     set_support(harness, mex=8, land=2)
     harness.brain.massIncome = 1.5
     harness.brain.massRequested = 0.5
     harness.brain.massUsage = 0.5
     harness.brain.massStoredRatio = 1.0
     first = harness.observe()
+    harness.brain.armyStats.Economy_TotalProduced_Mass = 1.5 * 300
+    harness.brain.armyStats.Economy_TotalProduced_Energy = (
+        harness.brain.energyIncome * 300
+    )
     harness.brain.tick = 300
     high = harness.observe()
     assert high.macro.factoryTarget >= 3
     assert high.macro.factoryDemand >= 3
-    harness.brain.massRequested = 1.6
-    harness.brain.massUsage = 1.5
-    harness.brain.massStoredRatio = 0.49
-    harness.brain.tick = 310
-    busy = harness.observe()
-    assert busy.macro.factoryTarget == high.macro.factoryTarget
+    harness.brain.massRequested = 0.6
+    harness.brain.massUsage = 0.6
+    harness.brain.massIncome = 0.7
+    harness.brain.massStoredRatio = 0.2
+    busy = None
+    for tick in range(310, 711, 10):
+        harness.brain.armyStats.Economy_TotalProduced_Mass += 0.7 * 10
+        harness.brain.armyStats.Economy_TotalProduced_Energy += (
+            harness.brain.energyIncome * 10
+        )
+        harness.brain.tick = tick
+        busy = harness.observe()
+    assert busy is not None
+    assert busy.macro.factoryTarget < high.macro.factoryTarget
+    assert busy.macro.factoryTarget == 2
     assert first.macro.factoryTarget <= high.macro.factoryTarget
 
 
 @pytest.mark.parametrize(
-    ("income", "stored", "expected"),
+    ("income", "stored", "expected_after_window"),
     [
         (1.49, 1.0, 2),
-        (1.5, 0.949, 2),
+        (1.5, 0.1, 3),
         (1.5, 0.95, 3),
         (float("inf"), 1.0, 2),
         (float("nan"), 1.0, 2),
     ],
 )
-def test_factory_capacity_target_has_exact_banked_income_boundaries_and_fails_closed(
+def test_factory_capacity_ignores_storage_ratio_and_requires_recurring_window(
     income: float,
     stored: float,
-    expected: int,
+    expected_after_window: int,
 ) -> None:
     harness = make_harness()
+    harness.controller.markers.mass = lua_value(harness.lua, [])
     set_support(harness, mex=8, land=2)
     harness.brain.massIncome = income
     harness.brain.massRequested = 0.0
     harness.brain.massUsage = 0.0
     harness.brain.massStoredRatio = stored
     harness.brain.massTrend = 0.0
+    first = harness.observe()
+    assert first.macro.factoryTarget == 2
+    if income == income and income != float("inf"):
+        harness.brain.armyStats.Economy_TotalProduced_Mass = income * 10
+        harness.brain.armyStats.Economy_TotalProduced_Energy = 200
+    harness.brain.tick = 10
     observation = harness.observe()
-    assert observation.macro.factoryTarget == expected
+    assert observation.macro.factoryTarget == expected_after_window
 
 
 def test_remote_lost_mex_does_not_prohibit_safe_base_factory_capacity_intent() -> None:
@@ -1075,6 +1096,7 @@ def test_upgrade_accepted_then_old_factory_idle_releases_for_immediate_retry() -
 
 def test_pending_upgrade_replaces_capacity_instead_of_ratcheting_factory_target() -> None:
     harness = make_harness()
+    harness.controller.markers.mass = lua_value(harness.lua, [])
     factories = [
         harness.unit(
             entityId=70 + index,
@@ -1086,6 +1108,16 @@ def test_pending_upgrade_replaces_capacity_instead_of_ratcheting_factory_target(
     ]
     air = harness.unit(entityId=80, blueprintId="ueb0102", position=[30, 2, 20])
     harness.brain.units = harness.lua.table_from([*factories, air])
+    harness.brain.massIncome = 2
+    harness.brain.massRequested = 0
+    harness.brain.massUsage = 0
+    harness.brain.energyIncome = 30
+    harness.brain.energyRequested = 10
+    harness.brain.energyUsage = 10
+    harness.observe()
+    harness.brain.armyStats.Economy_TotalProduced_Mass = 20
+    harness.brain.armyStats.Economy_TotalProduced_Energy = 300
+    harness.brain.tick = 10
     first = harness.observe()
     assert first.macro.factoryTarget == 4
     execute_intents(harness, [{
@@ -1104,6 +1136,9 @@ def test_pending_upgrade_replaces_capacity_instead_of_ratcheting_factory_target(
     )
     factories[0].options.focusUnit = target
     harness.brain.units = harness.lua.table_from([*factories, air, target])
+    harness.brain.armyStats.Economy_TotalProduced_Mass = 40
+    harness.brain.armyStats.Economy_TotalProduced_Energy = 600
+    harness.brain.tick = 20
     second = harness.observe()
     assert second.macro.buildingLandT2Factories == 1
     assert second.macro.factoryTarget == 4

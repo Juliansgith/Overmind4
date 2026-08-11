@@ -865,6 +865,39 @@ def test_direct_zero_field_attrition_rebuild_stamps_same_600_tick_hysteresis() -
     assert only(campaign_intents(harness, boundary), "field_campaign")["mode"] == "resume"
 
 
+def test_zero_field_rebuild_stages_cohort_only_on_atomic_resume_success() -> None:
+    harness, acu, engineer, combat, _, _ = stage_attrition_rollback()
+    harness.brain.units = harness.lua.table_from([acu, engineer])
+    harness.brain.tick = 101
+    reconcile(harness)
+    before = campaign_state(harness)
+    assert before["state"] == "rebuilding"
+    assert before["fieldTokens"] in ([], {})
+
+    harness.brain.units = harness.lua.table_from([acu, engineer, *combat])
+    harness.brain.tick = 701
+    ready = reconcile(harness)
+    resume = only(campaign_intents(harness, ready), "field_campaign")
+    assert resume["mode"] == "resume"
+    assert len(resume["actorTokens"]) == 18
+    assert campaign_state(harness)["fieldTokens"] in ([], {})
+
+    harness.calls.failAggressive = True
+    execute_intents(harness, [resume], ready)
+    failed = campaign_state(harness)
+    assert failed["state"] == "rebuilding"
+    assert failed["fieldTokens"] in ([], {})
+
+    harness.calls.failAggressive = False
+    retry_observation = reconcile(harness)
+    retry = only(campaign_intents(harness, retry_observation), "field_campaign")
+    execute_intents(harness, [retry], retry_observation)
+    committed = campaign_state(harness)
+    assert committed["state"] == "active"
+    assert len(committed["fieldTokens"]) == 18
+    assert len(committed["homeTokens"]) == 6
+
+
 @pytest.mark.parametrize("trigger", ["attrition", "no_progress"])
 @pytest.mark.parametrize("failure", ["clear", "move"])
 def test_each_rollback_trigger_is_atomic_on_command_failure_and_retryable(
@@ -912,11 +945,12 @@ def test_committed_rollback_has_600_tick_cooldown_before_repeat_attrition() -> N
     execute_intents(harness, macro_work, early_resume)
     harness.brain.tick = 102
     spending = reconcile(harness)
-    assert any(
+    assert not any(
         intent.get("kind") == "factory_build"
-        and intent.get("buildRole") == "tank"
         for intent in policy_intents(harness, spending)
     )
+    assert spending.macro.allocatorDeniedRequest == "factory_queue"
+    assert spending.macro.allocatorDeniedReason == "recurring_budget"
     harness.brain.tick = 699
     before_boundary_resume = reconcile(harness)
     assert campaign_intents(harness, before_boundary_resume) == []
