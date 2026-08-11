@@ -48,6 +48,10 @@ version = {
 }
 active_mods = { }
 """
+EVALUATION_CONTRACT_FILES = (
+    Path(__file__).resolve().with_name("parsing.py"),
+    Path(__file__).resolve().with_name("reporting.py"),
+)
 
 
 def _preferences_directory() -> Path:
@@ -100,6 +104,29 @@ def _content_hash(repository: Path) -> str:
         elif path.is_dir():
             files.extend(item for item in path.rglob("*") if item.is_file())
     return _hash_files(files, repository)
+
+
+def _evaluation_contract_hash() -> str:
+    """Fingerprint the parser schema and every parity gate used for promotion."""
+
+    return _hash_files(
+        list(EVALUATION_CONTRACT_FILES),
+        Path(__file__).resolve().parent,
+    )
+
+
+def _benchmark_config_hash(content_hash: str, evaluation_contract_hash: str) -> str:
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "overmind4_content_sha256": content_hash,
+            "evaluation_contract_sha256": evaluation_contract_hash,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest().upper()
 
 
 class MapDiscoveryError(RuntimeError):
@@ -312,6 +339,10 @@ class Runner:
             handle.write(ISOLATED_PREFS)
         created_at = deps.utc_now()
         overmind_content_sha256 = deps.content_hash(self.repository)
+        evaluation_contract_sha256 = _evaluation_contract_hash()
+        benchmark_config_sha256 = _benchmark_config_hash(
+            overmind_content_sha256, evaluation_contract_sha256
+        )
         manifest = {
             "schema_version": 1,
             "run_id": run_id,
@@ -329,6 +360,10 @@ class Runner:
                 "uid": MOD_UID,
                 "git_commit": deps.git_commit(self.repository),
                 "content_sha256": overmind_content_sha256,
+            },
+            "benchmark": {
+                "config_sha256": benchmark_config_sha256,
+                "evaluation_contract_sha256": evaluation_contract_sha256,
             },
             "config": config.document(),
             "config_sha256": _config_hash(config),
@@ -429,13 +464,15 @@ class Runner:
                 map_size_km=map_data.get("size_km", 0),
                 official_result=telemetry.official_result,
                 operational_failure=outcome.failure_reason,
+                outcome_state=outcome.state,
                 seed=config.seed,
                 spawn=(
                     "normal"
                     if config.our_slot < config.opponent_slot
                     else "swapped"
                 ),
-                benchmark_config=overmind_content_sha256,
+                benchmark_config=benchmark_config_sha256,
+                evaluation_contract_digest=evaluation_contract_sha256,
             )
         completed_at = deps.utc_now()
         artifacts_present = {

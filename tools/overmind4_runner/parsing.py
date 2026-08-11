@@ -339,6 +339,21 @@ def _has_invalid_field_encoding(line: str, prefix: str) -> bool:
     return len(names) != len(set(names))
 
 
+def _raw_field_values(line: str, prefix: str, name: str) -> tuple[str, ...]:
+    log_prefix = _LOG_PREFIX.match(line)
+    marker_at = log_prefix.end() if log_prefix else 0
+    if not line.startswith(prefix, marker_at):
+        return ()
+    values: list[str] = []
+    for token in line[marker_at:].strip().split("|")[1:]:
+        if "=" not in token:
+            continue
+        field_name, value = token.split("=", 1)
+        if field_name == name:
+            values.append(value)
+    return tuple(values)
+
+
 def _finite_nonnegative(value: str | None) -> int | float | None:
     try:
         number = float(value) if value is not None else math.nan
@@ -492,21 +507,34 @@ def _parse_operation_stream(
     reason: str | None = None
     state: dict[tuple[str, str], str] = {}
     last_tick_by_attempt: dict[tuple[str, str], int] = {}
-    opportunity_seen: set[str] = set()
+    opportunity_ticks: dict[str, int] = {}
 
     for line in lines:
         fields = _overmind_fields(line)
-        if not fields or fields.get("v") != "1" or fields.get("kind") != "operation":
+        if not fields:
             continue
-        tick = _nonnegative_integer(fields.get("tick"))
+        invalid_encoding = _has_invalid_field_encoding(line, OVERMIND_PREFIX)
+        raw_kinds = _raw_field_values(line, OVERMIND_PREFIX, "kind")
+        raw_armies = {
+            army
+            for value in _raw_field_values(line, OVERMIND_PREFIX, "army")
+            if (army := _nonnegative_integer(value)) is not None
+        }
+        if invalid_encoding:
+            if "operation" in raw_kinds and our_slot in raw_armies:
+                reason = reason or "malformed-operation-event"
+            continue
+        if fields.get("kind") != "operation":
+            continue
         army = _nonnegative_integer(fields.get("army"))
-        operation = fields.get("operation")
-        phase = fields.get("phase")
         if army != our_slot:
             continue
-        if _has_invalid_field_encoding(line, OVERMIND_PREFIX):
-            reason = reason or "malformed-operation-event"
+        if fields.get("v") != "1":
+            reason = reason or "unsupported-operation-version"
             continue
+        tick = _nonnegative_integer(fields.get("tick"))
+        operation = fields.get("operation")
+        phase = fields.get("phase")
         if (
             tick is None
             or not operation
@@ -553,17 +581,21 @@ def _parse_operation_stream(
         attempt = str(attempt_value)
         key = (operation, attempt)
         if phase == "opportunity":
-            if operation in opportunity_seen:
+            if operation in opportunity_ticks:
                 reason = reason or f"duplicate-operation-phase:{operation}:opportunity"
-            opportunity_seen.add(operation)
+            else:
+                opportunity_ticks[operation] = tick
             continue
         previous = state.get(key)
-        if previous is None and phase == "selected" and operation in opportunity_seen:
+        opportunity_tick = opportunity_ticks.get(operation)
+        if previous is None and phase == "selected" and opportunity_tick is not None:
             allowed = True
         else:
             allowed = phase in _OPERATION_TRANSITIONS.get(previous, frozenset())
         prior_tick = last_tick_by_attempt.get(key)
-        if prior_tick is not None and tick < prior_tick:
+        if opportunity_tick is not None and tick < opportunity_tick:
+            reason = reason or f"out-of-order-operation:{operation}"
+        elif prior_tick is not None and tick < prior_tick:
             reason = reason or f"out-of-order-operation:{operation}"
         elif not allowed:
             reason = reason or f"impossible-operation-transition:{operation}"

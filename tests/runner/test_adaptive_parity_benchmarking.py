@@ -9,13 +9,13 @@ import re
 from typing import Any
 
 import pytest
-from lupa.lua51 import LuaError
 
 from adaptive_parity_helpers import lua_value, plain
 from conftest import ROOT, runtime
 from test_lua_hooks import _runtime as hook_runtime
 from test_lua_hooks import _valid_args as hook_valid_args
 from tools.overmind4_runner import parsing, reporting
+from tools.overmind4_runner import runner as runner_module
 from tools.overmind4_runner.model import RunConfig
 from tools.overmind4_runner.runner import Runner
 from test_process_and_runner import _deps as runner_dependencies
@@ -25,6 +25,7 @@ RUN_ID = "parity-run"
 OBSERVER_PATH = (
     ROOT / "tools" / "autorun" / "schook" / "lua" / "Overmind4Benchmark.lua"
 )
+SIM_HOOK_PATH = ROOT / "tools" / "autorun" / "schook" / "lua" / "simInit.lua"
 REQUIRED_METRICS = {
     "mass_income",
     "energy_income",
@@ -189,7 +190,12 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
     launch = launch_path.read_text(encoding="utf-8")
 
     assert OBSERVER_PATH.is_file()
-    assert "Overmind4Benchmark.lua" in launch
+    assert SIM_HOOK_PATH.is_file()
+    sim_hook = SIM_HOOK_PATH.read_text(encoding="utf-8")
+    assert "Overmind4Benchmark.lua" in sim_hook
+    assert "Overmind4Benchmark.lua" not in launch
+    assert "GetGameTick" not in launch
+    assert "GetArmyBrain" not in launch
     observer = OBSERVER_PATH.read_text(encoding="utf-8")
     assert "OM4BENCH" in observer
     assert "CHECKPOINT_TICKS = 300" in observer
@@ -198,16 +204,10 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
     assert "Controller" not in observer
     assert "Policy" not in observer
     assert "OM4BenchmarkLatest" not in observer
-    wait_loop = re.search(
-        r"while\s+not\s+WorldIsPlaying\(\)\s+do(?P<body>.*?)^\s*end\s*$",
-        launch,
-        re.MULTILINE | re.DOTALL,
-    )
-    assert wait_loop is not None
-    assert "Overmind4Benchmark.Create" not in wait_loop.group("body")
-    assert launch.find("Overmind4Benchmark.Create") > wait_loop.end()
-    assert "specs[1].Spawn" in launch
-    assert "specs[2].Spawn" in launch
+    assert "Overmind4Benchmark.Create" in sim_hook
+    assert "PreviousBeginSession" in sim_hook
+    assert "Overmind4BenchmarkArmyOne" in launch
+    assert "Overmind4BenchmarkArmyTwo" in launch
     for forbidden in (
         r"\bIssue[A-Za-z0-9_]*\b",
         r"\bCreateUnit\b",
@@ -221,45 +221,22 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
         assert re.search(forbidden, observer) is None, forbidden
 
 
-def test_launch_hook_repeats_300_tick_samples_for_nondefault_actual_army_slots() -> None:
-    lua, _, _ = hook_runtime(
-        hook_valid_args(
-            **{
-                "/aitest": "4:overmind4:1:1,2:adaptive:1:2",
-            }
-        )
+def test_launch_hook_only_plumbs_nondefault_observer_slots_into_session_options() -> None:
+    lua, _, launched = hook_runtime(
+        hook_valid_args(**{"/aitest": "4:overmind4:1:1,2:adaptive:1:2"})
     )
-    step_calls: list[tuple[Any, ...]] = []
-
-    def stop_after_three_samples(*arguments: Any) -> None:
-        step_calls.append(arguments)
-        if len(step_calls) == 3:
-            raise RuntimeError("observer-stop")
-
-    ticks = iter((300, 600, 900))
-    lua.globals().benchmark_stub.Step = stop_after_three_samples
-    lua.globals().GetGameTick = lambda: next(ticks)
-    lua.globals().coroutine.yield_ = lambda *_: None
-    lua.execute("coroutine.yield = coroutine.yield_")
     lua.execute(
         (ROOT / "tools" / "autorun" / "schook" / "lua" / "SinglePlayerLaunch.lua").read_text(
             encoding="utf-8"
         )
     )
+
     lua.globals().StartCommandLineSession("SCMP_007", False)
 
-    for callback in list(lua.globals().harness_threads):
-        try:
-            callback()
-        except (LuaError, RuntimeError) as error:
-            assert "observer-stop" in str(error)
-
-    creates = list(lua.globals().benchmark_creates)
-    assert len(creates) == 1
-    assert len(creates[0]) == 3
-    assert creates[0][0] == "run-1"
-    assert [creates[0][1][index] for index in range(1, 3)] == [4, 2]
-    assert [int(arguments[1]) for arguments in step_calls] == [300, 600, 900]
+    options = launched[0].scenarioInfo.Options
+    assert options.Overmind4BenchmarkRunId == "run-1"
+    assert options.Overmind4BenchmarkArmyOne == 4
+    assert options.Overmind4BenchmarkArmyTwo == 2
 
 
 def _benchmark_lua_fixture(lua: Any) -> None:
@@ -696,6 +673,77 @@ def test_overmind_force_metrics_fail_closed_when_public_snapshot_is_unavailable(
     )
 
 
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+@pytest.mark.parametrize(
+    ("method", "replacement", "reason"),
+    (
+        ("GetEconomyIncome", "function() error('economy unavailable') end", "economy-api-failed"),
+        ("GetEconomyStored", "function() return 'not-a-number' end", "economy-api-failed"),
+        ("GetArmyStat", "function() error('stats unavailable') end", "army-stat-api-failed"),
+        (
+            "GetBlueprintStat",
+            "function() error('blueprint stats unavailable') end",
+            "blueprint-stat-api-failed",
+        ),
+        ("GetListOfUnits", "function() error('units unavailable') end", "unit-list-api-failed"),
+        ("GetListOfUnits", "function() return nil end", "unit-list-api-failed"),
+    ),
+)
+def test_required_observer_api_errors_emit_one_integrity_marker_and_keep_checkpoint_framing(
+    method: str,
+    replacement: str,
+    reason: str,
+) -> None:
+    lua = runtime()
+    _benchmark_lua_fixture(lua)
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+    emitted: list[str] = []
+    observer = lua.globals().Overmind4Benchmark.Create(
+        RUN_ID, lua.table_from([1]), emitted.append
+    )
+    brain = lua.globals().MakeBenchmarkBrain(1)
+    brain[method] = lua.eval(replacement)
+
+    lua.globals().Overmind4Benchmark.SampleArmy(observer, brain, 1, 300)
+
+    integrity = [line for line in emitted if "|kind=integrity|" in line]
+    checkpoints = [line for line in emitted if "|kind=checkpoint|" in line]
+    assert integrity == [
+        f"OM4BENCH|v=1|kind=integrity|run={RUN_ID}|tick=300|army=1|"
+        f"reason={reason}|source=observer"
+    ]
+    assert len(checkpoints) == 1
+
+
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+def test_either_army_brain_lookup_failure_is_integrity_rejected_without_stopping_other_sample() -> None:
+    lua = runtime()
+    _benchmark_lua_fixture(lua)
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+    emitted: list[str] = []
+    valid = lua.globals().MakeBenchmarkBrain(1)
+
+    def brain_lookup(army: int) -> Any:
+        if army == 2:
+            raise RuntimeError("opponent brain unavailable")
+        return valid
+
+    lua.globals().GetArmyBrain = brain_lookup
+    observer = lua.globals().Overmind4Benchmark.Create(
+        RUN_ID, lua.table_from([1, 2]), emitted.append
+    )
+
+    assert lua.globals().Overmind4Benchmark.Step(observer, 300) is True
+
+    assert any("|kind=checkpoint|" in line and "|army=1|" in line for line in emitted)
+    assert any(
+        "|kind=integrity|" in line
+        and "|army=2|" in line
+        and "|reason=army-brain-unavailable|" in line
+        for line in emitted
+    )
+
+
 @pytest.mark.skipif(not BENCHMARK_SCHEMA_READY, reason="benchmark parser RED schema missing")
 class TestBenchmarkParsing:
     def test_parser_collects_both_armies_at_each_checkpoint_in_tick_army_order(self) -> None:
@@ -743,6 +791,20 @@ class TestBenchmarkParsing:
                 isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
                 for value in checkpoint["metrics"].values()
             )
+
+    def test_crlf_checkpoint_chunks_parse_without_leaking_carriage_returns(self) -> None:
+        chunks = (
+            benchmark_line(300, 2) + "\r",
+            "\n" + benchmark_line(300, 1) + "\r\n",
+        )
+
+        telemetry = parsing.parse_log("".join(chunks), RUN_ID, our_slot=1)
+
+        assert telemetry.benchmark_integrity_reason is None
+        assert [(item.tick, item.army) for item in telemetry.benchmark_checkpoints] == [
+            (300, 1),
+            (300, 2),
+        ]
 
     def test_missing_army_duplicate_and_out_of_order_checkpoints_fail_closed(self) -> None:
         cases = {
@@ -886,6 +948,54 @@ class TestBenchmarkParsing:
             105,
         ]
 
+    def test_selection_before_its_seen_opportunity_tick_fails_closed(self) -> None:
+        text = "\n".join(
+            (
+                operation_line(100, "mex-1", "opportunity"),
+                operation_line(50, "mex-1", "selected"),
+            )
+        )
+
+        telemetry = parsing.parse_log(text, RUN_ID, our_slot=1)
+
+        assert telemetry.operation_integrity_reason == "out-of-order-operation:mex-1"
+        assert [event.tick for event in telemetry.operation_events] == [100, 50]
+
+    @pytest.mark.parametrize(
+        "malformed",
+        (
+            operation_line(100, "mex-1", "opportunity").replace("v=1", "v=2"),
+            operation_line(100, "mex-1", "opportunity").replace("|tick=100", ""),
+            operation_line(100, "mex-1", "opportunity").replace("|phase=opportunity", ""),
+            operation_line(100, "mex-1", "opportunity") + "|army=2",
+        ),
+    )
+    def test_own_wrong_version_or_malformed_operation_records_fail_closed(
+        self, malformed: str
+    ) -> None:
+        telemetry = parsing.parse_log(malformed, RUN_ID, our_slot=1)
+
+        assert telemetry.operation_integrity_reason is not None
+
+    def test_crlf_operation_records_preserve_causal_order_and_typed_fields(self) -> None:
+        text = "\r\n".join(
+            (
+                operation_line(100, "mex-1", "opportunity"),
+                operation_line(110, "mex-1", "selected", attempt=0),
+                operation_line(120, "mex-1", "admitted", response_ticks=10),
+            )
+        ) + "\r\n"
+
+        telemetry = parsing.parse_log(text, RUN_ID, our_slot=1)
+
+        assert telemetry.operation_integrity_reason is None
+        assert [event.phase for event in telemetry.operation_events] == [
+            "opportunity",
+            "selected",
+            "admitted",
+        ]
+        assert telemetry.operation_events[-1].fields["response_ticks"] == 10
+
     @pytest.mark.parametrize(
         "malformed",
         (
@@ -912,10 +1022,16 @@ class TestBenchmarkParsing:
             .replace("army=1", "army=2")
             + "|operation=duplicate"
         )
+        opponent_wrong_version = (
+            operation_line(100, "opponent-v2", "opportunity")
+            .replace("army=1", "army=2")
+            .replace("v=1", "v=2")
+        )
         text = "\n".join(
             (
                 other_run_duplicate,
                 opponent_duplicate,
+                opponent_wrong_version,
                 benchmark_line(300, 1),
                 benchmark_line(300, 2),
                 operation_line(100, "our-op", "opportunity"),
@@ -932,6 +1048,23 @@ class TestBenchmarkParsing:
 def test_reporting_exposes_a_public_parity_gate_api() -> None:
     assert callable(getattr(reporting, "evaluate_parity", None))
     assert callable(getattr(reporting, "evaluate_promotion", None))
+
+
+def test_benchmark_provenance_digest_covers_parser_reporting_and_changes_combined_config() -> None:
+    contract = runner_module._evaluation_contract_hash()
+
+    assert {path.name for path in runner_module.EVALUATION_CONTRACT_FILES} == {
+        "parsing.py",
+        "reporting.py",
+    }
+    assert contract == runner_module._evaluation_contract_hash()
+    assert re.fullmatch(r"[0-9A-F]{64}", contract)
+    assert runner_module._benchmark_config_hash("content-a", contract) != (
+        runner_module._benchmark_config_hash("content-b", contract)
+    )
+    assert runner_module._benchmark_config_hash("content-a", contract) != (
+        runner_module._benchmark_config_hash("content-a", "F" * 64)
+    )
 
 
 IAN_FLOORS = {
@@ -1360,8 +1493,101 @@ def test_real_runner_automatically_parses_evaluates_and_writes_live_parity_artif
     assert len(report["operation_events"]) == 7
     assert report["parity"]["classification"] == "macro-parity-win"
     assert report["parity"]["matchEligible"] is True
+    assert report["parity"]["benchmarkConfig"]
+    assert report["parity"]["benchmarkConfig"] != "content123"
+    assert report["parity"]["evaluationContractDigest"]
+    manifest = json.loads(result.paths.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["benchmark"]["config_sha256"] == report["parity"]["benchmarkConfig"]
+    assert (
+        manifest["benchmark"]["evaluation_contract_sha256"]
+        == report["parity"]["evaluationContractDigest"]
+    )
     markdown = result.paths.report_markdown_path.read_text(encoding="utf-8")
     assert "macro-parity-win" in markdown
+
+
+@pytest.mark.parametrize(
+    ("expected_state", "observation", "log_suffix"),
+    (
+        (
+            "crash",
+            parsing.ProcessObservation(exit_code=1, wall_seconds=2),
+            "",
+        ),
+        (
+            "wall-timeout",
+            parsing.ProcessObservation(
+                exit_code=None, wall_seconds=300, wall_timeout=True
+            ),
+            "",
+        ),
+        (
+            "malformed",
+            parsing.ProcessObservation(exit_code=0, wall_seconds=2),
+            '\nJsonStats {"stats":[',
+        ),
+    ),
+)
+def test_runner_rejects_nonterminal_outcome_even_when_benchmark_stream_is_complete(
+    tmp_path: Path,
+    expected_state: str,
+    observation: parsing.ProcessObservation,
+    log_suffix: str,
+) -> None:
+    live_log = "\n".join(
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-fixed|map=SCMP_007",
+            "OM4|v=1|kind=lifecycle|army=1|event=created|plan=none",
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session",
+            "OM4HARNESS|v=1|kind=speed|run=run-fixed|requested=25|sim=1",
+            passing_parity_log(run_id="run-fixed"),
+            "OM4|v=1|kind=lifecycle|army=1|event=terminal|result=victory",
+            "OM4HARNESS|v=1|kind=result|run=run-fixed|army=1|"
+            "result=victory 10|sim=1200",
+        )
+    ) + log_suffix
+
+    class InvalidOutcomeMonitor:
+        def wait(
+            self,
+            process: Any,
+            log_path: Path,
+            wall_limit: float,
+            **_: Any,
+        ) -> parsing.ProcessObservation:
+            del process, wall_limit
+            log_path.write_text(live_log, encoding="utf-8")
+            return observation
+
+        def stop_owned(self, process: Any) -> tuple[int | None, bool]:
+            del process
+            return 0, False
+
+    deps, _, _, _ = runner_dependencies(tmp_path)
+    deps = replace(
+        deps,
+        monitor=InvalidOutcomeMonitor(),
+        map_fingerprint=lambda _: {
+            "version": 3,
+            "sha256": "map123",
+            "size_km": 20,
+        },
+    )
+
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(opponent_ai="adaptive", seed=7777, sim_time_limit=1200),
+        tmp_path / "artifacts",
+        dry_run=False,
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.state == expected_state
+    report = json.loads(result.paths.report_json_path.read_text(encoding="utf-8"))
+    assert report["parity"]["classification"] == "operational-reject"
+    assert report["parity"]["matchEligible"] is False
+    assert report["parity"]["failures"] == [
+        f"invalid-outcome-state:{expected_state}"
+    ]
 
 
 @pytest.mark.skipif(
@@ -1696,6 +1922,53 @@ class TestParityReporting:
         assert rejected["matchEligible"] is False
         assert rejected["promotable"] is False
 
+    @pytest.mark.parametrize(
+        "outcome_state",
+        (
+            "crash",
+            "wall-timeout",
+            "sim-timeout",
+            "malformed",
+            "load-error",
+            "desync",
+            "missing-result",
+        ),
+    )
+    def test_every_nonterminal_outcome_state_rejects_even_complete_passing_telemetry(
+        self, outcome_state: str
+    ) -> None:
+        result = reporting.evaluate_parity(
+            passing_parity_telemetry(),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="victory",
+            operational_failure=None,
+            outcome_state=outcome_state,
+        )
+
+        assert result["classification"] == "operational-reject"
+        assert result["matchEligible"] is False
+        assert result["failures"] == [f"invalid-outcome-state:{outcome_state}"]
+
+    @pytest.mark.parametrize("outcome_state", ("win", "loss", "draw"))
+    def test_only_valid_terminal_outcome_states_enter_macro_evaluation(
+        self, outcome_state: str
+    ) -> None:
+        official = {"win": "victory", "loss": "defeat", "draw": "draw"}[
+            outcome_state
+        ]
+        result = reporting.evaluate_parity(
+            passing_parity_telemetry(),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result=official,
+            outcome_state=outcome_state,
+        )
+
+        assert result["classification"] != "operational-reject"
+
     def test_json_report_contains_checkpoints_operations_and_parity_without_feeding_ai(self) -> None:
         telemetry = passing_parity_telemetry()
         parity = reporting.evaluate_parity(
@@ -1742,6 +2015,8 @@ class TestParityReporting:
                     official_result="victory",
                     seed=seed,
                     spawn=spawn,
+                    benchmark_config="benchmark-a",
+                    evaluation_contract_digest="contract-a",
                 )
                 assert result["matchEligible"] is True
                 assert result["promotable"] is False
@@ -1762,6 +2037,8 @@ class TestParityReporting:
             official_result="defeat",
             seed=7777,
             spawn="normal",
+            benchmark_config="benchmark-a",
+            evaluation_contract_digest="contract-a",
         )
         wrong_spawn = reporting.evaluate_parity(
             passing_parity_telemetry(),
@@ -1771,6 +2048,8 @@ class TestParityReporting:
             official_result="victory",
             seed=7779,
             spawn="third",
+            benchmark_config="benchmark-a",
+            evaluation_contract_digest="contract-a",
         )
         assert parity_loss["matchEligible"] is False
         invalid_matrices = (
@@ -1786,8 +2065,24 @@ class TestParityReporting:
                 ({**match, "benchmarkConfig": "different-build"} if index == 4 else match)
                 for index, match in enumerate(matches)
             ],
+            [
+                (
+                    {**match, "evaluationContractDigest": "different-contract"}
+                    if index == 4
+                    else match
+                )
+                for index, match in enumerate(matches)
+            ],
+            [{**match, "benchmarkConfig": None} for match in matches],
+            [{**match, "benchmarkConfig": ""} for match in matches],
+            [{**match, "evaluationContractDigest": None} for match in matches],
+            [{**match, "evaluationContractDigest": ""} for match in matches],
         )
         for invalid in invalid_matrices:
             rejected = reporting.evaluate_promotion(invalid)
             assert rejected["promotable"] is False
             assert rejected["failures"]
+
+        reversed_order = reporting.evaluate_promotion(list(reversed(matches)))
+        assert reversed_order["promotable"] is True
+        assert reversed_order["passed"] == 8

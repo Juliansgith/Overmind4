@@ -165,14 +165,22 @@ def evaluate_parity(
     map_size_km: int | float,
     official_result: str | None,
     operational_failure: str | None = None,
+    outcome_state: str | None = None,
     seed: int | None = None,
     spawn: str | None = None,
     benchmark_config: str | None = None,
+    evaluation_contract_digest: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate one observer-only match against the fixed parity contract."""
 
+    outcome_failure = (
+        f"invalid-outcome-state:{outcome_state}"
+        if outcome_state is not None and outcome_state not in {"win", "loss", "draw"}
+        else None
+    )
     integrity_failure = (
         operational_failure
+        or outcome_failure
         or telemetry.benchmark_integrity_reason
         or telemetry.operation_integrity_reason
         or (None if telemetry.benchmark_checkpoints else "missing-benchmark-stream")
@@ -189,7 +197,9 @@ def evaluate_parity(
         "seed": seed,
         "spawn": spawn,
         "benchmarkConfig": benchmark_config,
+        "evaluationContractDigest": evaluation_contract_digest,
         "officialResult": official_result,
+        "outcomeState": outcome_state,
     }
     if integrity_failure:
         return result
@@ -263,9 +273,28 @@ def evaluate_promotion(matches: list[dict[str, Any]]) -> dict[str, Any]:
     seen: set[tuple[object, object, object]] = set()
     failures: list[str] = []
     passed = 0
-    benchmark_configs = {match.get("benchmarkConfig") for match in matches}
-    if len(benchmark_configs) > 1:
+    benchmark_configs = [match.get("benchmarkConfig") for match in matches]
+    valid_benchmark_configs = {
+        value for value in benchmark_configs if isinstance(value, str) and value.strip()
+    }
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in benchmark_configs
+    ):
+        failures.append("missing-benchmark-config")
+    elif len(valid_benchmark_configs) != 1:
         failures.append("mixed-benchmark-config")
+    contract_digests = [match.get("evaluationContractDigest") for match in matches]
+    valid_contract_digests = {
+        value for value in contract_digests if isinstance(value, str) and value.strip()
+    }
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in contract_digests
+    ):
+        failures.append("missing-evaluation-contract")
+    elif len(valid_contract_digests) != 1:
+        failures.append("mixed-evaluation-contract")
     for match in matches:
         key = (match.get("mapSizeKm"), match.get("spawn"), match.get("seed"))
         if key in seen:

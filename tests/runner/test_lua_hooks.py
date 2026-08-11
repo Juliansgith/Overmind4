@@ -11,6 +11,7 @@ from tools.overmind4_runner.runner import ISOLATED_PREFS
 
 ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / "tools" / "autorun" / "schook" / "lua" / "SinglePlayerLaunch.lua"
+SIM_HOOK = ROOT / "tools" / "autorun" / "schook" / "lua" / "simInit.lua"
 RESULT_HOOK = ROOT / "tools" / "autorun" / "schook" / "lua" / "ui" / "game" / "gameresult.lua"
 UID = "0d46fbb2-beeb-4bde-b3c6-8bac28232a4b"
 
@@ -34,8 +35,6 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     launched: list[Any] = []
     loaded_maps: list[str] = []
     harness_threads: list[Any] = []
-    benchmark_creates: list[tuple[Any, ...]] = []
-    benchmark_steps: list[tuple[Any, ...]] = []
 
     scenario = lua.table_from(
         {
@@ -101,18 +100,6 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     colors = lua.table_from(
         {"GameColors": lua.table_from({"PlayerColors": lua.table_from(list(range(1, 17)))})}
     )
-    benchmark_stub = lua.table()
-
-    def benchmark_create(*arguments: Any) -> Any:
-        benchmark_creates.append(arguments)
-        return lua.table_from({"runId": arguments[0] if arguments else None})
-
-    def benchmark_step(*arguments: Any) -> None:
-        benchmark_steps.append(arguments)
-
-    benchmark_stub.Create = benchmark_create
-    benchmark_stub.Step = benchmark_step
-
     def importer(path: str) -> Any:
         normalized = path.lower()
         if normalized == "/lua/ui/maputil.lua":
@@ -125,8 +112,6 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
             return colors
         if normalized == "/lua/user/prefs.lua":
             return prefs
-        if normalized.endswith("/overmind4benchmark.lua"):
-            return lua.table_from({"Overmind4Benchmark": benchmark_stub})
         raise AssertionError(f"unexpected import: {path}")
 
     lua.globals().import_ = importer
@@ -152,10 +137,45 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     lua.globals().table.getn = lambda value: len(value)
     lua.globals().loaded_maps = loaded_maps
     lua.globals().harness_threads = harness_threads
-    lua.globals().benchmark_stub = benchmark_stub
-    lua.globals().benchmark_creates = benchmark_creates
-    lua.globals().benchmark_steps = benchmark_steps
     return lua, logs, launched
+
+
+def _sim_runtime(
+    options: dict[str, object] | None,
+) -> tuple[LuaRuntime, list[str], list[Any], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    logs: list[str] = []
+    begin_calls: list[Any] = []
+    threads: list[Any] = []
+    creates: list[tuple[Any, ...]] = []
+    steps: list[tuple[Any, ...]] = []
+    benchmark = lua.table()
+
+    def create(*arguments: Any) -> Any:
+        creates.append(arguments)
+        return lua.table_from({"runId": arguments[0]})
+
+    def step(*arguments: Any) -> None:
+        steps.append(arguments)
+
+    benchmark.Create = create
+    benchmark.Step = step
+    lua.globals().import_ = lambda path: (
+        lua.table_from({"Overmind4Benchmark": benchmark})
+        if path.lower().endswith("/overmind4benchmark.lua")
+        else (_ for _ in ()).throw(AssertionError(f"unexpected sim import: {path}"))
+    )
+    lua.execute("import = import_")
+    lua.globals().LOG = lambda line: logs.append(str(line))
+    lua.globals().ScenarioInfo = lua.table_from(
+        {"Options": lua.table_from(options or {})}
+    )
+    lua.globals().BeginSession = lambda: begin_calls.append("stock") or "stock-result"
+    lua.globals().ForkThread = lambda callback: threads.append(callback)
+    lua.globals().GetGameTick = lambda: 300
+    lua.globals().WaitTicks = lambda _: None
+    lua.globals().table.getn = lambda value: len(value)
+    return lua, logs, threads, creates, steps
 
 
 def _valid_args(**overrides: str) -> dict[str, str]:
@@ -181,10 +201,81 @@ def test_single_player_hook_is_narrow_and_not_a_wholesale_source_copy() -> None:
     assert "GetRandomName" not in source
     assert "FixupMapName(mapName)" in source
     assert "VerifyScenarioConfiguration(scenario)" in source
+    assert "Overmind4Benchmark.lua" not in source
+    assert "Overmind4Benchmark.Create" not in source
+    assert "GetArmyBrain" not in source
+    assert "GetGameTick" not in source
+
+
+def test_benchmark_observer_is_installed_only_from_the_simulation_state_hook() -> None:
+    launch_source = HOOK.read_text(encoding="utf-8")
+    sim_source = SIM_HOOK.read_text(encoding="utf-8")
+
+    assert "Overmind4Benchmark.lua" not in launch_source
+    assert "Overmind4Benchmark.Create" not in launch_source
+    assert "GetArmyBrain" not in launch_source
+    assert "GetGameTick" not in launch_source
+    assert "Overmind4Benchmark" in sim_source
+    assert "GetGameTick" in sim_source
+    assert "WaitTicks" in sim_source
+    assert "local PreviousBeginSession = BeginSession" in sim_source
+
+
+def test_sim_hook_preserves_stock_begin_session_and_samples_configured_actual_slots() -> None:
+    lua, _, threads, creates, steps = _sim_runtime(
+        {
+            "Overmind4BenchmarkRunId": "run-1",
+            "Overmind4BenchmarkArmyOne": 4,
+            "Overmind4BenchmarkArmyTwo": 2,
+        }
+    )
+    ticks = iter((300, 600, 900))
+    lua.globals().GetGameTick = lambda: next(ticks)
+
+    def stop_after_three(*arguments: Any) -> None:
+        steps.append(arguments)
+        if len(steps) == 3:
+            raise RuntimeError("observer-stop")
+
+    lua.execute(SIM_HOOK.read_text(encoding="utf-8"))
+    # Replace the imported stub's method after the hook has captured its table.
+    lua.globals().import_("/lua/Overmind4Benchmark.lua").Overmind4Benchmark.Step = (
+        stop_after_three
+    )
+
+    assert lua.globals().BeginSession() == "stock-result"
+    assert len(threads) == 1
+    with pytest.raises((LuaError, RuntimeError), match="observer-stop"):
+        threads[0]()
+
+    assert len(creates) == 1
+    assert creates[0][0] == "run-1"
+    assert [creates[0][1][index] for index in range(1, 3)] == [4, 2]
+    assert [int(arguments[1]) for arguments in steps] == [300, 600, 900]
+
+
+def test_sim_hook_does_not_install_observer_without_complete_harness_config() -> None:
+    for options in (
+        None,
+        {"Overmind4BenchmarkRunId": "run-1"},
+        {
+            "Overmind4BenchmarkRunId": "run-1",
+            "Overmind4BenchmarkArmyOne": 1,
+            "Overmind4BenchmarkArmyTwo": 1,
+        },
+    ):
+        lua, _, threads, creates, _ = _sim_runtime(options)
+        lua.execute(SIM_HOOK.read_text(encoding="utf-8"))
+
+        assert lua.globals().BeginSession() == "stock-result"
+        assert threads == []
+        assert creates == []
 
 
 def test_hook_executes_under_lua51_and_builds_fair_isolated_two_ai_session() -> None:
     lua, logs, launched = _runtime(_valid_args())
+    assert lua.globals().GetArmyBrain is None
+    assert lua.globals().GetGameTick is None
     lua.execute(HOOK.read_text(encoding="utf-8"))
 
     lua.globals().StartCommandLineSession("SCMP_007", False)
