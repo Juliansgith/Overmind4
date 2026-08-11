@@ -7794,6 +7794,10 @@ Controller.Reconcile = function(controller, observation)
 
     if controller.fieldCampaignEnabled == true then
         controller.legacyFrontierRetirementPending = false
+    end
+    if controller.fieldCampaignEnabled == true
+        and controller.fieldCampaign ~= nil
+    then
         if controller.frontierMission
             and not ClearFrontierMission(controller)
         then
@@ -7829,6 +7833,10 @@ Controller.Reconcile = function(controller, observation)
             if TableGetn(survivors) == 0 then
                 controller.frontierMission = nil
             end
+        end
+    elseif controller.fieldCampaignEnabled == true then
+        for token in pairs(controller.frontierAssignments) do
+            controller.frontierAssignments[token] = nil
         end
     end
 

@@ -2255,6 +2255,43 @@ def test_enabling_campaign_retires_a_preexisting_legacy_frontier_mission_once(
     assert actor_tokens_from_call(harness.calls.clear[len(harness.calls.clear)]) == [legacy_token]
 
 
+@pytest.mark.parametrize(
+    "campaign_state",
+    ["awaiting_order", "mobilizing", "active", "recalled"],
+)
+def test_every_live_campaign_state_retires_a_legacy_frontier_mission(
+    campaign_state: str,
+) -> None:
+    harness, _, _, _, _ = start_campaign()
+    _, home = expected_initial_cohorts(24, 2)
+    legacy_token = home[0]
+    harness.controller.fieldCampaign.state = campaign_state
+    harness.controller.frontierMission = lua_value(
+        harness.lua,
+        {
+            "engineerToken": "2:1",
+            "clusterKey": "legacy-cluster",
+            "escortTokens": [legacy_token],
+            "issuedTick": 0,
+        },
+    )
+    harness.controller.frontierAssignments[legacy_token] = lua_value(
+        harness.lua,
+        {
+            "engineerToken": "2:1",
+            "clusterKey": "legacy-cluster",
+            "issuedTick": 0,
+        },
+    )
+    harness.brain.tick = 10
+
+    reconcile(harness)
+
+    assert harness.controller.frontierMission is None
+    assert harness.controller.frontierAssignments[legacy_token] is None
+    assert actor_tokens_from_call(harness.calls.clear[len(harness.calls.clear)]) == [legacy_token]
+
+
 def test_recalled_campaign_stays_in_emergency_when_objective_temporarily_disappears() -> None:
     harness, acu, _, _, observation = start_campaign()
     activate_campaign(harness, observation)
