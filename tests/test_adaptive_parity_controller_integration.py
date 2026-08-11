@@ -2578,6 +2578,8 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
         cargo=[cargo],
     )
     harness.brain.units = harness.lua.table_from([transport, cargo])
+    harness.observe()
+    harness.brain.units = harness.lua.table_from([transport])
     harness.controller.markers.mass = lua_value(
         harness.lua,
         [
@@ -2607,6 +2609,9 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
             "retryCount": 0,
             "requireLiveDropValidation": True,
         },
+    )
+    harness.controller.transportCargoRefs = harness.lua.table_from(
+        {"airlift:front": harness.lua.table_from({"32:1": cargo})}
     )
     harness.lua.execute("Policy.Decide = function() return {} end")
 

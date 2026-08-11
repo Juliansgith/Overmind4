@@ -3816,9 +3816,9 @@ ESCALATION.UpgradeAccepted = function(controller, operation, record)
     return ESCALATION.UpgradeCommandMatches(operation, actor)
 end
 
-local function LiveOwnedReference(controller, token, expectedRole)
+local function LiveOwnedReference(controller, token, expectedRole, storedReference)
     if type(token) ~= 'string' then return nil, nil end
-    local actor = controller.unitRefs[token]
+    local actor = storedReference or controller.unitRefs[token]
     if not actor
         or actor.Dead == true
         or SafeCall(true, actor.BeenDestroyed, actor) == true
@@ -7858,6 +7858,7 @@ Controller.Create = function(brain)
         transportMissions = {},
         transportHistory = {},
         transportDeliveries = {},
+        transportCargoRefs = {},
         bomberMissions = {},
         enemyRefs = {},
         operationLifecycle = {},
@@ -9033,6 +9034,7 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
                     siteKey = mission.siteKey,
                 }
                 controller.transportMissions[missionId] = nil
+                controller.transportCargoRefs[missionId] = nil
             elseif advanced then
                 if advanced.state ~= previousState then
                     ESCALATION.ProgressOperation(controller, mission)
@@ -11145,6 +11147,11 @@ ESCALATION.ExecuteTransportLoad = function(controller, intent, records, usedActo
         mission, { kind = 'load_ordered', tick = CurrentTick(controller) }
     ) or mission
     controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
+    local cargoRefs = {}
+    for index, token in ipairs(intent.cargoTokens or {}) do
+        cargoRefs[token] = cargo[index]
+    end
+    controller.transportCargoRefs[intent.missionId] = cargoRefs
     if type(intent.siteKey) == 'string' then
         controller.reservations[intent.siteKey] = {
             actorToken = intent.cargoTokens[1],
@@ -11206,9 +11213,15 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     if not ok then return false end
     local cargoToken = (mission.cargoTokens or {})[1]
     local cargoRecord = cargoToken and records[cargoToken] or nil
-    local cargoActor = cargoRecord
-        and LiveOwnedActor(controller, cargoToken, cargoRecord, 'engineer')
-        or nil
+    local cargoActor = nil
+    if cargoRecord then
+        cargoActor = LiveOwnedActor(controller, cargoToken, cargoRecord, 'engineer')
+    elseif cargoToken then
+        cargoActor = LiveOwnedReference(
+            controller, cargoToken, 'engineer',
+            ((controller.transportCargoRefs or {})[intent.missionId] or {})[cargoToken]
+        )
+    end
     local mexBlueprint = Catalog.IdFor('mass_extractor')
     local buildPosition = site and TerrainPosition(site.position) or nil
     local buildQueued = cargoActor and mexBlueprint and buildPosition
