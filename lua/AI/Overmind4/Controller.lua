@@ -3294,8 +3294,9 @@ local function ExecuteStructure(controller, intent, record)
     for index, candidate in ipairs(candidates) do
         if index > 8 then break end
         local probe = TerrainPosition(candidate)
-        if probe and SafeCall(false, controller.brain.CanBuildStructureAt,
-                controller.brain, blueprintId, probe) == true
+        if probe and (intent.reason == 'airlift_mex'
+                or SafeCall(false, controller.brain.CanBuildStructureAt,
+                    controller.brain, blueprintId, probe) == true)
         then
             position = probe
             break

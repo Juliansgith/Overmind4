@@ -2664,7 +2664,7 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach(
     assert mission["siteKey"] == ("alternate" if retarget else "front")
 
 
-def test_airlift_delivery_retries_after_transport_clears_the_mex_footprint() -> None:
+def test_airlift_delivery_builds_the_prevalidated_mex_despite_its_own_footprint() -> None:
     harness = make_harness()
     drop = [300, 2, 300]
     cargo = harness.unit(
@@ -2705,14 +2705,6 @@ def test_airlift_delivery_retries_after_transport_clears_the_mex_footprint() -> 
 
     harness.lua.globals().Controller.Step(harness.controller)
 
-    assert len(harness.calls.buildMobile) == 0
-    assert harness.controller.transportDeliveries["front"] is not None
-    assert harness.controller.blockedSites["front"] is None
-
-    harness.brain.tick = harness.brain.tick + 9
-    harness.lua.execute("brain.canBuildAt = function() return true end")
-    harness.lua.globals().Controller.Step(harness.controller)
-
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()
@@ -2720,6 +2712,12 @@ def test_airlift_delivery_retries_after_transport_clears_the_mex_footprint() -> 
     ]
     assert len(mex_orders) == 1
     assert mex_orders[0].units[1].options.entityId == 32
+    assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
+        300,
+        300,
+    )
+    assert harness.controller.transportDeliveries["front"] is not None
+    assert harness.controller.blockedSites["front"] is None
 
 
 def test_airlift_skips_the_nearest_physically_unbuildable_mex() -> None:
