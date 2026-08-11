@@ -30,6 +30,7 @@ def make_harness() -> ControllerHarness:
     lua.execute(
         r"""
         categories = { ALLUNITS = 'ALLUNITS', MOBILE = 'MOBILE' }
+        ScenarioInfo = { Options = { TeamSpawn = 'fixed' } }
         calls = {
             own = {}, enemy = {}, nav = {}, canBuild = {}, terrain = {},
             buildMobile = {}, buildFactory = {}, rally = {}, aggressive = {},

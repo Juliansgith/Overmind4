@@ -122,6 +122,8 @@ def marker(key: str, x: float, z: float, *, reachable: bool = True) -> dict[str,
         "position": [x, 2, z],
         "distance": ((x - 10) ** 2 + (z - 20) ** 2) ** 0.5,
         "reachable": reachable,
+        "engineerReachable": reachable,
+        "landReachable": reachable,
         "localSite": False,
     }
 

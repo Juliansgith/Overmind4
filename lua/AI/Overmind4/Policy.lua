@@ -1351,8 +1351,8 @@ local function FieldCampaignDecision(snapshot, intents)
     local allowed = {
         activate = true,
         reinforce = true,
-        retarget = true,
         transition = true,
+        assault = true,
         recover = true,
         recall = true,
         resume = true,
@@ -1371,19 +1371,19 @@ local function FieldCampaignDecision(snapshot, intents)
         and snapshot.basePosition
         or macro.campaignIntentPosition
     if not IsUsablePosition(position) then return end
-    local engineerToken = macro.campaignIntentEngineer
-    if mode ~= 'recall' and type(engineerToken) ~= 'string' then return end
     AddIntent(intents, {
         kind = 'field_campaign',
         mode = mode,
         actorTokens = tokens,
-        engineerToken = engineerToken,
         position = position,
+        campaignKind = macro.campaignIntentKind,
         campaignSerial = macro.campaignSerial,
         clusterKey = macro.campaignIntentCluster,
         objectiveKey = macro.campaignIntentObjective,
         priority = mode == 'recall' and 1 or 24,
-        reason = 'secure_expansion_campaign',
+        reason = mode == 'assault'
+            and 'strategic_assault_campaign'
+            or 'pressure_front_campaign',
     })
 end
 

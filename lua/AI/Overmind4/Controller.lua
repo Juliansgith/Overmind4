@@ -152,13 +152,6 @@ local function SortedKeys(values)
     return keys
 end
 
-local function ArrayContains(values, wanted)
-    for _, value in ipairs(values or {}) do
-        if value == wanted then return true end
-    end
-    return false
-end
-
 local function CopyArray(values)
     local copy = {}
     for _, value in ipairs(values or {}) do TableInsert(copy, value) end
@@ -687,8 +680,8 @@ local function SiteSnapshot(controller, markers, ownRecords)
             distance = marker.distance,
             localSite = marker.localSite,
             reachable = marker.reachable,
-            engineerReachable = marker.engineerReachable ~= false and marker.reachable == true,
-            landReachable = marker.landReachable ~= false and marker.reachable == true,
+            engineerReachable = marker.engineerReachable == true and marker.reachable == true,
+            landReachable = marker.landReachable == true and marker.reachable == true,
             buildable = not SiteIsBlocked(controller, marker.key),
             occupied = occupied,
             complete = complete,
@@ -1365,7 +1358,7 @@ local function MacroSnapshot(controller, units)
     local campaign = controller.fieldCampaign
     local campaignState = campaign and campaign.state or 'idle'
     local campaignCluster = campaign and campaign.clusterKey or 'none'
-    local campaignObjective = campaign and campaign.objectiveKey or 'none'
+    local campaignObjective = campaign and campaign.anchorKey or 'none'
     local fieldTokens = campaign
         and type(campaign.fieldTokens) == 'table'
         and CopyArray(campaign.fieldTokens)
@@ -1377,7 +1370,7 @@ local function MacroSnapshot(controller, units)
     local fieldAa = 0
     local homeAa = 0
     local fieldAtAnchor = 0
-    local objectivePosition = campaign and campaign.objectivePosition or nil
+    local objectivePosition = campaign and campaign.anchorPosition or nil
     for _, unit in ipairs(units or {}) do
         if unit.complete == true and COMBAT_ROLES[unit.role] then
             if CampaignFieldContains(campaign, unit.token) then
@@ -1423,14 +1416,31 @@ local function MacroSnapshot(controller, units)
             or controller.basePosition),
         campaignEnabled = controller.fieldCampaignEnabled == true,
         campaignState = campaignState,
+        campaignKind = campaign and campaign.kind or 'none',
         campaignCluster = campaignCluster,
         campaignObjective = campaignObjective,
+        campaignAnchorKey = campaign and campaign.anchorKey or 'none',
+        campaignAnchorX = campaign
+            and campaign.anchorPosition
+            and tonumber(campaign.anchorPosition[1])
+            or -1,
+        campaignAnchorZ = campaign
+            and campaign.anchorPosition
+            and tonumber(campaign.anchorPosition[3])
+            or -1,
         campaignMemberKeys = campaign and CopyArray(campaign.memberKeys) or {},
         fieldTokens = fieldTokens,
         homeTokens = homeTokens,
         fieldUnits = TableGetn(fieldTokens),
         fieldAa = fieldAa,
         fieldAtAnchor = fieldAtAnchor,
+        campaignFieldAtAnchor = fieldAtAnchor,
+        campaignArrivalQuorum = campaign
+            and (tonumber(campaign.arrivalQuorum) or 0)
+            or 0,
+        campaignForwardDistance = campaign
+            and (tonumber(campaign.forwardDistance) or -1)
+            or -1,
         homeUnits = TableGetn(homeTokens),
         homeAa = homeAa,
         campaignMissionAge = campaign
@@ -1444,6 +1454,12 @@ local function MacroSnapshot(controller, units)
         campaignFullFieldOrders = campaign
             and (tonumber(campaign.fullFieldOrders) or 0)
             or 0,
+        campaignReinforcementOrders = campaign
+            and (tonumber(campaign.reinforcementOrders) or 0)
+            or 0,
+        campaignRecoveryOrders = campaign
+            and (tonumber(campaign.recoveryOrders) or 0)
+            or 0,
         campaignModeSwitches = campaign
             and (tonumber(campaign.modeSwitches) or 0)
             or 0,
@@ -1456,18 +1472,19 @@ local function MacroSnapshot(controller, units)
             and controller.legacyFrontierRetirementPending ~= true
             and CopyArray(campaign.pendingTokens)
             or {},
-        campaignIntentEngineer = campaign
-            and (campaign.desiredEngineerToken or campaign.engineerToken)
+        campaignIntentKind = campaign
+            and (campaign.desiredKind or campaign.kind)
             or 'none',
+        campaignIntentEngineer = 'none',
         campaignIntentCluster = campaign
             and (campaign.desiredClusterKey or campaign.clusterKey)
             or 'none',
         campaignIntentObjective = campaign
-            and (campaign.desiredObjectiveKey or campaign.objectiveKey)
+            and (campaign.desiredAnchorKey or campaign.anchorKey)
             or 'none',
         campaignIntentPosition = campaign
-            and CopyPosition(campaign.desiredObjectivePosition
-                or campaign.objectivePosition)
+            and CopyPosition(campaign.desiredAnchorPosition
+                or campaign.anchorPosition)
             or nil,
         campaignSerial = campaign and campaign.serial or -1,
     }
@@ -2985,25 +3002,100 @@ local function EmergencyCampaignCohorts(campaign, units)
     return field, home
 end
 
-local function CampaignMemberKeys(controller, clusterKey, siteKey)
-    local members = {}
-    for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
-        if site.key == siteKey or site.clusterKey == clusterKey then
-            TableInsert(members, site.key)
-        end
-    end
-    if TableGetn(members) == 0 and type(siteKey) == 'string' then
-        TableInsert(members, siteKey)
-    end
-    table.sort(members)
-    return members
-end
-
 local function CampaignSite(controller, siteKey)
     for _, site in ipairs((controller.currentSites and controller.currentSites.mass) or {}) do
         if site.key == siteKey then return site end
     end
     return nil
+end
+
+local function ScenarioUsesFixedSpawns()
+    return type(ScenarioInfo) == 'table'
+        and type(ScenarioInfo.Options) == 'table'
+        and ScenarioInfo.Options.TeamSpawn == 'fixed'
+end
+
+local function BuildPressureGraph(controller)
+    if controller.pressureGraph then return controller.pressureGraph end
+    local target = CopyPosition(controller.targetPosition)
+    if not IsCampaignPosition(target) then return nil end
+    local geometry = {}
+    for _, marker in ipairs((controller.markers and controller.markers.mass) or {}) do
+        local position = CopyPosition(marker.position)
+        if type(marker.key) == 'string'
+            and IsCampaignPosition(position)
+            and marker.engineerReachable == true
+            and marker.landReachable == true
+            and marker.reachable == true
+        then
+            TableInsert(geometry, {
+                key = marker.key,
+                position = position,
+                targetDistanceSquared = DistanceSquared(position, target),
+            })
+        end
+    end
+    table.sort(geometry, function(a, b) return a.key < b.key end)
+    local assigned = {}
+    local clusters = {}
+    local bySite = {}
+    for _, seed in ipairs(geometry) do
+        if assigned[seed.key] ~= true then
+            local members = { seed }
+            assigned[seed.key] = true
+            local cursor = 1
+            while cursor <= TableGetn(members) do
+                local member = members[cursor]
+                for _, candidate in ipairs(geometry) do
+                    if assigned[candidate.key] ~= true
+                        and DistanceSquared(member.position, candidate.position)
+                            <= FRONTIER_CLUSTER_DISTANCE * FRONTIER_CLUSTER_DISTANCE
+                    then
+                        assigned[candidate.key] = true
+                        TableInsert(members, candidate)
+                    end
+                end
+                cursor = cursor + 1
+            end
+            table.sort(members, function(a, b) return a.key < b.key end)
+            local anchor = members[1]
+            local memberKeys = {}
+            for _, member in ipairs(members) do
+                TableInsert(memberKeys, member.key)
+                if member.targetDistanceSquared < anchor.targetDistanceSquared
+                    or (member.targetDistanceSquared == anchor.targetDistanceSquared
+                        and member.key < anchor.key)
+                then
+                    anchor = member
+                end
+            end
+            local cluster = {
+                key = members[1].key,
+                members = members,
+                memberKeys = memberKeys,
+                anchorKey = anchor.key,
+                anchorPosition = CopyPosition(anchor.position),
+                anchorTargetDistanceSquared = anchor.targetDistanceSquared,
+            }
+            TableInsert(clusters, cluster)
+            for _, member in ipairs(members) do bySite[member.key] = cluster end
+        end
+    end
+    table.sort(clusters, function(a, b) return a.key < b.key end)
+    controller.pressureGraph = {
+        clusters = clusters,
+        bySite = bySite,
+        targetName = tostring(controller.targetName or 'none'),
+        targetPosition = target,
+        targetPath = controller.targetPath == true,
+        fixedSpawns = ScenarioUsesFixedSpawns(),
+    }
+    return controller.pressureGraph
+end
+
+local function PressureClusterForSite(controller, siteKey)
+    local graph = BuildPressureGraph(controller)
+    return graph and graph.bySite[siteKey] or nil
 end
 
 local function CampaignSiteSupportsPosition(controller, siteKey, position)
@@ -3016,6 +3108,10 @@ local function CampaignSiteSupportsPosition(controller, siteKey, position)
         and site.landReachable == true
         and IsCampaignPosition(site.position)
         and DistanceSquared(site.position, position) <= 0.01
+end
+
+local function PressureAnchorLive(controller, anchorKey, anchorPosition)
+    return CampaignSiteSupportsPosition(controller, anchorKey, anchorPosition)
 end
 
 local function CampaignOperationRecord(observation, operation)
@@ -3055,16 +3151,9 @@ end
 local function CampaignCandidate(controller, observation)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
-        if operation.reason == 'rebuild_mex'
-            and ValidCampaignOperation(controller, observation, operation)
-        then
-            return operation
-        end
-    end
-    for _, token in ipairs(SortedKeys(controller.pending)) do
-        local operation = controller.pending[token]
         if operation.reason == 'frontier_expansion'
             and ValidCampaignOperation(controller, observation, operation)
+            and PressureClusterForSite(controller, operation.siteKey) ~= nil
         then
             return operation
         end
@@ -3078,15 +3167,37 @@ local function CampaignSetPending(campaign, mode, tokens)
     table.sort(campaign.pendingTokens)
 end
 
+local function InitialPressureMetrics(records, field, anchor)
+    local fieldSet = BuildTokenSet(field) or {}
+    local distances = {}
+    local atAnchor = 0
+    for _, record in ipairs(records or {}) do
+        if fieldSet[record.token] == true then
+            local distance = Distance(record.position, anchor)
+            TableInsert(distances, distance)
+            if distance <= FIELD_CAMPAIGN_ANCHOR_RADIUS then
+                atAnchor = atAnchor + 1
+            end
+        end
+    end
+    table.sort(distances)
+    local count = TableGetn(distances)
+    local quorum = count > 0 and math.ceil(count / 2) or 0
+    return atAnchor, quorum, count > 0 and distances[quorum] or -1
+end
+
 local function StartFieldCampaign(controller, observation, operation)
+    local cluster = PressureClusterForSite(controller, operation.siteKey)
+    if not cluster then return end
     local records = CampaignCombatRecords(observation.units)
     local field, home, full = InitialCampaignCohorts(records)
+    local atAnchor, quorum, forwardDistance = InitialPressureMetrics(
+        records,
+        field,
+        cluster.anchorPosition
+    )
     controller.fieldCampaignSerial = (tonumber(controller.fieldCampaignSerial) or 0) + 1
     local tick = CurrentTick(controller)
-    local record = CampaignOperationRecord(observation, operation)
-    local clusterKey = operation.clusterKey
-        or controller.selectedFrontierCluster
-        or operation.siteKey
     -- Factories may still carry the legacy frontier rally ledger when the
     -- secured campaign doctrine first takes ownership.  Force one base-rally
     -- reconciliation under the new doctrine.
@@ -3094,13 +3205,15 @@ local function StartFieldCampaign(controller, observation, operation)
     local campaign = {
         serial = controller.fieldCampaignSerial,
         state = full and 'awaiting_order' or 'early_awaiting_order',
-        clusterKey = tostring(clusterKey),
-        objectiveKey = operation.siteKey,
-        objectivePosition = CopyPosition(operation.position),
-        objectiveReason = operation.reason,
-        engineerToken = operation.actorToken,
-        engineerRole = record.role,
-        memberKeys = CampaignMemberKeys(controller, clusterKey, operation.siteKey),
+        kind = 'pressure_front',
+        clusterKey = cluster.key,
+        memberKeys = CopyArray(cluster.memberKeys),
+        anchorKey = cluster.anchorKey,
+        anchorPosition = CopyPosition(cluster.anchorPosition),
+        anchorTargetDistanceSquared = cluster.anchorTargetDistanceSquared,
+        objectiveKey = cluster.anchorKey,
+        objectivePosition = CopyPosition(cluster.anchorPosition),
+        objectiveReason = 'pressure_front',
         fieldTokens = field,
         homeTokens = home,
         fieldTokenSet = BuildTokenSet(field),
@@ -3109,7 +3222,12 @@ local function StartFieldCampaign(controller, observation, operation)
         fullCohorts = full,
         startedTick = tick,
         lastProgressTick = tick,
-        bestDistance = Distance(record.position, operation.position),
+        bestDistance = forwardDistance,
+        bestAtAnchor = atAnchor,
+        fieldAtAnchor = atAnchor,
+        arrivalQuorum = quorum,
+        forwardDistance = forwardDistance,
+        progressCohortSize = TableGetn(field),
         lastRecoveryAttemptTick = tick - FIELD_CAMPAIGN_STUCK_TICKS,
         heldSinceTick = nil,
         healthySinceTick = nil,
@@ -3119,12 +3237,14 @@ local function StartFieldCampaign(controller, observation, operation)
         reinforcementOrders = 0,
         recoveryOrders = 0,
         modeSwitches = 0,
+        transitionEvents = 0,
+        assaultEvents = 0,
     }
     controller.fieldCampaign = campaign
     if TableGetn(field) > 0 then CampaignSetPending(campaign, 'activate', field) end
     Emit(controller, 'campaign_started', {
         cluster = campaign.clusterKey,
-        objective = campaign.objectiveKey,
+        objective = campaign.anchorKey,
         field_units = TableGetn(field),
         home_units = TableGetn(home),
     })
@@ -3242,7 +3362,6 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
         end
         home = {}
         assigned = {}
-        campaign.orderedTokens = {}
         for _, token in ipairs(field) do assigned[token] = true end
         for _, record in ipairs(records) do
             if not assigned[record.token] then
@@ -3252,19 +3371,28 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
         end
         campaign.fullCohorts = true
         if previousPendingMode == 'activate'
-            or previousPendingMode == 'retarget'
             or previousPendingMode == 'transition'
+            or previousPendingMode == 'assault'
             or previousPendingMode == 'recover'
             or previousPendingMode == 'recall'
             or previousPendingMode == 'resume'
         then
             CampaignSetPending(campaign, previousPendingMode, field)
-        elseif previousState == 'active'
-            or previousState == 'awaiting_order'
+        elseif previousState == 'awaiting_order'
             or previousState == 'early_awaiting_order'
         then
             campaign.state = 'awaiting_order'
             CampaignSetPending(campaign, 'activate', field)
+        elseif previousState == 'active' then
+            local unordered = {}
+            for _, token in ipairs(field) do
+                if campaign.orderedTokens[token] ~= true then
+                    TableInsert(unordered, token)
+                end
+            end
+            if TableGetn(unordered) > 0 then
+                CampaignSetPending(campaign, 'reinforce', unordered)
+            end
         end
     else
         local fieldAa = 0
@@ -3312,8 +3440,8 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
     field = campaign.fieldTokens
     home = campaign.homeTokens
     if campaign.pendingMode == 'activate'
-        or campaign.pendingMode == 'retarget'
         or campaign.pendingMode == 'transition'
+        or campaign.pendingMode == 'assault'
         or campaign.pendingMode == 'recover'
         or campaign.pendingMode == 'recall'
         or campaign.pendingMode == 'resume'
@@ -3355,38 +3483,6 @@ local function ApplyCampaignFlags(controller, campaign, units)
     end
 end
 
-local function RelevantCampaignOperation(controller, observation, campaign)
-    for _, token in ipairs(SortedKeys(controller.pending)) do
-        local operation = controller.pending[token]
-        if operation.reason == 'rebuild_mex'
-            and ArrayContains(campaign.memberKeys, operation.siteKey)
-            and ValidCampaignOperation(controller, observation, operation)
-        then
-            return operation
-        end
-    end
-    for _, token in ipairs(SortedKeys(controller.pending)) do
-        local operation = controller.pending[token]
-        if operation.reason == 'rebuild_mex'
-            and ValidCampaignOperation(controller, observation, operation)
-        then
-            return operation
-        end
-    end
-    for _, token in ipairs(SortedKeys(controller.pending)) do
-        local operation = controller.pending[token]
-        if ValidCampaignOperation(controller, observation, operation)
-            and (operation.siteKey == campaign.objectiveKey
-                or (operation.reason == 'frontier_expansion'
-                    and (operation.clusterKey == campaign.clusterKey
-                        or ArrayContains(campaign.memberKeys, operation.siteKey))))
-        then
-            return operation
-        end
-    end
-    return nil
-end
-
 local function CampaignClusterComplete(controller, campaign)
     if TableGetn(campaign.memberKeys or {}) == 0 then return false end
     for _, siteKey in ipairs(campaign.memberKeys) do
@@ -3396,56 +3492,11 @@ local function CampaignClusterComplete(controller, campaign)
     return true
 end
 
-local function CampaignTargetInvalid(controller, siteKey, position)
-    return not CampaignSiteSupportsPosition(controller, siteKey, position)
-end
-
-local function CampaignObjectiveInvalid(controller, campaign)
-    return CampaignTargetInvalid(
-        controller,
-        campaign.objectiveKey,
-        campaign.objectivePosition
-    )
-end
-
-local function AwaitCampaignObjective(controller, campaign, reason)
-    if campaign.state == 'awaiting_objective' then return end
-    campaign.state = 'awaiting_objective'
-    campaign.pendingMode = nil
-    campaign.pendingTokens = {}
-    campaign.heldSinceTick = nil
-    campaign.awaitingReason = reason or 'unknown'
-    Emit(controller,
-        reason == 'cluster_held' and 'campaign_held' or 'campaign_objective_released',
-        {
-            cluster = campaign.clusterKey or 'none',
-            objective = campaign.objectiveKey or 'none',
-            reason = reason or 'unknown',
-        }
-    )
-end
-
-local function SetDesiredCampaignObjective(controller, observation, campaign, operation)
-    local record = CampaignOperationRecord(observation, operation)
-    if not record then return false end
-    local clusterKey = operation.clusterKey
-        or controller.selectedFrontierCluster
-        or operation.siteKey
-    campaign.desiredObjectiveKey = operation.siteKey
-    campaign.desiredObjectivePosition = CopyPosition(operation.position)
-    campaign.desiredObjectiveReason = operation.reason
-    campaign.desiredEngineerToken = operation.actorToken
-    campaign.desiredEngineerRole = record.role
-    campaign.desiredClusterKey = tostring(clusterKey)
-    campaign.desiredMemberKeys = CampaignMemberKeys(
-        controller,
-        clusterKey,
-        operation.siteKey
-    )
-    return true
-end
-
 local function ClearDesiredCampaignObjective(campaign)
+    campaign.desiredKind = nil
+    campaign.desiredAnchorKey = nil
+    campaign.desiredAnchorPosition = nil
+    campaign.desiredAnchorTargetDistanceSquared = nil
     campaign.desiredObjectiveKey = nil
     campaign.desiredObjectivePosition = nil
     campaign.desiredObjectiveReason = nil
@@ -3456,70 +3507,169 @@ local function ClearDesiredCampaignObjective(campaign)
     campaign.desiredReplacesCampaign = nil
 end
 
-local function PendingCampaignOperationValid(controller, campaign)
-    local mode = campaign.pendingMode
-    if mode ~= 'activate'
-        and mode ~= 'retarget'
-        and mode ~= 'transition'
-        and mode ~= 'recover'
-        and mode ~= 'resume'
-    then
-        return true
+local function QuickSelect(values, wanted)
+    local left = 1
+    local right = TableGetn(values)
+    while left < right do
+        local pivot = values[math.floor((left + right) / 2)]
+        local low = left
+        local high = right
+        repeat
+            while values[low] < pivot do low = low + 1 end
+            while values[high] > pivot do high = high - 1 end
+            if low <= high then
+                values[low], values[high] = values[high], values[low]
+                low = low + 1
+                high = high - 1
+            end
+        until low > high
+        if wanted <= high then
+            right = high
+        elseif wanted >= low then
+            left = low
+        else
+            return values[wanted]
+        end
     end
-    local token = campaign.desiredEngineerToken or campaign.engineerToken
-    local siteKey = campaign.desiredObjectiveKey or campaign.objectiveKey
-    local reason = campaign.desiredObjectiveReason or campaign.objectiveReason
-    local position = campaign.desiredObjectivePosition or campaign.objectivePosition
-    local operation = token and controller.pending[token] or nil
-    return StructureOperation(operation)
-        and operation.actorToken == token
-        and operation.siteKey == siteKey
-        and operation.buildRole == 'mass_extractor'
-        and operation.reason == reason
-        and IsCampaignPosition(operation.position)
-        and IsCampaignPosition(position)
-        and DistanceSquared(operation.position, position) <= 0.01
-        and CampaignSiteSupportsPosition(controller, siteKey, position)
-        and operation.phase ~= 'cancelling'
-        and operation.cancelReason == nil
+    return values[wanted]
 end
 
-local function AdoptCampaignOperation(controller, observation, campaign, operation)
-    local record = CampaignOperationRecord(observation, operation)
-    if not record then return false end
-    local clusterKey = operation.clusterKey
-        or controller.selectedFrontierCluster
-        or operation.siteKey
-    campaign.clusterKey = tostring(clusterKey)
-    campaign.memberKeys = CampaignMemberKeys(
-        controller,
-        clusterKey,
-        operation.siteKey
-    )
-    campaign.objectiveKey = operation.siteKey
-    campaign.objectivePosition = CopyPosition(operation.position)
-    campaign.objectiveReason = operation.reason
-    campaign.engineerToken = operation.actorToken
-    campaign.engineerRole = record.role
-    ClearDesiredCampaignObjective(campaign)
+local function UpdatePressureProgress(controller, observation, campaign)
+    local distances = {}
+    local atAnchor = 0
+    local anchor = campaign.anchorPosition
+    for _, record in ipairs(observation.units or {}) do
+        if CampaignFieldContains(campaign, record.token)
+            and COMBAT_ROLES[record.role]
+            and record.complete == true
+        then
+            local distance = Distance(record.position, anchor)
+            TableInsert(distances, distance)
+            if distance <= FIELD_CAMPAIGN_ANCHOR_RADIUS then
+                atAnchor = atAnchor + 1
+            end
+        end
+    end
+    local count = TableGetn(distances)
+    local quorum = count > 0 and math.ceil(count / 2) or 0
+    local forwardDistance = count > 0 and QuickSelect(distances, quorum) or -1
+    campaign.fieldAtAnchor = atAnchor
+    campaign.arrivalQuorum = quorum
+    campaign.forwardDistance = forwardDistance
+    local tick = CurrentTick(controller)
+    if campaign.progressCohortSize ~= count then
+        campaign.progressCohortSize = count
+        campaign.bestDistance = forwardDistance
+        campaign.bestAtAnchor = atAnchor
+    elseif forwardDistance >= 0
+        and forwardDistance + 2 < (tonumber(campaign.bestDistance)
+            or 1000000000000)
+    then
+        campaign.bestAtAnchor = math.max(
+            atAnchor,
+            tonumber(campaign.bestAtAnchor) or 0
+        )
+        campaign.bestDistance = forwardDistance
+        campaign.lastProgressTick = tick
+    end
+end
+
+local function PressureClusterUnowned(controller, cluster)
+    for _, siteKey in ipairs(cluster.memberKeys or {}) do
+        local site = CampaignSite(controller, siteKey)
+        if not site or site.complete ~= true then return true end
+    end
+    return false
+end
+
+local function PressureClusterIntersects(cluster, memberSet)
+    for _, siteKey in ipairs(cluster.memberKeys or {}) do
+        if memberSet[siteKey] == true then return true end
+    end
+    return false
+end
+
+local function NextPressureCluster(controller, campaign)
+    local graph = BuildPressureGraph(controller)
+    if not graph then return nil end
+    local currentMembers = {}
+    for _, siteKey in ipairs(campaign.memberKeys or {}) do
+        currentMembers[siteKey] = true
+    end
+    local best = nil
+    local bestDistance = 1000000000000
+    for _, cluster in ipairs(graph.clusters or {}) do
+        if not PressureClusterIntersects(cluster, currentMembers)
+            and cluster.anchorTargetDistanceSquared
+                < (tonumber(campaign.anchorTargetDistanceSquared)
+                    or 1000000000000)
+            and PressureClusterUnowned(controller, cluster)
+            and PressureAnchorLive(
+                controller,
+                cluster.anchorKey,
+                cluster.anchorPosition
+            )
+        then
+            local distance = DistanceSquared(
+                campaign.anchorPosition,
+                cluster.anchorPosition
+            )
+            if not best
+                or distance < bestDistance
+                or (distance == bestDistance
+                    and (cluster.anchorTargetDistanceSquared
+                            < best.anchorTargetDistanceSquared
+                        or (cluster.anchorTargetDistanceSquared
+                                == best.anchorTargetDistanceSquared
+                            and cluster.key < best.key)))
+            then
+                best = cluster
+                bestDistance = distance
+            end
+        end
+    end
+    return best
+end
+
+local function StrategicTargetValid(controller)
+    local graph = BuildPressureGraph(controller)
+    return graph ~= nil
+        and graph.fixedSpawns == true
+        and ScenarioUsesFixedSpawns()
+        and tonumber(controller.occupiedSpawns) == 2
+        and graph.targetPath == true
+        and controller.targetPath == true
+        and IsCampaignPosition(graph.targetPosition)
+        and IsCampaignPosition(controller.targetPosition)
+        and DistanceSquared(graph.targetPosition, controller.targetPosition) <= 0.01
+        and tostring(controller.targetName or 'none') == graph.targetName
+end
+
+local function StagePressureCluster(campaign, cluster)
+    campaign.desiredKind = 'pressure_front'
+    campaign.desiredClusterKey = cluster.key
+    campaign.desiredMemberKeys = CopyArray(cluster.memberKeys)
+    campaign.desiredAnchorKey = cluster.anchorKey
+    campaign.desiredAnchorPosition = CopyPosition(cluster.anchorPosition)
+    campaign.desiredAnchorTargetDistanceSquared = cluster.anchorTargetDistanceSquared
+    campaign.desiredObjectiveKey = cluster.anchorKey
+    campaign.desiredObjectivePosition = CopyPosition(cluster.anchorPosition)
+    campaign.desiredObjectiveReason = 'pressure_front'
+end
+
+local function StageStrategicAssault(controller, campaign)
+    if not StrategicTargetValid(controller) then return false end
+    local graph = BuildPressureGraph(controller)
+    campaign.desiredKind = 'strategic_assault'
+    campaign.desiredClusterKey = 'strategic_assault'
+    campaign.desiredMemberKeys = {}
+    campaign.desiredAnchorKey = 'target:' .. graph.targetName
+    campaign.desiredAnchorPosition = CopyPosition(graph.targetPosition)
+    campaign.desiredAnchorTargetDistanceSquared = 0
+    campaign.desiredObjectiveKey = campaign.desiredAnchorKey
+    campaign.desiredObjectivePosition = CopyPosition(graph.targetPosition)
+    campaign.desiredObjectiveReason = 'strategic_assault'
     return true
-end
-
-local function UpdateCampaignProgress(controller, observation, campaign, operation)
-    if not operation then return end
-    local operationProgressTick = tonumber(operation.lastProgressTick)
-    if operationProgressTick
-        and operationProgressTick > (tonumber(campaign.lastProgressTick) or -1)
-    then
-        campaign.lastProgressTick = operationProgressTick
-    end
-    local record = CampaignOperationRecord(observation, operation)
-    if not record then return end
-    local distance = Distance(record.position, operation.position)
-    if distance + 2 < (tonumber(campaign.bestDistance) or 1000000000000) then
-        campaign.bestDistance = distance
-        campaign.lastProgressTick = CurrentTick(controller)
-    end
 end
 
 local function CampaignAcuHealth(observation)
@@ -3575,10 +3725,12 @@ local function UpdateFieldCampaign(controller, observation)
         CampaignPruneAndFill(campaign, observation.units, true)
     end
     ApplyCampaignFlags(controller, campaign, observation.units)
+    UpdatePressureProgress(controller, observation, campaign)
     if immediateContact
         and TableGetn(campaign.homeTokens) < HOME_RESERVE_MIN
         and TableGetn(campaign.fieldTokens) > 0
     then
+        ClearDesiredCampaignObjective(campaign)
         local emergencyField, emergencyHome = EmergencyCampaignCohorts(
             campaign,
             observation.units
@@ -3590,65 +3742,6 @@ local function UpdateFieldCampaign(controller, observation)
         return
     end
     if campaign.state == 'recalled' then
-        if campaign.pendingMode == 'resume' then
-            campaign.pendingMode = nil
-            campaign.pendingTokens = {}
-        end
-        ClearDesiredCampaignObjective(campaign)
-        local currentObjectiveInvalid = CampaignObjectiveInvalid(
-            controller,
-            campaign
-        )
-        local resumeOperation = nil
-        if currentObjectiveInvalid then
-            resumeOperation = CampaignCandidate(controller, observation)
-        else
-            resumeOperation = RelevantCampaignOperation(
-                controller,
-                observation,
-                campaign
-            )
-        end
-        if resumeOperation
-            and (resumeOperation.siteKey ~= campaign.objectiveKey
-                or resumeOperation.actorToken ~= campaign.engineerToken
-                or resumeOperation.reason ~= campaign.objectiveReason
-                or not IsCampaignPosition(resumeOperation.position)
-                or DistanceSquared(
-                    resumeOperation.position,
-                    campaign.objectivePosition
-                ) > 0.01)
-        then
-            local desired = SetDesiredCampaignObjective(
-                controller,
-                observation,
-                campaign,
-                resumeOperation
-            )
-            if desired then
-                campaign.desiredReplacesCampaign = currentObjectiveInvalid == true
-            end
-        end
-        local resumeToken = campaign.desiredEngineerToken or campaign.engineerToken
-        local resumeRole = campaign.desiredEngineerRole or campaign.engineerRole
-        local resumeSiteKey = campaign.desiredObjectiveKey or campaign.objectiveKey
-        local resumePosition = campaign.desiredObjectivePosition
-            or campaign.objectivePosition
-        local resumeObjectiveInvalid = CampaignTargetInvalid(
-            controller,
-            resumeSiteKey,
-            resumePosition
-        )
-        local resumeRecord = nil
-        for _, record in ipairs(observation.units or {}) do
-            if record.token == resumeToken
-                and record.role == resumeRole
-                and record.complete == true
-            then
-                resumeRecord = record
-                break
-            end
-        end
         if health
             and health >= FIELD_CAMPAIGN_RESUME_HEALTH
             and reserveSafe
@@ -3656,9 +3749,14 @@ local function UpdateFieldCampaign(controller, observation)
             if campaign.healthySinceTick == nil then campaign.healthySinceTick = tick end
             if tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
                 and TableGetn(campaign.fieldTokens) > 0
-                and resumeOperation ~= nil
-                and resumeRecord ~= nil
-                and not resumeObjectiveInvalid
+                and ((campaign.kind == 'pressure_front'
+                        and PressureAnchorLive(
+                            controller,
+                            campaign.anchorKey,
+                            campaign.anchorPosition
+                        ))
+                    or (campaign.kind == 'strategic_assault'
+                        and StrategicTargetValid(controller)))
             then
                 CampaignSetPending(campaign, 'resume', campaign.fieldTokens)
             end
@@ -3672,96 +3770,46 @@ local function UpdateFieldCampaign(controller, observation)
     if health and health < FIELD_CAMPAIGN_RECALL_HEALTH
         and TableGetn(campaign.fieldTokens) > 0
     then
+        ClearDesiredCampaignObjective(campaign)
         campaign.pendingEmergencyReason = 'acu_health'
         campaign.pendingRecallFieldTokens = nil
         campaign.pendingRecallHomeTokens = nil
         CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
         return
     end
-    if campaign.state == 'awaiting_objective' then
-        campaign.pendingMode = nil
-        campaign.pendingTokens = {}
-        ClearDesiredCampaignObjective(campaign)
-        local candidate = CampaignCandidate(controller, observation)
-        if candidate
-            and SetDesiredCampaignObjective(
+    if campaign.pendingMode == 'transition'
+        and (campaign.desiredKind ~= 'pressure_front'
+            or not PressureAnchorLive(
                 controller,
-                observation,
-                campaign,
-                candidate
-            )
-        then
-            CampaignSetPending(campaign, 'transition', campaign.fieldTokens)
-        end
-        return
-    end
-    if not PendingCampaignOperationValid(controller, campaign) then
-        local failedMode = campaign.pendingMode
-        campaign.pendingMode = nil
-        campaign.pendingTokens = {}
+                campaign.desiredAnchorKey,
+                campaign.desiredAnchorPosition
+            ))
+    then
         ClearDesiredCampaignObjective(campaign)
-        if failedMode == 'activate' then
-            local replacement = CampaignCandidate(controller, observation)
-            if replacement
-                and AdoptCampaignOperation(
-                    controller,
-                    observation,
-                    campaign,
-                    replacement
-                )
-            then
-                CampaignSetPending(campaign, 'activate', campaign.fieldTokens)
-                return
-            end
-            AwaitCampaignObjective(controller, campaign, 'operation_missing')
-            return
-        elseif failedMode == 'transition' then
-            AwaitCampaignObjective(controller, campaign, 'operation_missing')
-            return
-        end
-    end
-    if CampaignObjectiveInvalid(controller, campaign) then
-        AwaitCampaignObjective(controller, campaign, 'objective_invalid')
-        return
-    end
-
-    if CampaignClusterComplete(controller, campaign) then
-        if campaign.heldSinceTick == nil then campaign.heldSinceTick = tick end
-        campaign.state = 'holding'
         campaign.pendingMode = nil
         campaign.pendingTokens = {}
-        if tick - campaign.heldSinceTick >= FIELD_CAMPAIGN_HOLD_TICKS then
-            AwaitCampaignObjective(controller, campaign, 'cluster_held')
-        end
-        return
+    elseif campaign.pendingMode == 'assault'
+        and (campaign.desiredKind ~= 'strategic_assault'
+            or not StrategicTargetValid(controller))
+    then
+        ClearDesiredCampaignObjective(campaign)
+        campaign.pendingMode = nil
+        campaign.pendingTokens = {}
     end
-    campaign.heldSinceTick = nil
-    if campaign.state == 'holding' then campaign.state = 'active' end
-
-    local operation = RelevantCampaignOperation(controller, observation, campaign)
-    UpdateCampaignProgress(controller, observation, campaign, operation)
     if campaign.pendingMode == 'activate'
-        or campaign.pendingMode == 'retarget'
+        or campaign.pendingMode == 'transition'
+        or campaign.pendingMode == 'assault'
         or campaign.pendingMode == 'recover'
+        or campaign.pendingMode == 'resume'
     then
         return
     end
-    if operation
-        and (operation.siteKey ~= campaign.objectiveKey
-            or operation.actorToken ~= campaign.engineerToken)
-    then
-        if SetDesiredCampaignObjective(
-            controller,
-            observation,
-            campaign,
-            operation
-        ) then
-            CampaignSetPending(campaign, 'retarget', campaign.fieldTokens)
-        end
-        return
-    end
-    if operation
-        and campaign.state == 'active'
+    if campaign.pendingMode == 'reinforce' then return end
+
+    local quorumArrived = campaign.arrivalQuorum > 0
+        and campaign.fieldAtAnchor >= campaign.arrivalQuorum
+    if not quorumArrived
+        and (campaign.state == 'active' or campaign.state == 'holding')
         and tick - (tonumber(campaign.lastProgressTick) or tick)
             >= FIELD_CAMPAIGN_STUCK_TICKS
         and tick - (tonumber(campaign.lastRecoveryAttemptTick) or -1000000)
@@ -3771,7 +3819,30 @@ local function UpdateFieldCampaign(controller, observation)
         CampaignSetPending(campaign, 'recover', campaign.fieldTokens)
         return
     end
-    if campaign.state == 'active' then
+
+    if campaign.kind == 'pressure_front' then
+        if CampaignClusterComplete(controller, campaign) then
+            if campaign.heldSinceTick == nil then campaign.heldSinceTick = tick end
+            campaign.state = 'holding'
+            if tick - campaign.heldSinceTick >= FIELD_CAMPAIGN_HOLD_TICKS
+                and quorumArrived
+                and TableGetn(campaign.fieldTokens) > 0
+            then
+                local nextCluster = NextPressureCluster(controller, campaign)
+                if nextCluster then
+                    StagePressureCluster(campaign, nextCluster)
+                    CampaignSetPending(campaign, 'transition', campaign.fieldTokens)
+                elseif StageStrategicAssault(controller, campaign) then
+                    CampaignSetPending(campaign, 'assault', campaign.fieldTokens)
+                end
+                return
+            end
+        else
+            campaign.heldSinceTick = nil
+            if campaign.state == 'holding' then campaign.state = 'active' end
+        end
+    end
+    if campaign.state == 'active' or campaign.state == 'holding' then
         local unordered = {}
         for _, token in ipairs(campaign.fieldTokens) do
             if campaign.orderedTokens[token] ~= true then TableInsert(unordered, token) end
@@ -3779,7 +3850,8 @@ local function UpdateFieldCampaign(controller, observation)
         if TableGetn(unordered) > 0 then
             CampaignSetPending(campaign, 'reinforce', unordered)
         end
-    elseif operation
+    elseif (campaign.state == 'awaiting_order'
+            or campaign.state == 'early_awaiting_order')
         and TableGetn(campaign.fieldTokens) > 0
         and campaign.pendingMode == nil
     then
@@ -3789,7 +3861,7 @@ end
 
 local function CampaignExpectedPosition(controller, campaign, mode)
     if mode == 'recall' then return CopyPosition(controller.basePosition) end
-    return CopyPosition(campaign.desiredObjectivePosition or campaign.objectivePosition)
+    return CopyPosition(campaign.desiredAnchorPosition or campaign.anchorPosition)
 end
 
 local function EmergencyRecallStagesLive(controller, campaign, recordByToken)
@@ -3851,20 +3923,39 @@ end
 
 local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActors)
     local campaign = controller.fieldCampaign
+    local allowedModes = {
+        activate = true,
+        reinforce = true,
+        transition = true,
+        assault = true,
+        recover = true,
+        recall = true,
+        resume = true,
+    }
+    local expectedKind = campaign
+        and (campaign.desiredKind or campaign.kind)
+        or nil
+    local expectedCluster = campaign
+        and (campaign.desiredClusterKey or campaign.clusterKey)
+        or nil
+    local expectedAnchorKey = campaign
+        and (campaign.desiredAnchorKey or campaign.anchorKey)
+        or nil
     if controller.fieldCampaignEnabled ~= true
         or controller.legacyFrontierRetirementPending == true
         or controller.frontierMission ~= nil
         or not campaign
         or type(intent.mode) ~= 'string'
+        or allowedModes[intent.mode] ~= true
         or intent.mode ~= campaign.pendingMode
+        or type(intent.campaignKind) ~= 'string'
+        or intent.campaignKind ~= expectedKind
         or type(intent.campaignSerial) ~= 'number'
         or intent.campaignSerial ~= campaign.serial
         or type(intent.clusterKey) ~= 'string'
-        or intent.clusterKey
-            ~= (campaign.desiredClusterKey or campaign.clusterKey)
+        or intent.clusterKey ~= expectedCluster
         or type(intent.objectiveKey) ~= 'string'
-        or intent.objectiveKey
-            ~= (campaign.desiredObjectiveKey or campaign.objectiveKey)
+        or intent.objectiveKey ~= expectedAnchorKey
         or type(intent.actorTokens) ~= 'table'
     then
         return false
@@ -3912,52 +4003,61 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         TableInsert(actors, actor)
     end
 
-    local guard = nil
     if intent.mode ~= 'recall' then
-        local guardToken = campaign.desiredEngineerToken or campaign.engineerToken
-        local guardRole = campaign.desiredEngineerRole or campaign.engineerRole
-        if intent.engineerToken ~= guardToken then return false end
-        guard = LiveOwnedActor(
-            controller,
-            guardToken,
-            recordByToken[guardToken],
-            guardRole
-        )
-        if not guard then return false end
-        local operation = controller.pending[guardToken]
-        local expectedKey = campaign.desiredObjectiveKey
-            or campaign.objectiveKey
-        local expectedReason = campaign.desiredObjectiveReason
-            or campaign.objectiveReason
-        if not StructureOperation(operation)
-            or operation.actorToken ~= guardToken
-            or operation.siteKey ~= expectedKey
-            or operation.buildRole ~= 'mass_extractor'
-            or operation.reason ~= expectedReason
-            or not IsCampaignPosition(operation.position)
-            or DistanceSquared(operation.position, expectedPosition) > 0.01
-            or not CampaignSiteSupportsPosition(
+        if expectedKind == 'strategic_assault' then
+            local graph = BuildPressureGraph(controller)
+            if not StrategicTargetValid(controller)
+                or not graph
+                or expectedAnchorKey ~= 'target:' .. graph.targetName
+                or DistanceSquared(expectedPosition, graph.targetPosition) > 0.01
+            then
+                return false
+            end
+        elseif expectedKind ~= 'pressure_front'
+            or not PressureAnchorLive(
                 controller,
-                expectedKey,
+                expectedAnchorKey,
                 expectedPosition
             )
-            or operation.phase == 'cancelling'
-            or operation.cancelReason ~= nil
         then
             return false
         end
     end
 
-    local clearOk = pcall(function() IssueClearCommands(actors) end)
-    if not clearOk then return false end
+    local aggressivePosition = nil
+    if intent.mode ~= 'recall' then
+        local terrainOk = false
+        terrainOk, aggressivePosition = pcall(TerrainPosition, expectedPosition)
+        local height = terrainOk
+            and aggressivePosition
+            and aggressivePosition[2]
+            or nil
+        if not terrainOk
+            or not IsCampaignPosition(aggressivePosition)
+            or type(height) ~= 'number'
+            or height ~= height
+            or math.abs(height) > 10000000
+        then
+            return false
+        end
+    end
+
+    if intent.mode ~= 'reinforce' then
+        local clearOk = pcall(function() IssueClearCommands(actors) end)
+        if not clearOk then return false end
+    end
     local orderOk = false
     if intent.mode == 'recall' then
         orderOk = pcall(function() IssueMove(actors, expectedPosition) end)
     else
-        orderOk = pcall(function() IssueGuard(actors, guard) end)
+        orderOk = pcall(function()
+            IssueAggressiveMove(actors, aggressivePosition)
+        end)
     end
     if not orderOk then
-        pcall(function() IssueClearCommands(actors) end)
+        if intent.mode ~= 'reinforce' then
+            pcall(function() IssueClearCommands(actors) end)
+        end
         return false
     end
 
@@ -3971,52 +4071,63 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.state = 'active'
         campaign.fullFieldOrders = campaign.fullFieldOrders + 1
         campaign.missionIssuedTick = tick
+        campaign.lastProgressTick = tick
+        campaign.bestDistance = tonumber(campaign.forwardDistance) or -1
+        campaign.bestAtAnchor = tonumber(campaign.fieldAtAnchor) or 0
+        campaign.progressCohortSize = TableGetn(campaign.fieldTokens)
     elseif mode == 'reinforce' then
         campaign.reinforcementOrders = campaign.reinforcementOrders + 1
-    elseif mode == 'retarget' then
-        campaign.objectiveKey = campaign.desiredObjectiveKey
-        campaign.objectivePosition = CopyPosition(campaign.desiredObjectivePosition)
-        campaign.objectiveReason = campaign.desiredObjectiveReason
-        campaign.engineerToken = campaign.desiredEngineerToken
-        campaign.engineerRole = campaign.desiredEngineerRole
-        campaign.desiredObjectiveKey = nil
-        campaign.desiredObjectivePosition = nil
-        campaign.desiredObjectiveReason = nil
-        campaign.desiredEngineerToken = nil
-        campaign.desiredEngineerRole = nil
-        campaign.desiredClusterKey = nil
-        campaign.desiredMemberKeys = nil
-        campaign.state = 'active'
-        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
-        campaign.missionIssuedTick = tick
-        campaign.lastProgressTick = tick
-        campaign.bestDistance = 1000000000000
     elseif mode == 'transition' then
         local previousCluster = campaign.clusterKey
+        campaign.kind = campaign.desiredKind
         campaign.clusterKey = campaign.desiredClusterKey
         campaign.memberKeys = CopyArray(campaign.desiredMemberKeys)
-        campaign.objectiveKey = campaign.desiredObjectiveKey
-        campaign.objectivePosition = CopyPosition(campaign.desiredObjectivePosition)
-        campaign.objectiveReason = campaign.desiredObjectiveReason
-        campaign.engineerToken = campaign.desiredEngineerToken
-        campaign.engineerRole = campaign.desiredEngineerRole
-        campaign.desiredObjectiveKey = nil
-        campaign.desiredObjectivePosition = nil
-        campaign.desiredObjectiveReason = nil
-        campaign.desiredEngineerToken = nil
-        campaign.desiredEngineerRole = nil
-        campaign.desiredClusterKey = nil
-        campaign.desiredMemberKeys = nil
+        campaign.anchorKey = campaign.desiredAnchorKey
+        campaign.anchorPosition = CopyPosition(campaign.desiredAnchorPosition)
+        campaign.anchorTargetDistanceSquared = campaign.desiredAnchorTargetDistanceSquared
+        campaign.objectiveKey = campaign.anchorKey
+        campaign.objectivePosition = CopyPosition(campaign.anchorPosition)
+        campaign.objectiveReason = 'pressure_front'
+        ClearDesiredCampaignObjective(campaign)
         campaign.awaitingReason = nil
         campaign.state = 'active'
         campaign.fullFieldOrders = campaign.fullFieldOrders + 1
         campaign.missionIssuedTick = tick
         campaign.lastProgressTick = tick
         campaign.bestDistance = 1000000000000
+        campaign.bestAtAnchor = 0
+        campaign.progressCohortSize = -1
+        campaign.heldSinceTick = nil
+        campaign.transitionEvents = campaign.transitionEvents + 1
         Emit(controller, 'campaign_transition', {
             from = previousCluster or 'none',
             cluster = campaign.clusterKey,
-            objective = campaign.objectiveKey,
+            objective = campaign.anchorKey,
+        })
+    elseif mode == 'assault' then
+        local previousCluster = campaign.clusterKey
+        campaign.kind = 'strategic_assault'
+        campaign.clusterKey = campaign.desiredClusterKey
+        campaign.memberKeys = {}
+        campaign.anchorKey = campaign.desiredAnchorKey
+        campaign.anchorPosition = CopyPosition(campaign.desiredAnchorPosition)
+        campaign.anchorTargetDistanceSquared = 0
+        campaign.objectiveKey = campaign.anchorKey
+        campaign.objectivePosition = CopyPosition(campaign.anchorPosition)
+        campaign.objectiveReason = 'strategic_assault'
+        ClearDesiredCampaignObjective(campaign)
+        campaign.state = 'active'
+        campaign.fullFieldOrders = campaign.fullFieldOrders + 1
+        campaign.missionIssuedTick = tick
+        campaign.lastProgressTick = tick
+        campaign.bestDistance = 1000000000000
+        campaign.bestAtAnchor = 0
+        campaign.progressCohortSize = -1
+        campaign.heldSinceTick = nil
+        campaign.assaultEvents = campaign.assaultEvents + 1
+        Emit(controller, 'campaign_assault', {
+            from = previousCluster or 'none',
+            target = campaign.anchorKey,
         })
     elseif mode == 'recover' then
         campaign.recoveryOrders = campaign.recoveryOrders + 1
@@ -4044,22 +4155,6 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.pendingRecallFieldTokens = nil
         campaign.pendingRecallHomeTokens = nil
     elseif mode == 'resume' then
-        if campaign.desiredObjectiveKey then
-            if campaign.desiredReplacesCampaign == true
-                or (campaign.desiredObjectiveReason == 'frontier_expansion'
-                and campaign.desiredClusterKey
-                )
-            then
-                campaign.clusterKey = campaign.desiredClusterKey
-                campaign.memberKeys = CopyArray(campaign.desiredMemberKeys)
-            end
-            campaign.objectiveKey = campaign.desiredObjectiveKey
-            campaign.objectivePosition = CopyPosition(campaign.desiredObjectivePosition)
-            campaign.objectiveReason = campaign.desiredObjectiveReason
-            campaign.engineerToken = campaign.desiredEngineerToken
-            campaign.engineerRole = campaign.desiredEngineerRole
-            ClearDesiredCampaignObjective(campaign)
-        end
         campaign.state = 'active'
         campaign.emergency = false
         campaign.emergencyReason = nil
@@ -4068,6 +4163,9 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.fullFieldOrders = campaign.fullFieldOrders + 1
         campaign.missionIssuedTick = tick
         campaign.lastProgressTick = tick
+        campaign.bestDistance = 1000000000000
+        campaign.bestAtAnchor = 0
+        campaign.progressCohortSize = -1
     else
         return false
     end
@@ -4075,8 +4173,9 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
     campaign.pendingTokens = {}
     Emit(controller, 'campaign_order', {
         command = mode,
+        campaign_kind = campaign.kind,
         cluster = campaign.clusterKey,
-        objective = campaign.objectiveKey,
+        objective = campaign.anchorKey,
         units = TableGetn(tokens),
     })
     return true
@@ -4733,11 +4832,17 @@ Controller.Step = function(controller)
             frontier_screen = tonumber(macro.frontierScreenCount) or 0,
             home_reserve = tonumber(macro.homeReserveCount) or 0,
             campaign_state = tostring(macro.campaignState or 'idle'),
+            campaign_kind = tostring(macro.campaignKind or 'none'),
             campaign_cluster = tostring(macro.campaignCluster or 'none'),
             campaign_objective = tostring(macro.campaignObjective or 'none'),
+            stable_anchor_key = tostring(macro.campaignAnchorKey or 'none'),
+            stable_anchor_x = tonumber(macro.campaignAnchorX) or -1,
+            stable_anchor_z = tonumber(macro.campaignAnchorZ) or -1,
             field_units = tonumber(macro.fieldUnits) or 0,
             field_aa = tonumber(macro.fieldAa) or 0,
             field_at_anchor = tonumber(macro.fieldAtAnchor) or 0,
+            field_arrival_quorum = tonumber(macro.campaignArrivalQuorum) or 0,
+            forward_distance = tonumber(macro.campaignForwardDistance) or -1,
             home_units = tonumber(macro.homeUnits) or 0,
             home_aa = tonumber(macro.homeAa) or 0,
             mission_age = tonumber(macro.campaignMissionAge) or -1,
@@ -4745,6 +4850,10 @@ Controller.Step = function(controller)
                 macro.campaignLastProgressTick
             ) or -1,
             full_field_orders = tonumber(macro.campaignFullFieldOrders) or 0,
+            reinforcement_orders = tonumber(
+                macro.campaignReinforcementOrders
+            ) or 0,
+            recovery_orders = tonumber(macro.campaignRecoveryOrders) or 0,
             mode_switches = tonumber(macro.campaignModeSwitches) or 0,
             campaign_emergency = macro.campaignEmergency == true,
             engineer_demand = tonumber(macro.engineerDemand) or 0,
