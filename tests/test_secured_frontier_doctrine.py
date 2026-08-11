@@ -1786,6 +1786,31 @@ def test_reclaim_query_is_cadenced_bounded_and_limited_to_controlled_engineer_vi
     assert all(rect[2] - rect[0] <= 16 and rect[3] - rect[1] <= 16 for rect in plain(harness.calls.reclaimQuery))
 
 
+def test_reclaim_query_uses_the_full_live_t1_engineer_vision_radius() -> None:
+    harness = make_harness()
+    engineer = harness.unit(
+        entityId=1,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        visionRadius=18,
+    )
+    visible = make_reclaim_prop(
+        harness,
+        entityId=101,
+        position=[25, 2, 20],
+        mass=40,
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    harness.brain.reclaimables = harness.lua.table_from([visible])
+
+    observation = plain(harness.observe())
+
+    assert [candidate["key"] for candidate in observation.get("reclaim", [])] == [
+        "prop:101"
+    ]
+    assert plain(harness.calls.reclaimQuery)[0] == [-8, 2, 28, 38]
+
+
 def test_reclaim_candidates_ignore_units_stale_malformed_noise_and_sort_deterministically() -> None:
     harness = make_harness()
     engineer = harness.unit(
