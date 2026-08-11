@@ -2803,6 +2803,13 @@ local function ReleaseOperation(controller, token, reason)
     if operation.kind == 'factory_upgrade' then
         controller.upgradeState = reason and ('failed:' .. tostring(reason)) or 'completed'
     end
+    if reason and operation.operationId then
+        if reason == 'command_error' and ESCALATION.MarkExpansionAttemptRetryable then
+            ESCALATION.MarkExpansionAttemptRetryable(controller, operation, reason)
+        elseif ESCALATION.FailExpansionAttempt then
+            ESCALATION.FailExpansionAttempt(controller, operation, reason)
+        end
+    end
     controller.pending[token] = nil
     if reason then
         Emit(controller, 'operation_released', {
@@ -3139,6 +3146,8 @@ local function RecordPending(controller, intent, record)
         reason = intent.reason,
         regionKey = intent.regionKey,
         operationId = intent.operationId,
+        operationAttempt = intent.operationAttempt,
+        operationAttemptKey = intent.operationAttemptKey,
         escortTokens = CopyArray(intent.escortTokens or {}),
         clusterKey = intent.clusterKey,
         targetToken = intent.targetToken,
@@ -8696,6 +8705,29 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
     end
 end
 
+ESCALATION.OperationAttempt = function(value)
+    local actorToken = value and value.actorToken or nil
+    local attempt = tonumber(value and (value.operationAttempt or value.retryCount)) or 0
+    if type(actorToken) ~= 'string' or attempt ~= attempt
+        or attempt < 0 or attempt > 1000000000
+    then
+        return nil, nil
+    end
+    attempt = math.floor(attempt)
+    return actorToken .. '#' .. tostring(attempt), attempt
+end
+
+ESCALATION.OperationAttemptFields = function(value, extra)
+    local fields = extra or {}
+    local attemptKey, attempt = ESCALATION.OperationAttempt(value)
+    if attemptKey then
+        fields.actor = value.actorToken
+        fields.attempt = attempt
+        fields.attemptKey = attemptKey
+    end
+    return fields
+end
+
 ESCALATION.EmitOperationPhase = function(controller, operationId, phase, fields)
     if type(operationId) ~= 'string' or type(phase) ~= 'string' then return end
     local emitted = controller.operationLifecycle[operationId]
@@ -8703,16 +8735,57 @@ ESCALATION.EmitOperationPhase = function(controller, operationId, phase, fields)
         emitted = {}
         controller.operationLifecycle[operationId] = emitted
     end
-    if emitted[phase] then return end
-    emitted[phase] = true
+    local bucket = emitted
+    local attemptKey = fields and fields.attemptKey or nil
+    if type(attemptKey) == 'string' then
+        emitted.attempts = emitted.attempts or {}
+        emitted.attempts[attemptKey] = emitted.attempts[attemptKey] or {}
+        bucket = emitted.attempts[attemptKey]
+    end
+    if bucket[phase] then return end
+    bucket[phase] = true
     local payload = {
         army = controller.brain.Army,
         tick = CurrentTick(controller),
         operation = operationId,
         phase = phase,
     }
-    for key, value in pairs(fields or {}) do payload[key] = value end
+    for key, value in pairs(fields or {}) do
+        if key ~= 'attemptKey' then payload[key] = value end
+    end
     Telemetry.Emit('operation', payload)
+end
+
+ESCALATION.MarkExpansionAttemptRetryable = function(controller, value, reason)
+    if type(value) ~= 'table' or type(value.operationId) ~= 'string'
+        or reason == 'actor_missing'
+    then
+        return
+    end
+    local job = ((controller.jobLedger or {}).jobs or {})[value.operationId]
+    local _, attempt = ESCALATION.OperationAttempt(value)
+    if job and job.actorToken == value.actorToken
+        and (tonumber(job.retryCount) or 0) == (attempt or 0)
+        and job.phase ~= 'completed' and job.phase ~= 'retryable'
+        and job.phase ~= 'cancelled'
+    then
+        job.phase = 'retryable'
+        job.failureReason = reason or 'command_rejected'
+        job.retryCount = (attempt or 0) + 1
+        job.lastProgressTick = CurrentTick(controller)
+        job.ordered = nil
+        job.orderedActorToken = nil
+        job.orderedAttempt = nil
+    end
+end
+
+ESCALATION.FailExpansionAttempt = function(controller, value, reason)
+    if type(value) ~= 'table' or type(value.operationId) ~= 'string' then return end
+    local fields = ESCALATION.OperationAttemptFields(value, {
+        reason = reason or 'command_rejected',
+    })
+    ESCALATION.EmitOperationPhase(controller, value.operationId, 'rejected', fields)
+    ESCALATION.MarkExpansionAttemptRetryable(controller, value, reason)
 end
 
 ESCALATION.AvailableDirectorActor = function(controller, observation, role, buildRole, reserved)
@@ -8856,7 +8929,7 @@ ESCALATION.AdaptPackageIntents = function(
 )
     local expansionLane = ((macroPlan or {}).lanes or {}).mex_rebuild or {}
     if (macroPlan or {}).valid ~= true
-        or ((macroPlan or {}).stalled == true and expansionLane.admitted ~= true)
+        or (expansionLane.admitted ~= true and expansionLane.preserved ~= true)
     then
         return
     end
@@ -8866,7 +8939,12 @@ ESCALATION.AdaptPackageIntents = function(
         point_defense = { 0, 4 },
         land_factory = { 8, 0 },
     }
-    for _, role in ipairs((packagePlan or {}).requiredRoles or {}) do
+    local requiredRoles = CopyArray((packagePlan or {}).requiredRoles or {})
+    table.sort(requiredRoles)
+    for _, role in ipairs(requiredRoles) do
+        local semanticKey = role == 'radar' and type(region.key) == 'string'
+            and ('semantic:build_structure:radar:' .. region.key)
+            or nil
         local present = false
         for _, unit in ipairs(observation.units or {}) do
             if unit.role == role and unit.complete == true
@@ -8878,12 +8956,14 @@ ESCALATION.AdaptPackageIntents = function(
         for _, operation in pairs(controller.pending or {}) do
             if operation.buildRole == role and operation.regionKey == region.key then present = true end
         end
-        if not present then
+        if present and semanticKey then reserved[semanticKey] = true end
+        if not present and not (semanticKey and reserved[semanticKey]) then
             local actor = ESCALATION.AvailableDirectorActor(
                 controller, observation, 'engineer', role, reserved
             )
             if actor then
                 reserved[actor.token] = true
+                if semanticKey then reserved[semanticKey] = true end
                 local offset = TableGetn((packagePlan or {}).requiredRoles or {}) == 1
                     and { 0, 0 }
                     or (offsets[role] or { 0, 0 })
@@ -8910,27 +8990,74 @@ ESCALATION.AdaptRadarIntents = function(
 )
     local expansionLane = ((macroPlan or {}).lanes or {}).mex_rebuild or {}
     if (macroPlan or {}).valid ~= true
-        or ((macroPlan or {}).stalled == true and expansionLane.admitted ~= true)
+        or (expansionLane.admitted ~= true and expansionLane.preserved ~= true)
     then
         return
     end
-    for _, source in ipairs(radarIntents or {}) do
+    local orderedSources = ESCALATION.DeepCopy(radarIntents or {})
+    table.sort(orderedSources, function(a, b)
+        local aKey = tostring(a.regionKey or '') .. ':' .. tostring(a.actorToken or '')
+        local bKey = tostring(b.regionKey or '') .. ':' .. tostring(b.actorToken or '')
+        if aKey == bKey then
+            local ap = CopyPosition(a.position) or {}
+            local bp = CopyPosition(b.position) or {}
+            return tostring(ap[1] or '') .. ':' .. tostring(ap[3] or '')
+                < tostring(bp[1] or '') .. ':' .. tostring(bp[3] or '')
+        end
+        return aKey < bKey
+    end)
+    for _, source in ipairs(orderedSources) do
         local intent = ESCALATION.DeepCopy(source)
+        local semanticKey = type(intent.regionKey) == 'string'
+            and ('semantic:build_structure:radar:' .. intent.regionKey)
+            or nil
+        if semanticKey and not reserved[semanticKey] then
+            local regionPosition = CopyPosition(intent.position)
+            for _, region in ipairs((macroPlan or {}).regions or {}) do
+                if region.key == intent.regionKey and region.position then
+                    regionPosition = CopyPosition(region.position)
+                    break
+                end
+            end
+            if regionPosition then
+                for _, unit in ipairs(observation.units or {}) do
+                    if unit.role == 'radar' and unit.complete == true
+                        and Distance(unit.position, regionPosition) <= 24
+                    then
+                        reserved[semanticKey] = true
+                        break
+                    end
+                end
+            end
+        end
+        if semanticKey and not reserved[semanticKey] then
+            for _, operation in pairs(controller.pending or {}) do
+                if operation.buildRole == 'radar'
+                    and operation.regionKey == intent.regionKey
+                then
+                    reserved[semanticKey] = true
+                end
+            end
+        end
         intent.positionCandidates = ESCALATION.DirectorPlacementCandidates(
             observation, 'radar', intent.position
         )
-        if not intent.actorToken then
+        if not (semanticKey and reserved[semanticKey]) and not intent.actorToken then
             local actor = ESCALATION.AvailableDirectorActor(
                 controller, observation, 'engineer', 'radar', reserved
             )
             if actor then intent.actorToken = actor.token end
         end
-        if intent.actorToken and not reserved[intent.actorToken] then
+        if not (semanticKey and reserved[semanticKey])
+            and intent.actorToken and not reserved[intent.actorToken]
+        then
             reserved[intent.actorToken] = true
+            if semanticKey then reserved[semanticKey] = true end
             intent.kind = 'build_structure'
             intent.priority = tonumber(intent.priority) or 2
             ESCALATION.AppendDirectorIntent(intents, intent)
-        elseif not intent.actorToken then
+        elseif not (semanticKey and reserved[semanticKey]) and not intent.actorToken then
+            if semanticKey then reserved[semanticKey] = true end
             intent.kind = 'build_structure'
             intent.priority = tonumber(intent.priority) or 2
             ESCALATION.AppendDirectorIntent(intents, intent)
@@ -8945,10 +9072,17 @@ ESCALATION.AdaptExpansionIntents = function(controller, expansionPlan, forcePlan
             and controller.pending[job.actorToken] or nil
         local lifecycle = id and controller.operationLifecycle[id] or nil
         local alreadyActive = pending and pending.operationId == id
-        if id and not alreadyActive and not (lifecycle and lifecycle.ordered) then
+        local attemptKey, attempt = ESCALATION.OperationAttempt(job)
+        local attemptLifecycle = attemptKey and lifecycle and lifecycle.attempts
+            and lifecycle.attempts[attemptKey] or nil
+        local alreadyIssued = job.orderedActorToken == job.actorToken
+            and (tonumber(job.orderedAttempt) or 0) == (attempt or 0)
+        if attemptLifecycle and attemptLifecycle.ordered == true then alreadyIssued = true end
+        if id and not alreadyActive and not alreadyIssued then
+            local attemptFields = ESCALATION.OperationAttemptFields(job, {})
             ESCALATION.EmitOperationPhase(controller, id, 'opportunity')
-            ESCALATION.EmitOperationPhase(controller, id, 'selected')
-            ESCALATION.EmitOperationPhase(controller, id, 'admitted')
+            ESCALATION.EmitOperationPhase(controller, id, 'selected', attemptFields)
+            ESCALATION.EmitOperationPhase(controller, id, 'admitted', attemptFields)
             local rejection = nil
             if type(job.siteKey) ~= 'string' then rejection = 'invalid_site' end
             if type(job.actorToken) ~= 'string' then rejection = 'invalid_actor' end
@@ -8965,9 +9099,10 @@ ESCALATION.AdaptExpansionIntents = function(controller, expansionPlan, forcePlan
             end
             if pending then rejection = 'actor_pending' end
             if rejection then
-                ESCALATION.EmitOperationPhase(controller, id, 'rejected', {
+                ESCALATION.EmitOperationPhase(controller, id, 'rejected',
+                    ESCALATION.OperationAttemptFields(job, {
                     reason = rejection,
-                })
+                }))
             else
             local intent = {
                 kind = 'build_structure',
@@ -8979,6 +9114,8 @@ ESCALATION.AdaptExpansionIntents = function(controller, expansionPlan, forcePlan
                 position = CopyPosition(job.position),
                 reason = job.kind == 'rebuild_mex' and 'rebuild_mex' or 'regional_expansion',
                 operationId = job.id,
+                operationAttempt = attempt or 0,
+                operationAttemptKey = attemptKey,
                 priority = 1,
             }
             if TableGetn(job.escortTokens or {}) > 0 then
@@ -9517,7 +9654,17 @@ ESCALATION.DirectorJobInput = function(controller, observation, expansionPlan)
             and (not existing or existing.phase == 'retryable'
                 or existing.phase == 'cancelled')
         then
-            TableInsert(newJobs, ESCALATION.DeepCopy(job))
+            local candidate = ESCALATION.DeepCopy(job)
+            if existing then
+                candidate.retryCount = math.max(
+                    tonumber(candidate.retryCount) or 0,
+                    tonumber(existing.retryCount) or 0
+                )
+                candidate.ordered = existing.ordered
+                candidate.orderedActorToken = existing.orderedActorToken
+                candidate.orderedAttempt = existing.orderedAttempt
+            end
+            TableInsert(newJobs, candidate)
         end
     end
     local targets = {}
@@ -10091,9 +10238,9 @@ ESCALATION.ExecuteEscortedExpansion = function(
         or usedActors[intent.actorToken] or controller.pending[intent.actorToken]
         or TableGetn(intent.escortTokens or {}) < 2
     then
-        ESCALATION.EmitOperationPhase(controller, intent.operationId, 'rejected', {
-            reason = 'escort_preflight_failed',
-        })
+        ESCALATION.FailExpansionAttempt(
+            controller, intent, 'escort_preflight_failed'
+        )
         return false
     end
     local allowed = {}
@@ -10106,49 +10253,53 @@ ESCALATION.ExecuteEscortedExpansion = function(
         if not allowed[token] or usedActors[token] or not record
             or COMBAT_ROLES[record.role] ~= true or record.complete ~= true
         then
-            ESCALATION.EmitOperationPhase(controller, intent.operationId, 'rejected', {
-                reason = 'escort_validation_failed',
-            })
+            ESCALATION.FailExpansionAttempt(
+                controller, intent, 'escort_validation_failed'
+            )
             return false
         end
         local actor = LiveOwnedActor(controller, token, record, record.role)
         if not actor then
-            ESCALATION.EmitOperationPhase(controller, intent.operationId, 'rejected', {
-                reason = 'escort_validation_failed',
-            })
+            ESCALATION.FailExpansionAttempt(
+                controller, intent, 'escort_validation_failed'
+            )
             return false
         end
         if ESCALATION.antiAirRoles[record.role] then aa = aa + 1 else land = land + 1 end
         TableInsert(escorts, actor)
     end
     if aa < 1 or land < 1 then
-        ESCALATION.EmitOperationPhase(controller, intent.operationId, 'rejected', {
-            reason = 'escort_composition_failed',
-        })
+        ESCALATION.FailExpansionAttempt(
+            controller, intent, 'escort_composition_failed'
+        )
         return false
     end
     if not pcall(function() IssueGuard(escorts, engineer) end) then
-        ESCALATION.EmitOperationPhase(controller, intent.operationId, 'rejected', {
-            reason = 'escort_order_failed',
-        })
+        ESCALATION.FailExpansionAttempt(controller, intent, 'escort_order_failed')
         return false
     end
     local buildIntent = ESCALATION.DeepCopy(intent)
     buildIntent.kind = 'build_structure'
     if not ExecuteStructure(controller, buildIntent, engineerRecord) then
         pcall(function() IssueClearCommands(escorts) end)
-        ESCALATION.EmitOperationPhase(controller, intent.operationId, 'rejected', {
-            reason = 'build_order_failed',
-        })
+        ESCALATION.FailExpansionAttempt(controller, intent, 'build_order_failed')
         return false
     end
-    ESCALATION.EmitOperationPhase(controller, intent.operationId, 'ordered')
+    ESCALATION.EmitOperationPhase(
+        controller, intent.operationId, 'ordered',
+        ESCALATION.OperationAttemptFields(intent, {})
+    )
     local ledgerJob = (controller.jobLedger.jobs or {})[intent.operationId]
     if ledgerJob then
         ledgerJob.ordered = true
+        ledgerJob.orderedActorToken = intent.actorToken
+        ledgerJob.orderedAttempt = tonumber(intent.operationAttempt) or 0
         ledgerJob.phase = 'travelling'
     end
-    ESCALATION.EmitOperationPhase(controller, intent.operationId, 'travelling')
+    ESCALATION.EmitOperationPhase(
+        controller, intent.operationId, 'travelling',
+        ESCALATION.OperationAttemptFields(intent, {})
+    )
     usedActors[intent.actorToken] = true
     for _, token in ipairs(intent.escortTokens or {}) do usedActors[token] = true end
     return true
@@ -10302,29 +10453,29 @@ Controller.Execute = function(controller, intents, observation)
                         or nil
                     if issued and ledgerJob then
                         ledgerJob.ordered = true
+                        ledgerJob.orderedActorToken = intent.actorToken
+                        ledgerJob.orderedAttempt = tonumber(intent.operationAttempt) or 0
                         ledgerJob.phase = 'travelling'
                     end
                     if issued and intent.operationId then
                         ESCALATION.EmitOperationPhase(
-                            controller, intent.operationId, 'ordered'
+                            controller, intent.operationId, 'ordered',
+                            ESCALATION.OperationAttemptFields(intent, {})
                         )
                         ESCALATION.EmitOperationPhase(
-                            controller, intent.operationId, 'travelling'
+                            controller, intent.operationId, 'travelling',
+                            ESCALATION.OperationAttemptFields(intent, {})
                         )
                     end
                     usedActors[intent.actorToken] = true
                 elseif intent.operationId then
-                    ESCALATION.EmitOperationPhase(
-                        controller, intent.operationId, 'rejected', {
-                            reason = 'command_rejected',
-                        }
+                    ESCALATION.FailExpansionAttempt(
+                        controller, intent, 'command_rejected'
                     )
                 end
             elseif intent.operationId then
-                ESCALATION.EmitOperationPhase(
-                    controller, intent.operationId, 'rejected', {
-                        reason = 'actor_missing',
-                    }
+                ESCALATION.FailExpansionAttempt(
+                    controller, intent, 'actor_missing'
                 )
             end
         end

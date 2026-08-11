@@ -544,6 +544,9 @@ local function ReleaseJob(job, result, reason)
     job.phase = 'retryable'
     job.failureReason = reason
     job.retryCount = (Number(job.retryCount, 0) or 0) + 1
+    job.ordered = nil
+    job.orderedActorToken = nil
+    job.orderedAttempt = nil
     if job.actorToken then table.insert(result.releasedActorTokens, job.actorToken) end
 end
 
@@ -552,8 +555,24 @@ local function TokenIdentity(token)
     return string.match(token, '^(.*):[^:]+$') or token
 end
 
+local function ExactGenerationToken(token)
+    return type(token) == 'string'
+        and string.match(token, '^.+:%d+$') ~= nil
+end
+
+local function ValidPosition(position)
+    return type(position) == 'table'
+        and SignedNumber(position[1], nil) ~= nil
+        and SignedNumber(position[2], nil) ~= nil
+        and SignedNumber(position[3], nil) ~= nil
+end
+
 local function CanReplaceMexEngineer(actor, replacedToken)
-    if type(actor) ~= 'table' or type(actor.token) ~= 'string' then return false end
+    if type(actor) ~= 'table' or not ExactGenerationToken(actor.token)
+        or not ValidPosition(actor.position)
+    then
+        return false
+    end
     if actor.available ~= true or actor.live ~= true or actor.owned ~= true
         or actor.complete ~= true
         or (actor.role ~= 'engineer' and actor.roleFamily ~= 'engineer')
@@ -567,6 +586,9 @@ end
 
 local function ExistingMexEngineerInvalid(actor)
     if not actor or actor.live ~= true or actor.owned ~= true then return true end
+    if not ExactGenerationToken(actor.token) or not ValidPosition(actor.position) then
+        return true
+    end
     if actor.complete ~= nil and actor.complete ~= true then return true end
     if actor.role ~= nil and actor.role ~= 'engineer'
         and actor.roleFamily ~= 'engineer'
@@ -653,6 +675,9 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                 job.retryCount = (Number(job.retryCount, 0) or 0) + 1
                 if replacement then
                     job.actorToken = replacement.token
+                    job.ordered = nil
+                    job.orderedActorToken = nil
+                    job.orderedAttempt = nil
                     claimed[replacement.token] = true
                     job.phase = 'travelling'
                     job.failureReason = nil
@@ -662,6 +687,9 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                 else
                     job.phase = 'retryable'
                     job.failureReason = 'actor_unavailable'
+                    job.ordered = nil
+                    job.orderedActorToken = nil
+                    job.orderedAttempt = nil
                 end
             elseif job.phase == 'building' then
                 local progressed = false

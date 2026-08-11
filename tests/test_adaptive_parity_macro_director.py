@@ -1096,6 +1096,9 @@ class TestRegionalMacro:
                     "lastProgressTick": 100,
                     "remainingDistance": 100,
                     "retryCount": 0,
+                    "ordered": True,
+                    "orderedActorToken": "eng-1:1",
+                    "orderedAttempt": 0,
                 }
             }
         }
@@ -1124,6 +1127,9 @@ class TestRegionalMacro:
 
         assert released["jobs"]["mex:front:1"]["phase"] == "retryable"
         assert released["jobs"]["mex:front:1"]["retryCount"] == 1
+        assert "ordered" not in released["jobs"]["mex:front:1"]
+        assert "orderedActorToken" not in released["jobs"]["mex:front:1"]
+        assert "orderedAttempt" not in released["jobs"]["mex:front:1"]
         assert released["releasedActorTokens"] == ["eng-1:1"]
         assert len(repeated["releasedActorTokens"]) == 0
         assert repeated["jobs"]["mex:front:1"]["retryCount"] == 1
@@ -1207,6 +1213,23 @@ class TestRegionalMacro:
                 "canBuild": {"mass_extractor": False},
                 "position": [20, 0, 0],
             },
+            {
+                "token": "eng-1:1",
+                "role": "engineer",
+                "complete": True,
+                "live": True,
+                "owned": True,
+                "canBuild": {"mass_extractor": True},
+            },
+            {
+                "token": "eng-1:1",
+                "role": "engineer",
+                "complete": True,
+                "live": True,
+                "owned": True,
+                "canBuild": {"mass_extractor": True},
+                "position": [float("nan"), 0, 0],
+            },
         )
 
         for invalid in invalid_actors:
@@ -1262,6 +1285,9 @@ class TestRegionalMacro:
                     "lastProgressTick": 100,
                     "remainingDistance": 100,
                     "retryCount": 0,
+                    "ordered": True,
+                    "orderedActorToken": "original:1",
+                    "orderedAttempt": 0,
                 }
             }
         }
@@ -1288,6 +1314,9 @@ class TestRegionalMacro:
                 "canBuild": {"mass_extractor": False},
                 "position": [92, 0, 0],
             },
+            {**base, "token": "missing-position:1"},
+            {**base, "token": "nan-position:1", "position": [float("nan"), 0, 0]},
+            {**base, "token": "missing-generation", "position": [91, 0, 0]},
             {**base, "token": "valid-near:3", "position": [80, 0, 0]},
             {**base, "token": "valid-far:1", "position": [20, 0, 0]},
         ]
@@ -1307,9 +1336,13 @@ class TestRegionalMacro:
             },
         )
 
-        assert result["jobs"]["mex:front:1"]["actorToken"] == "valid-near:3"
-        assert result["jobs"]["mex:front:1"]["phase"] == "travelling"
-        assert result["jobs"]["mex:front:1"]["retryCount"] == 1
+        job = result["jobs"]["mex:front:1"]
+        assert job["actorToken"] == "valid-near:3"
+        assert job["phase"] == "travelling"
+        assert job["retryCount"] == 1
+        assert "ordered" not in job
+        assert "orderedActorToken" not in job
+        assert "orderedAttempt" not in job
         assert result["releasedActorTokens"] == ["original:1"]
 
     def test_job_replacement_fails_closed_when_no_complete_owned_mex_capable_engineer_exists(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from conftest import source
 from test_controller import execute_intents, make_harness
 from test_policy import lua_value, plain
 from tools.overmind4_runner import parsing
@@ -26,6 +27,58 @@ def _set_starved_economy(harness: Any) -> None:
     harness.brain.energyStoredRatio = 0
 
 
+def _use_real_macro_job_ledger(harness: Any) -> None:
+    """Keep the Controller harness adapters but exercise the production ledger."""
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute(
+        "MacroDirectorStub.UpdateJobLedger = MacroDirector.UpdateJobLedger"
+    )
+
+
+def _configure_local_expansion(
+    harness: Any,
+    *,
+    actor_token: str = "72:1",
+    operation_id: str = "mex:home:near",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    site = plain(harness.controller.markers.mass[1])
+    job = {
+        "id": operation_id,
+        "kind": "build_mex",
+        "actorToken": actor_token,
+        "targetKey": site["key"],
+        "siteKey": site["key"],
+        "regionKey": "home",
+        "position": site["position"],
+        "estimatedTravelTicks": 10,
+        "requiresEscort": False,
+    }
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+    _set_director_result(harness, "expansionPlan", {"jobs": [job], "denials": []})
+    return site, job
+
+
+def _operation_events(harness: Any, operation_id: str) -> list[dict[str, str]]:
+    return [
+        fields
+        for line in harness.logs
+        if (fields := parsing.overmind_marker_fields(line)) is not None
+        and fields.get("kind") == "operation"
+        and fields.get("operation") == operation_id
+    ]
+
+
 def test_controller_assembles_director_snapshot_in_dependency_order_and_persists_state() -> None:
     harness = make_harness()
     _set_director_result(
@@ -44,7 +97,10 @@ def test_controller_assembles_director_snapshot_in_dependency_order_and_persists
         {
             "valid": True,
             "epoch": 1,
-            "lanes": {"air_production": {"admitted": True}},
+            "lanes": {
+                "air_production": {"admitted": True},
+                "mex_rebuild": {"admitted": True},
+            },
             "regions": [
                 {"key": "home", "state": "secured", "position": [10, 2, 20]}
             ],
@@ -491,7 +547,7 @@ def test_step_default_merge_adapts_every_planner_output_once_and_persists_lifecy
             {
                 "valid": True,
                 "epoch": epoch,
-                "lanes": {},
+                "lanes": {"mex_rebuild": {"admitted": True}},
                 "regions": [region],
                 "intents": [],
             },
@@ -1190,7 +1246,216 @@ def test_region_package_and_mex_upgrade_intents_issue_exact_blueprints_and_persi
     }
 
 
-def test_stalled_region_package_and_radar_require_an_admitted_expansion_lane() -> None:
+def test_region_package_and_radar_always_require_a_valid_funded_expansion_lane() -> None:
+    cases = (
+        (True, {"admitted": False, "preserved": False}, False),
+        (False, {"admitted": True, "preserved": False}, False),
+        (True, {"admitted": True, "preserved": False}, True),
+        (True, {"admitted": False, "preserved": True}, True),
+    )
+    for valid, lane, expected in cases:
+        harness = make_harness()
+        harness.lua.execute(
+            "Policy.Decide = function(snapshot) "
+            "table.insert(calls.policySnapshots, snapshot); return {} end"
+        )
+        engineers = [
+            harness.unit(
+                entityId=entity_id,
+                blueprintId="uel0105",
+                position=[10 + entity_id, 2, 20],
+                canBuild={"ueb3101": True, "ueb2101": True},
+            )
+            for entity_id in (10, 11)
+        ]
+        harness.brain.units = harness.lua.table_from(engineers)
+        region = {
+            "key": "front",
+            "state": "secured",
+            "position": [100, 2, 100],
+        }
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": valid,
+                "epoch": 1,
+                "stalled": False,
+                "lanes": {"mex_rebuild": lane},
+                "regions": [region],
+                "intents": [],
+            },
+        )
+        _set_director_result(
+            harness, "regionPackagePlan", {"requiredRoles": ["point_defense"]}
+        )
+        _set_director_result(
+            harness,
+            "radarIntents",
+            [
+                {
+                    "buildRole": "radar",
+                    "regionKey": "front",
+                    "position": [104, 2, 100],
+                }
+            ],
+        )
+
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        builds = sorted(
+            call.blueprintId for call in harness.calls.buildMobile.values()
+        )
+        director_intents = plain(harness.calls.policySnapshots[1])["directorIntents"]
+        funded_intents = [
+            intent
+            for intent in director_intents
+            if intent.get("buildRole") in {"radar", "point_defense"}
+        ]
+        if expected:
+            assert builds == ["ueb2101", "ueb3101"]
+            assert len(funded_intents) == 2
+        else:
+            assert builds == []
+            assert funded_intents == []
+
+
+def test_package_and_intelligence_radar_semantically_dedupe_with_retry() -> None:
+    radar_orders = (
+        (11, 12),
+        (12, 11),
+    )
+    for order in radar_orders:
+        harness = make_harness()
+        harness.lua.execute(
+            "Policy.Decide = function(snapshot) "
+            "table.insert(calls.policySnapshots, snapshot); return {} end"
+        )
+        engineers = [
+            harness.unit(
+                entityId=entity_id,
+                blueprintId="uel0105",
+                position=[entity_id, 2, 20],
+                canBuild={"ueb3101": True},
+            )
+            for entity_id in (10, 11, 12)
+        ]
+        harness.brain.units = harness.lua.table_from(engineers)
+        region = {
+            "key": "front",
+            "state": "secured",
+            "position": [100, 2, 100],
+        }
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": 1,
+                "lanes": {"mex_rebuild": {"admitted": True}},
+                "regions": [region],
+                "intents": [],
+            },
+        )
+        _set_director_result(
+            harness, "regionPackagePlan", {"requiredRoles": ["radar"]}
+        )
+        _set_director_result(
+            harness,
+            "radarIntents",
+            [
+                {
+                    "actorToken": f"{entity_id}:1",
+                    "buildRole": "radar",
+                    "regionKey": "front",
+                    "position": [104 + index, 2, 100],
+                }
+                for index, entity_id in enumerate(order)
+            ],
+        )
+
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        radar_intents = [
+            intent
+            for intent in plain(harness.calls.policySnapshots[1])["directorIntents"]
+            if intent.get("buildRole") == "radar"
+        ]
+        assert len(radar_intents) == 1
+        assert radar_intents[0]["actorToken"] == "10:1"
+        assert len(harness.calls.buildMobile) == 1
+        assert harness.calls.buildMobile[1].units[1].options.entityId == 10
+        pending = plain(harness.controller.pending)
+        assert list(pending) == ["10:1"]
+        assert pending["10:1"]["regionKey"] == "front"
+
+        harness.brain.tick = 1
+        harness.lua.globals().Controller.Step(harness.controller)
+        assert len(harness.calls.buildMobile) == 1
+        assert list(plain(harness.controller.pending)) == ["10:1"]
+
+    retry = make_harness()
+    retry.lua.execute(
+        "Policy.Decide = function(snapshot) "
+        "table.insert(calls.policySnapshots, snapshot); return {} end"
+    )
+    retry_engineers = [
+        retry.unit(
+            entityId=entity_id,
+            blueprintId="uel0105",
+            position=[entity_id, 2, 20],
+            canBuild={"ueb3101": True},
+        )
+        for entity_id in (10, 11)
+    ]
+    retry.brain.units = retry.lua.table_from(retry_engineers)
+    retry_region = {
+        "key": "front",
+        "state": "secured",
+        "position": [100, 2, 100],
+    }
+    _set_director_result(
+        retry,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [retry_region],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        retry, "regionPackagePlan", {"requiredRoles": ["radar"]}
+    )
+    _set_director_result(
+        retry,
+        "radarIntents",
+        [
+            {
+                "actorToken": "11:1",
+                "buildRole": "radar",
+                "regionKey": "front",
+                "position": [104, 2, 100],
+            }
+        ],
+    )
+    retry.calls.failBuildMobile = True
+    retry.lua.globals().Controller.Step(retry.controller)
+    assert len(retry.calls.buildMobile) == 1
+    assert len(retry.controller.pending) == 0
+
+    retry.calls.failBuildMobile = False
+    retry.brain.tick = 1
+    retry.lua.globals().Controller.Step(retry.controller)
+    assert len(retry.calls.buildMobile) == 2
+    assert [
+        call.units[1].options.entityId for call in retry.calls.buildMobile.values()
+    ] == [10, 10]
+    assert list(plain(retry.controller.pending)) == ["10:1"]
+
+
+def test_completed_regional_radar_suppresses_stale_intelligence_intent() -> None:
     harness = make_harness()
     harness.lua.execute(
         "Policy.Decide = function(snapshot) "
@@ -1200,13 +1465,12 @@ def test_stalled_region_package_and_radar_require_an_admitted_expansion_lane() -
         harness.unit(
             entityId=entity_id,
             blueprintId="uel0105",
-            position=[10 + entity_id, 2, 20],
-            canBuild={"ueb3101": True, "ueb2101": True},
+            position=[entity_id, 2, 20],
+            canBuild={"ueb3101": True},
         )
         for entity_id in (10, 11)
     ]
     harness.brain.units = harness.lua.table_from(engineers)
-    _set_starved_economy(harness)
     region = {"key": "front", "state": "secured", "position": [100, 2, 100]}
     _set_director_result(
         harness,
@@ -1214,20 +1478,20 @@ def test_stalled_region_package_and_radar_require_an_admitted_expansion_lane() -
         {
             "valid": True,
             "epoch": 1,
-            "stalled": True,
-            "lanes": {"mex_rebuild": {"admitted": False, "preserved": False}},
+            "lanes": {"mex_rebuild": {"admitted": True}},
             "regions": [region],
             "intents": [],
         },
     )
     _set_director_result(
-        harness, "regionPackagePlan", {"requiredRoles": ["point_defense"]}
+        harness, "regionPackagePlan", {"requiredRoles": ["radar"]}
     )
     _set_director_result(
         harness,
         "radarIntents",
         [
             {
+                "actorToken": "11:1",
                 "buildRole": "radar",
                 "regionKey": "front",
                 "position": [104, 2, 100],
@@ -1236,48 +1500,93 @@ def test_stalled_region_package_and_radar_require_an_admitted_expansion_lane() -
     )
 
     harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.buildMobile) == 1
+    assert list(plain(harness.controller.pending)) == ["10:1"]
 
-    assert len(harness.calls.buildMobile) == 0
-    denied = plain(harness.calls.policySnapshots[1])["directorIntents"]
-    assert not any(
-        intent.get("buildRole") in {"radar", "point_defense"}
-        for intent in denied
+    completed_radar = harness.unit(
+        entityId=80,
+        blueprintId="ueb3101",
+        position=[100, 2, 100],
     )
-
-    _set_director_result(
-        harness,
-        "macroPlan",
-        {
-            "valid": False,
-            "epoch": 2,
-            "stalled": False,
-            "lanes": {"mex_rebuild": {"admitted": True}},
-            "regions": [region],
-            "intents": [],
-        },
-    )
+    harness.brain.units = harness.lua.table_from([*engineers, completed_radar])
+    _set_director_result(harness, "regionPackagePlan", {"requiredRoles": []})
     harness.brain.tick = 1
     harness.lua.globals().Controller.Step(harness.controller)
-    assert len(harness.calls.buildMobile) == 0
 
+    assert len(harness.calls.buildMobile) == 1
+    assert plain(harness.controller.pending) == {}
+    second_radar_intents = [
+        intent
+        for intent in plain(harness.calls.policySnapshots[2])["directorIntents"]
+        if intent.get("buildRole") == "radar"
+    ]
+    assert second_radar_intents == []
+
+
+def test_radar_semantic_dedupe_keeps_distinct_regions_distinct() -> None:
+    harness = make_harness()
+    harness.lua.execute(
+        "Policy.Decide = function(snapshot) "
+        "table.insert(calls.policySnapshots, snapshot); return {} end"
+    )
+    engineers = [
+        harness.unit(
+            entityId=entity_id,
+            blueprintId="uel0105",
+            position=[entity_id, 2, 20],
+            canBuild={"ueb3101": True},
+        )
+        for entity_id in (10, 11, 12, 13)
+    ]
+    harness.brain.units = harness.lua.table_from(engineers)
+    regions = [
+        {"key": "front-a", "state": "secured", "position": [100, 2, 100]},
+        {"key": "front-b", "state": "secured", "position": [200, 2, 200]},
+    ]
     _set_director_result(
         harness,
         "macroPlan",
         {
             "valid": True,
-            "epoch": 3,
-            "stalled": True,
+            "epoch": 1,
             "lanes": {"mex_rebuild": {"admitted": True}},
-            "regions": [region],
+            "regions": regions,
             "intents": [],
         },
     )
-    harness.brain.tick = 2
+    _set_director_result(
+        harness, "regionPackagePlan", {"requiredRoles": ["radar"]}
+    )
+    _set_director_result(
+        harness,
+        "radarIntents",
+        [
+            {
+                "actorToken": f"{12 + index}:1",
+                "buildRole": "radar",
+                "regionKey": region["key"],
+                "position": region["position"],
+            }
+            for index, region in enumerate(regions)
+        ],
+    )
+
     harness.lua.globals().Controller.Step(harness.controller)
 
-    assert sorted(
-        call.blueprintId for call in harness.calls.buildMobile.values()
-    ) == ["ueb2101", "ueb3101"]
+    radar_intents = [
+        intent
+        for intent in plain(harness.calls.policySnapshots[1])["directorIntents"]
+        if intent.get("buildRole") == "radar"
+    ]
+    assert [(intent["regionKey"], intent["actorToken"]) for intent in radar_intents] == [
+        ("front-a", "10:1"),
+        ("front-b", "11:1"),
+    ]
+    assert len(harness.calls.buildMobile) == 2
+    pending_regions = sorted(
+        operation["regionKey"] for operation in plain(harness.controller.pending).values()
+    )
+    assert pending_regions == ["front-a", "front-b"]
 
 
 def test_singleton_region_radar_uses_bounded_live_alternate_build_probes() -> None:
@@ -1722,6 +2031,198 @@ def test_local_unescorted_expansion_reports_full_success_lifecycle_once() -> Non
         "ordered",
         "travelling",
     ]
+
+
+def test_real_ledger_replacement_reissues_once_for_new_exact_actor_generation() -> None:
+    harness = make_harness()
+    _use_real_macro_job_ledger(harness)
+    harness.lua.execute(
+        "Policy.Decide = function(snapshot) "
+        "table.insert(calls.policySnapshots, snapshot); return {} end"
+    )
+    original = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([original])
+    site, job = _configure_local_expansion(harness)
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert [
+        call.units[1].options.entityId for call in harness.calls.buildMobile.values()
+    ] == [72]
+    assert plain(harness.controller.pending)["72:1"]["operationId"] == job["id"]
+
+    recycled = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[11, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    dead = harness.unit(
+        entityId=68,
+        blueprintId="uel0105",
+        position=[11, 2, 20],
+        canBuild={"ueb1103": True},
+        Dead=True,
+    )
+    captured = harness.unit(
+        entityId=69,
+        blueprintId="uel0105",
+        position=[11, 2, 20],
+        canBuild={"ueb1103": True},
+        army=2,
+    )
+    malformed = harness.unit(
+        entityId=70,
+        blueprintId="uel0105",
+        position=[11, 2, 20],
+        canBuild={},
+    )
+    tank = harness.unit(
+        entityId=71,
+        blueprintId="uel0201",
+        position=[11, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    replacement = harness.unit(
+        entityId=73,
+        blueprintId="uel0105",
+        position=[13, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from(
+        [recycled, dead, captured, malformed, tank, replacement]
+    )
+    harness.brain.tick = 1
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert [
+        call.units[1].options.entityId for call in harness.calls.buildMobile.values()
+    ] == [72, 73]
+    pending = plain(harness.controller.pending)
+    assert list(pending) == ["73:1"]
+    assert pending["73:1"]["operationId"] == job["id"]
+    assert pending["73:1"]["operationAttempt"] == 1
+    assert plain(harness.controller.reservations)[site["key"]]["actorToken"] == "73:1"
+    ledger_job = plain(harness.controller.jobLedger)["jobs"][job["id"]]
+    assert ledger_job["actorToken"] == "73:1"
+    assert ledger_job["retryCount"] == 1
+    ordered = [
+        event for event in _operation_events(harness, job["id"])
+        if event["phase"] == "ordered"
+    ]
+    assert [(event["actor"], event["attempt"]) for event in ordered] == [
+        ("72:1", "0"),
+        ("73:1", "1"),
+    ]
+
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.buildMobile) == 2
+    assert list(plain(harness.controller.pending)) == ["73:1"]
+
+
+def test_real_ledger_replacement_fails_closed_without_an_eligible_new_identity() -> None:
+    harness = make_harness()
+    _use_real_macro_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    original = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([original])
+    _, job = _configure_local_expansion(harness)
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    recycled = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    malformed = harness.unit(
+        entityId=70,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        canBuild=None,
+    )
+    captured = harness.unit(
+        entityId=69,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        canBuild={"ueb1103": True},
+        army=2,
+    )
+    harness.brain.units = harness.lua.table_from([recycled, malformed, captured])
+    harness.brain.tick = 1
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert len(harness.controller.pending) == 0
+    ledger_job = plain(harness.controller.jobLedger)["jobs"][job["id"]]
+    assert ledger_job["phase"] == "retryable"
+    assert ledger_job["failureReason"] == "actor_unavailable"
+    assert ledger_job["actorToken"] == "72:1"
+
+
+def test_failed_expansion_command_becomes_a_new_attempt_then_dedupes_after_success() -> None:
+    harness = make_harness()
+    _use_real_macro_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    engineer = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    _, job = _configure_local_expansion(harness)
+    harness.calls.failBuildMobile = True
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    first_job = plain(harness.controller.jobLedger)["jobs"][job["id"]]
+    assert first_job["phase"] == "retryable"
+    assert first_job["retryCount"] == 1
+    assert first_job["failureReason"] == "command_error"
+    assert len(harness.controller.pending) == 0
+    assert len(harness.calls.buildMobile) == 1
+
+    harness.calls.failBuildMobile = False
+    harness.brain.tick = 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 2
+    pending = plain(harness.controller.pending)["72:1"]
+    assert pending["operationAttempt"] == 1
+    assert plain(harness.controller.jobLedger)["jobs"][job["id"]]["retryCount"] == 1
+    events = _operation_events(harness, job["id"])
+    assert [event["phase"] for event in events] == [
+        "opportunity",
+        "selected",
+        "admitted",
+        "rejected",
+        "selected",
+        "admitted",
+        "ordered",
+        "travelling",
+    ]
+    assert [
+        (event["actor"], event["attempt"])
+        for event in events
+        if event["phase"] in {"rejected", "ordered"}
+    ] == [("72:1", "0"), ("72:1", "1")]
+
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.buildMobile) == 2
 
 
 def test_unescorted_expansion_denial_reports_causal_denied_lifecycle() -> None:
