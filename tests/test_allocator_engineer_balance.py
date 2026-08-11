@@ -540,6 +540,36 @@ def test_full_mass_and_half_energy_convert_overflow_through_four_idle_land_facto
     assert all(reason == "continuous_land_production" for _, reason in orders)
 
 
+def test_nine_mex_income_sustains_four_land_factories_before_storage_overflows() -> None:
+    snapshot = _policy_allocator_snapshot("land_factory", "land_factory")
+    snapshot["economy"].update(
+        massStoredRatio=0.4,
+        energyStoredRatio=0.4,
+    )
+    snapshot["macro"].update(
+        recurringMassIncome=1.7,
+        recurringEnergyIncome=15.3,
+        engineerTarget=1,
+        engineerDemand=1,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=47,
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+        rollingMassStoredRatio=0.4,
+        rollingEnergyStoredRatio=0.4,
+    )
+
+    orders = _factory_orders(snapshot)
+
+    assert len(orders) == 4
+    assert all(reason == "continuous_land_production" for _, reason in orders)
+
+
 def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:
     snapshot = _policy_allocator_snapshot()
     snapshot["macro"].update(

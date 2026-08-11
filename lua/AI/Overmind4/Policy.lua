@@ -2470,6 +2470,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
     local factoryAccepted = 0
     local protectedCombatAccepted = false
     local overflowCombatAccepted = 0
+    local sustainedCombatAccepted = 0
     local actors = {}
     local completedLandFactories = 0
     local completedEngineers = 0
@@ -2501,13 +2502,33 @@ Policy.ApplyAllocator = function(snapshot, intents)
         lab = true,
         tank = true,
     }
+    local activeCombatLanes = 0
     for _, operation in ipairs(snapshot.pending or {}) do
         if operation.kind == 'factory_build'
             and landCombatRoles[operation.buildRole] == true
         then
             protectedCombatAccepted = true
-            break
+            activeCombatLanes = activeCombatLanes + 1
         end
+    end
+    local sustainableCombatSlots = 0
+    local recurringMassIncome = tonumber(macro.recurringMassIncome)
+    local recurringEnergyIncome = tonumber(macro.recurringEnergyIncome)
+    local tankBudget = Policy.requestEconomy.tank
+    if macro.economyLedgerValid == true
+        and FiniteNumber(recurringMassIncome)
+        and FiniteNumber(recurringEnergyIncome)
+        and recurringMassIncome >= 0
+        and recurringEnergyIncome >= 0
+    then
+        sustainableCombatSlots = math.min(
+            4,
+            completedLandFactories,
+            math.floor((recurringMassIncome + fitTolerance)
+                / tankBudget.massDrain),
+            math.floor((recurringEnergyIncome + fitTolerance)
+                / tankBudget.energyDrain)
+        )
     end
     local ordered = CopyArray(intents)
     local leadingExpansion = nil
@@ -2658,10 +2679,16 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 and intent.reason == 'continuous_land_production'
                 and landCombatRoles[intent.buildRole] == true
                 and overflowCombatAccepted < overflowFactorySlots
+            local sustainedCombat = intent.kind == 'factory_build'
+                and intent.reason == 'continuous_land_production'
+                and landCombatRoles[intent.buildRole] == true
+                and activeCombatLanes + sustainedCombatAccepted
+                    < sustainableCombatSlots
             local protectedFactoryLane = protectedCombat
                 or protectedAirScreen
                 or protectedAirScout
                 or overflowCombat
+                or sustainedCombat
                 or (concurrentUnlock and protectedCombatAccepted)
             local protectedUsesBank = false
             if allowed and structureRequest then
@@ -2716,7 +2743,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 local massFit = bankMass + fitTolerance >= massGap
                 local energyFit = bankEnergy + fitTolerance >= energyGap
                 if protectedFactoryLane then
-                    if overflowCombat then
+                    if overflowCombat or sustainedCombat then
                         allowed = true
                     else
                         local recurringFit = availableMass + fitTolerance
@@ -2741,7 +2768,8 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     energyFit = availableEnergy + fitTolerance >= requestEnergyDrain
                         and energyFit
                 end
-                allowed = overflowCombat or (massFit and energyFit)
+                allowed = overflowCombat or sustainedCombat
+                    or (massFit and energyFit)
             end
             if allowed then
                 local expansionRequest = structureRequest
@@ -2778,6 +2806,9 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 end
                 if overflowCombat then
                     overflowCombatAccepted = overflowCombatAccepted + 1
+                end
+                if sustainedCombat then
+                    sustainedCombatAccepted = sustainedCombatAccepted + 1
                 end
                 if protectedCombat then protectedCombatAccepted = true end
                 TableInsert(accepted, intent)
