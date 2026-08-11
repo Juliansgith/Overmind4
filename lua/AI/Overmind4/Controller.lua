@@ -86,6 +86,7 @@ local ESCALATION = {
     CAMPAIGN_MIN_LAND_FACTORIES = 2,
     CAMPAIGN_ATTRITION_TICKS = 600,
     CAMPAIGN_ATTRITION_RATIO = 0.25,
+    CAMPAIGN_ROLLBACK_COOLDOWN_TICKS = 600,
     antiAirRoles = {
         anti_air = true,
         t2_anti_air = true,
@@ -94,6 +95,14 @@ local ESCALATION = {
         air_factory = true,
         land_factory = true,
         land_factory_t2 = true,
+        power_generator = true,
+    },
+    placementObstacleRoles = {
+        air_factory = true,
+        hydrocarbon = true,
+        land_factory = true,
+        land_factory_t2 = true,
+        mass_extractor = true,
         power_generator = true,
     },
     factoryProducts = {
@@ -1274,13 +1283,28 @@ local function RefreshReclaim(controller, ownRecords, massSites)
 end
 
 local function UpdateMassSurplus(controller, economy)
-    local income = tonumber(economy.massIncome) or 0
-    local requested = tonumber(economy.massRequested) or tonumber(economy.massUsage) or 0
-    local trend = tonumber(economy.massTrend) or 0
-    local stored = tonumber(economy.massStoredRatio) or 0
+    local valid = type(economy.massIncome) == 'number'
+        and type(economy.massRequested) == 'number'
+        and type(economy.massTrend) == 'number'
+        and type(economy.massStoredRatio) == 'number'
+        and economy.massIncome == economy.massIncome
+        and economy.massRequested == economy.massRequested
+        and economy.massTrend == economy.massTrend
+        and economy.massStoredRatio == economy.massStoredRatio
+        and math.abs(economy.massIncome) <= 1000000000
+        and math.abs(economy.massRequested) <= 1000000000
+        and math.abs(economy.massTrend) <= 1000000000
+        and math.abs(economy.massStoredRatio) <= 1000000000
+        and economy.massIncome >= 0
+        and economy.massRequested >= 0
+    local income = valid and economy.massIncome or 0
+    local requested = valid and economy.massRequested or 0
+    local trend = valid and economy.massTrend or 0
+    local stored = valid and economy.massStoredRatio or 0
     local unused = math.max(0, income - requested)
     economy.unusedMass = unused
-    local healthy = requested <= income
+    local healthy = valid
+        and requested <= income
         and unused >= NEXT_FACTORY_SAFE_DRAIN_PER_TICK
         and stored >= MASS_STORED_FLOOR
         and (trend > 0 or stored >= 0.8)
@@ -1706,18 +1730,88 @@ local function MacroSnapshot(controller, units, economy)
     }
 end
 
-local function PlacementSnapshot(controller)
+ESCALATION.FootprintSpec = function(controller, role)
+    if type(role) ~= 'string' or ESCALATION.placementObstacleRoles[role] ~= true then
+        return nil
+    end
+    controller.placementFootprintSpecs = controller.placementFootprintSpecs or {}
+    local cached = controller.placementFootprintSpecs[role]
+    if cached then return cached end
+    local blueprintId = Catalog.IdFor(role)
+    local blueprint = blueprintId
+        and controller.brain.GetUnitBlueprint
+        and SafeCall(nil, controller.brain.GetUnitBlueprint, controller.brain, blueprintId)
+        or nil
+    if type(blueprint) ~= 'table' then return nil end
+    local footprint = type(blueprint.Footprint) == 'table'
+        and blueprint.Footprint
+        or (type(blueprint.Size) == 'table' and blueprint.Size or {})
+    local physics = type(blueprint.Physics) == 'table' and blueprint.Physics or {}
+    local footX = math.ceil(math.max(1, tonumber(footprint.SizeX) or 1))
+    local footZ = math.ceil(math.max(1, tonumber(footprint.SizeZ) or 1))
+    local skirtX = math.max(footX, tonumber(physics.SkirtSizeX) or 1)
+    local skirtZ = math.max(footZ, tonumber(physics.SkirtSizeZ) or 1)
+    cached = {
+        footX = footX,
+        footZ = footZ,
+        skirtX = skirtX,
+        skirtZ = skirtZ,
+        offsetX = tonumber(physics.SkirtOffsetX) or 0,
+        offsetZ = tonumber(physics.SkirtOffsetZ) or 0,
+    }
+    controller.placementFootprintSpecs[role] = cached
+    return cached
+end
+
+ESCALATION.PlacementRect = function(controller, role, position)
+    local copy = CopyPosition(position)
+    local spec = copy and ESCALATION.FootprintSpec(controller, role) or nil
+    if not spec then return nil end
+    local minimumX = copy[1] - spec.footX * 0.5 + spec.offsetX
+    local minimumZ = copy[3] - spec.footZ * 0.5 + spec.offsetZ
+    return {
+        minimumX,
+        minimumZ,
+        minimumX + spec.skirtX,
+        minimumZ + spec.skirtZ,
+    }
+end
+
+ESCALATION.PlacementRectsOverlap = function(left, right)
+    return type(left) == 'table'
+        and type(right) == 'table'
+        and left[1] < right[3]
+        and right[1] < left[3]
+        and left[2] < right[4]
+        and right[2] < left[4]
+end
+
+local function PlacementSnapshot(controller, units)
     local placements = {
         air_factory = {},
         land_factory = {},
         power_generator = {},
     }
     local claimed = {}
+    local occupiedRects = {}
+    local function AddOccupied(role, position)
+        local rect = ESCALATION.PlacementRect(controller, role, position)
+        if rect then TableInsert(occupiedRects, rect) end
+    end
+    for _, unit in ipairs(units or {}) do
+        if ESCALATION.placementObstacleRoles[unit.role] == true then
+            AddOccupied(unit.role, unit.position)
+        end
+    end
     for _, foundation in ipairs(controller.currentFoundations or {}) do
         if foundation.placementKey then claimed[foundation.placementKey] = true end
+        AddOccupied(foundation.role, foundation.position)
     end
     for _, operation in pairs(controller.pending or {}) do
         if operation.placementKey then claimed[operation.placementKey] = true end
+        if operation.position and operation.buildRole then
+            AddOccupied(operation.buildRole, operation.position)
+        end
     end
     local probes = 0
     local roleProbeStart = 0
@@ -1731,6 +1825,11 @@ local function PlacementSnapshot(controller)
         local candidate = TerrainPosition(position)
         local key = candidate and PlacementKey(candidate) or nil
         if not key or claimed[key] or SiteIsBlocked(controller, key) then return end
+        local candidateRect = ESCALATION.PlacementRect(controller, role, candidate)
+        if not candidateRect then return end
+        for _, occupied in ipairs(occupiedRects) do
+            if ESCALATION.PlacementRectsOverlap(candidateRect, occupied) then return end
+        end
         probes = probes + 1
         local blueprintId = Catalog.IdFor(role)
         if blueprintId
@@ -1739,6 +1838,7 @@ local function PlacementSnapshot(controller)
         then
             claimed[key] = true
             TableInsert(placements[role], candidate)
+            TableInsert(occupiedRects, candidateRect)
         end
     end
     local ringOffsets = {
@@ -1917,9 +2017,18 @@ local function OperationCompleted(controller, operation, observation, record)
                         for _, unit in ipairs(observation.units or {}) do
                             if unit.token == token then target = unit break end
                         end
-                        if target and target.role == operation.upgradeRole then
+                        if target
+                            and target.role == operation.upgradeRole
+                            and ESCALATION.UpgradeTargetActor(
+                                controller,
+                                token,
+                                target
+                            ) == focus
+                        then
                             operation.upgradeTargetToken = token
+                            operation.upgradeTargetReference = focus
                             operation.lastFraction = tonumber(target.fractionComplete) or 0
+                            operation.lastProgressTick = CurrentTick(controller)
                             return target.complete == true
                         end
                     end
@@ -1929,11 +2038,20 @@ local function OperationCompleted(controller, operation, observation, record)
         if operation.upgradeTargetToken then
             for _, unit in ipairs(observation.units or {}) do
                 if unit.token == operation.upgradeTargetToken then
-                    if unit.role ~= operation.upgradeRole then return false end
-                    operation.lastFraction = math.max(
-                        tonumber(operation.lastFraction) or 0,
-                        tonumber(unit.fractionComplete) or 0
-                    )
+                    if unit.role ~= operation.upgradeRole
+                        or not ESCALATION.UpgradeTargetActor(
+                            controller,
+                            unit.token,
+                            unit
+                        )
+                    then
+                        return false
+                    end
+                    local fraction = tonumber(unit.fractionComplete) or 0
+                    if fraction > (tonumber(operation.lastFraction) or 0) + 0.001 then
+                        operation.lastFraction = fraction
+                        operation.lastProgressTick = CurrentTick(controller)
+                    end
                     if unit.complete == true then
                         operation.completedToken = unit.token
                         return true
@@ -2226,7 +2344,7 @@ local function ExecuteStructure(controller, intent, record)
 end
 
 local function ExecuteFactoryProduction(controller, intent, record)
-    local legal = ESCALATION.factoryProducts[record.role]
+    local legal = record and ESCALATION.factoryProducts[record.role] or nil
     if controller.pending[intent.actorToken]
         or not legal
         or legal[intent.buildRole] ~= true
@@ -2238,8 +2356,22 @@ local function ExecuteFactoryProduction(controller, intent, record)
         return false
     end
     local blueprintId = Catalog.IdFor(intent.buildRole)
-    local actor = controller.unitRefs[intent.actorToken]
-    if not actor or not blueprintId or not CanUnitBuild(actor, blueprintId) then return false end
+    local actor = LiveOwnedActor(
+        controller,
+        intent.actorToken,
+        record,
+        record.role
+    )
+    if not actor
+        or not blueprintId
+        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or SafeCall(false, actor.IsUnitState, actor, 'Building') == true
+        or SafeCall(false, actor.IsUnitState, actor, 'Upgrading') == true
+        or SafeCall(false, actor.IsPaused, actor) == true
+        or not CanUnitBuild(actor, blueprintId)
+    then
+        return false
+    end
     RecordPending(controller, intent, record)
     local ok = pcall(function() IssueBuildFactory({ actor }, blueprintId, 1) end)
     if not ok then
@@ -2278,11 +2410,6 @@ ESCALATION.ExecuteUpgrade = function(controller, intent, record)
     intent.buildRole = intent.upgradeRole
     intent.position = CopyPosition(record.position)
     RecordPending(controller, intent, record)
-    local operation = controller.pending[intent.actorToken]
-    operation.deadlineTick = math.max(
-        tonumber(operation.deadlineTick) or 0,
-        CurrentTick(controller) + 3000
-    )
     local ok = pcall(function() IssueUpgrade({ actor }, blueprintId) end)
     if not ok then
         ReleaseOperation(controller, intent.actorToken, 'command_error')
@@ -2455,6 +2582,92 @@ local function LiveOwnedConstructionTarget(controller, token, record, expectedRo
     local blueprint = SafeCall(nil, target.GetBlueprint, target)
     if not blueprint or Catalog.RoleFor(blueprint.BlueprintId) ~= expectedRole then return nil end
     return target
+end
+
+ESCALATION.UpgradeTargetActor = function(controller, token, record)
+    local target = nil
+    if record and record.complete == true then
+        target = LiveOwnedActor(controller, token, record, 'land_factory_t2')
+    else
+        target = LiveOwnedConstructionTarget(
+            controller,
+            token,
+            record,
+            'land_factory_t2'
+        )
+    end
+    if not target then return nil end
+    local blueprint = SafeCall(nil, target.GetBlueprint, target)
+    local general = blueprint and blueprint.General or nil
+    if type(general) ~= 'table'
+        or tostring(general.UpgradesFrom or '')
+            ~= tostring(Catalog.IdFor('land_factory') or '')
+    then
+        return nil
+    end
+    return target
+end
+
+ESCALATION.UpgradeInProgress = function(controller, operation, record)
+    local actor = LiveOwnedActor(
+        controller,
+        operation.actorToken,
+        record,
+        'land_factory'
+    )
+    if not actor
+        or SafeCall(false, actor.IsUnitState, actor, 'Upgrading') ~= true
+        or SafeCall(false, actor.IsPaused, actor) == true
+        or type(operation.upgradeTargetToken) ~= 'string'
+    then
+        return false, nil
+    end
+    local reference = controller.unitRefs[operation.upgradeTargetToken]
+    local fraction = reference
+        and tonumber(SafeCall(nil, reference.GetFractionComplete, reference))
+        or nil
+    local target = fraction and ESCALATION.UpgradeTargetActor(
+        controller,
+        operation.upgradeTargetToken,
+        {
+            token = operation.upgradeTargetToken,
+            role = 'land_factory_t2',
+            complete = fraction >= 1,
+        }
+    ) or nil
+    local focus = SafeCall(nil, actor.GetFocusUnit, actor)
+    if not target or focus ~= target then return false, nil end
+    return true, actor
+end
+
+ESCALATION.UpgradeCommandMatches = function(operation, actor)
+    local expectedBlueprint = Catalog.IdFor(operation.upgradeRole)
+    for _, command in ipairs(SafeCall({}, actor.GetCommandQueue, actor) or {}) do
+        if tonumber(command.commandType) == 27
+            and tostring(command.blueprintId or '')
+                == tostring(expectedBlueprint or '')
+        then
+            return true
+        end
+    end
+    return false
+end
+
+ESCALATION.UpgradeCancellationMatches = function(operation, actor)
+    return operation.upgradeTargetReference ~= nil
+        and SafeCall(nil, actor.GetFocusUnit, actor)
+            == operation.upgradeTargetReference
+        and ESCALATION.UpgradeCommandMatches(operation, actor)
+end
+
+ESCALATION.UpgradeAccepted = function(controller, operation, record)
+    local active, actor = ESCALATION.UpgradeInProgress(
+        controller,
+        operation,
+        record
+    )
+    if not active then return false end
+    return ESCALATION.UpgradeCommandMatches(operation, actor)
 end
 
 local function LiveOwnedReference(controller, token, expectedRole)
@@ -3736,7 +3949,7 @@ local function CampaignCohortsStable(
     return true
 end
 
-local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
+local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade, tick)
     local records = CampaignCombatRecords(units)
     local previousState = campaign.state
     local previousPendingMode = campaign.pendingMode
@@ -3822,6 +4035,7 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
             or previousPendingMode == 'recover'
             or previousPendingMode == 'recall'
             or previousPendingMode == 'resume'
+            or previousPendingMode == 'rollback'
         then
             CampaignSetPending(campaign, previousPendingMode, field)
         elseif previousState == 'awaiting_order'
@@ -3895,8 +4109,18 @@ local function CampaignPruneAndFill(campaign, units, allowRecalledUpgrade)
         or campaign.pendingMode == 'recover'
         or campaign.pendingMode == 'recall'
         or campaign.pendingMode == 'resume'
+        or campaign.pendingMode == 'rollback'
     then
-        CampaignSetPending(campaign, campaign.pendingMode, field)
+        if campaign.pendingMode == 'rollback' and TableGetn(field) == 0 then
+            campaign.state = 'rebuilding'
+            campaign.rollbackReason = campaign.pendingRollbackReason or 'unknown'
+            campaign.pendingRollbackReason = nil
+            campaign.lastRollbackTick = tonumber(tick) or 0
+            campaign.pendingMode = nil
+            campaign.pendingTokens = {}
+        else
+            CampaignSetPending(campaign, campaign.pendingMode, field)
+        end
     elseif campaign.pendingMode == 'reinforce' then
         local unordered = {}
         for _, token in ipairs(field) do
@@ -4182,7 +4406,7 @@ local function UpdateFieldCampaign(controller, observation)
         campaign.attritionLost = math.max(0, attritionBaseline - liveBeforePrune)
         campaign.attritionWindow = tick - attritionStart
     end
-    CampaignPruneAndFill(campaign, observation.units, false)
+    CampaignPruneAndFill(campaign, observation.units, false, tick)
     if campaign.pendingMode == 'recall' then
         if campaign.pendingEmergencyReason == 'home_reserve' then
             local emergencyField, emergencyHome = EmergencyCampaignCohorts(
@@ -4207,7 +4431,7 @@ local function UpdateFieldCampaign(controller, observation)
         and campaign.healthySinceTick ~= nil
         and tick - campaign.healthySinceTick >= FIELD_CAMPAIGN_RESUME_TICKS
     if allowRecalledUpgrade then
-        CampaignPruneAndFill(campaign, observation.units, true)
+        CampaignPruneAndFill(campaign, observation.units, true, tick)
     end
     ApplyCampaignFlags(controller, campaign, observation.units)
     UpdatePressureProgress(controller, observation, campaign)
@@ -4259,7 +4483,15 @@ local function UpdateFieldCampaign(controller, observation)
     end
     if campaign.state == 'rebuilding' then
         if campaign.pendingMode == 'rollback' then return end
+        if campaign.pendingMode == 'resume' and not readinessReady then
+            campaign.pendingMode = nil
+            campaign.pendingTokens = {}
+        end
+        local rollbackCooldownReady = campaign.lastRollbackTick == nil
+            or tick - (tonumber(campaign.lastRollbackTick) or tick)
+                >= ESCALATION.CAMPAIGN_ROLLBACK_COOLDOWN_TICKS
         local canResume = readinessReady
+            and rollbackCooldownReady
             and ((campaign.rollbackReason == 'field_attrition'
                     and liveField >= attritionBaseline)
                 or (campaign.rollbackReason == 'repeated_no_progress'
@@ -4278,6 +4510,7 @@ local function UpdateFieldCampaign(controller, observation)
             campaign.state = 'rebuilding'
             campaign.rollbackReason = rollbackReason
             campaign.pendingRollbackReason = nil
+            campaign.lastRollbackTick = tick
         end
         return
     end
@@ -4474,7 +4707,13 @@ local function EmergencyRecallStagesLive(controller, campaign, recordByToken)
     return true
 end
 
-local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActors)
+local function ExecuteFieldCampaign(
+    controller,
+    intent,
+    recordByToken,
+    usedActors,
+    observation
+)
     local campaign = controller.fieldCampaign
     local allowedModes = {
         activate = true,
@@ -4511,6 +4750,24 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         or type(intent.objectiveKey) ~= 'string'
         or intent.objectiveKey ~= expectedAnchorKey
         or type(intent.actorTokens) ~= 'table'
+    then
+        return false
+    end
+    if (intent.mode == 'activate'
+            or intent.mode == 'transition'
+            or intent.mode == 'assault'
+            or intent.mode == 'resume')
+        and (type(observation) ~= 'table'
+            or type(observation.macro) ~= 'table'
+            or observation.macro.campaignReady ~= true)
+    then
+        return false
+    end
+    if intent.mode == 'resume'
+        and campaign.lastRollbackTick ~= nil
+        and CurrentTick(controller) - (tonumber(campaign.lastRollbackTick)
+            or CurrentTick(controller))
+            < ESCALATION.CAMPAIGN_ROLLBACK_COOLDOWN_TICKS
     then
         return false
     end
@@ -4657,6 +4914,8 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.bestDistance = 1000000000000
         campaign.bestAtAnchor = 0
         campaign.progressCohortSize = -1
+        campaign.recoveryWindows = 0
+        campaign.lastRecoveryAttemptTick = tick - FIELD_CAMPAIGN_STUCK_TICKS
         campaign.heldSinceTick = nil
         campaign.transitionEvents = campaign.transitionEvents + 1
         Emit(controller, 'campaign_transition', {
@@ -4683,6 +4942,8 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
         campaign.bestDistance = 1000000000000
         campaign.bestAtAnchor = 0
         campaign.progressCohortSize = -1
+        campaign.recoveryWindows = 0
+        campaign.lastRecoveryAttemptTick = tick - FIELD_CAMPAIGN_STUCK_TICKS
         campaign.heldSinceTick = nil
         campaign.assaultEvents = campaign.assaultEvents + 1
         Emit(controller, 'campaign_assault', {
@@ -4816,6 +5077,7 @@ Controller.Create = function(brain)
         upgradeState = 'none',
         lastPlacementProbeCount = 0,
         lastPlacementCapacity = 0,
+        placementFootprintSpecs = {},
         mexHistory = {},
         ownedMexCount = 0,
         lostMexCount = 0,
@@ -4884,7 +5146,9 @@ Controller.Observe = function(controller)
         massIncome = SafeCall(nil, controller.brain.GetEconomyIncome, controller.brain, 'MASS'),
         massUsage = SafeCall(nil, controller.brain.GetEconomyUsage, controller.brain, 'MASS'),
     }
-    economy.massRequested = SafeCall(economy.massUsage,
+    economy.energyRequested = SafeCall(nil,
+        controller.brain.GetEconomyRequested, controller.brain, 'ENERGY')
+    economy.massRequested = SafeCall(nil,
         controller.brain.GetEconomyRequested, controller.brain, 'MASS')
     UpdateMassSurplus(controller, economy)
     local sites = {
@@ -4917,7 +5181,7 @@ Controller.Observe = function(controller)
         sites = sites,
         foundations = foundations,
         reclaim = reclaim,
-        placements = PlacementSnapshot(controller),
+        placements = PlacementSnapshot(controller, units),
         pending = PendingArray(controller),
         state = StateSnapshot(controller),
     }
@@ -5017,6 +5281,25 @@ Controller.Reconcile = function(controller, observation)
             local actor = LiveOwnedActor(controller, token, record, record.role)
             if not actor then
                 ReleaseOperation(controller, token, 'actor_missing')
+            elseif operation.kind == 'factory_upgrade' then
+                if SafeCall(false, actor.IsUnitState, actor, 'Upgrading') ~= true then
+                    if record.idle == true
+                        and tick > (tonumber(operation.cancelRequestedTick) or tick)
+                    then
+                        ReleaseOperation(
+                            controller,
+                            token,
+                            operation.cancelReason or 'timeout'
+                        )
+                    end
+                elseif ESCALATION.UpgradeCancellationMatches(operation, actor) then
+                    RequestOperationCancellation(
+                        controller,
+                        operation,
+                        record,
+                        operation.cancelReason or 'timeout'
+                    )
+                end
             elseif record.idle == true
                 and tick > (tonumber(operation.cancelRequestedTick) or tick)
             then
@@ -5033,11 +5316,35 @@ Controller.Reconcile = function(controller, observation)
             and (not operation.targetToken or not records[operation.targetToken])
         then
             ReleaseOperation(controller, token, 'target_missing')
+        elseif operation.kind == 'factory_upgrade'
+            and operation.accepted == true
+            and not ESCALATION.UpgradeInProgress(controller, operation, record)
+        then
+            local actor = LiveOwnedActor(
+                controller,
+                token,
+                record,
+                'land_factory'
+            )
+            if actor
+                and SafeCall(false, actor.IsUnitState, actor, 'Upgrading') == true
+            then
+                if ESCALATION.UpgradeCancellationMatches(operation, actor) then
+                    RequestOperationCancellation(
+                        controller,
+                        operation,
+                        record,
+                        'target_missing'
+                    )
+                end
+            else
+                ReleaseOperation(controller, token, 'rejected')
+            end
         else
             OperationProgress(controller, operation, observation, record)
             if operation.kind == 'factory_upgrade'
                 and record.idle == true
-                and elapsed > REJECT_TICKS
+                and (operation.accepted == true or elapsed > REJECT_TICKS)
             then
                 ReleaseOperation(controller, token, 'rejected')
             elseif StructureOperation(operation)
@@ -5052,7 +5359,10 @@ Controller.Reconcile = function(controller, observation)
             then
                 ReleaseOperation(controller, token, 'rejected')
             elseif tick >= (tonumber(operation.deadlineTick) or (operation.issuedTick + OPERATION_TIMEOUT_TICKS)) then
-                if StructureOperation(operation) or operation.kind == 'reclaim' then
+                if StructureOperation(operation)
+                    or operation.kind == 'reclaim'
+                    or operation.kind == 'factory_upgrade'
+                then
                     if record.idle == true then
                         ReleaseOperation(controller, token, 'timeout')
                     elseif not RequestOperationCancellation(
@@ -5070,7 +5380,13 @@ Controller.Reconcile = function(controller, observation)
                     ReleaseOperation(controller, token, 'timeout')
                 end
             elseif elapsed >= VERIFY_TICKS then
-                if record.busy then operation.accepted = true end
+                if operation.kind == 'factory_upgrade' then
+                    if ESCALATION.UpgradeAccepted(controller, operation, record) then
+                        operation.accepted = true
+                    end
+                elseif record.busy then
+                    operation.accepted = true
+                end
                 if not operation.accepted and elapsed > REJECT_TICKS then
                     ReleaseOperation(controller, token, 'rejected')
                 elseif StructureOperation(operation)
@@ -5091,7 +5407,32 @@ Controller.Reconcile = function(controller, observation)
                             ReleaseOperation(controller, token, 'actor_missing')
                         end
                     end
+                elseif operation.kind == 'factory_upgrade'
+                    and operation.accepted == true
+                    and operation.phase == 'building'
+                    and tick - (tonumber(operation.lastProgressTick)
+                        or operation.issuedTick) > BUILD_STALL_TICKS
+                then
+                    if record.idle == true then
+                        ReleaseOperation(controller, token, 'stalled')
+                    elseif not RequestOperationCancellation(
+                        controller,
+                        operation,
+                        record,
+                        'stalled'
+                    ) then
+                        local actor = LiveOwnedActor(
+                            controller,
+                            token,
+                            record,
+                            record.role
+                        )
+                        if not actor then
+                            ReleaseOperation(controller, token, 'actor_missing')
+                        end
+                    end
                 elseif not StructureOperation(operation)
+                    and operation.kind ~= 'factory_upgrade'
                     and elapsed > OPERATION_TIMEOUT_TICKS
                 then
                     ReleaseOperation(controller, token, 'timeout')
@@ -5207,7 +5548,13 @@ Controller.Execute = function(controller, intents, observation)
         if intent.kind == 'field_campaign'
             and controller.fieldCampaignEnabled == true
         then
-            ExecuteFieldCampaign(controller, intent, records, usedActors)
+            ExecuteFieldCampaign(
+                controller,
+                intent,
+                records,
+                usedActors,
+                observation
+            )
         elseif intent.kind == 'air_screen' then
             ESCALATION.ExecuteAirScreen(
                 controller,

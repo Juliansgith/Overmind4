@@ -39,6 +39,46 @@ def make_harness() -> ControllerHarness:
             waits = {}, sequence = {}, unitReclaimInspections = 0,
         }
 
+        BlueprintData = {
+            ueb0101 = {
+                BlueprintId = 'ueb0101',
+                Footprint = { SizeX = 5, SizeZ = 5 },
+                Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
+                Economy = { BuildTime = 300, BuildRate = 20 },
+            },
+            ueb0102 = {
+                BlueprintId = 'ueb0102',
+                Footprint = { SizeX = 5, SizeZ = 5 },
+                Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
+                Economy = { BuildTime = 300, BuildRate = 20 },
+            },
+            ueb0201 = {
+                BlueprintId = 'ueb0201',
+                General = { UpgradesFrom = 'ueb0101' },
+                Footprint = { SizeX = 5, SizeZ = 5 },
+                Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
+                Economy = { BuildTime = 2300, BuildRate = 40 },
+            },
+            ueb1101 = {
+                BlueprintId = 'ueb1101',
+                Footprint = { SizeX = 1, SizeZ = 1 },
+                Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
+                Economy = { BuildTime = 125 },
+            },
+            ueb1102 = {
+                BlueprintId = 'ueb1102',
+                Footprint = { SizeX = 3, SizeZ = 3 },
+                Physics = { SkirtSizeX = 6, SkirtSizeZ = 6, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
+                Economy = { BuildTime = 400 },
+            },
+            ueb1103 = {
+                BlueprintId = 'ueb1103',
+                Footprint = { SizeX = 1, SizeZ = 1 },
+                Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
+                Economy = { BuildTime = 60 },
+            },
+        }
+
         function Count(tableValue)
             local count = 0
             for _, _ in pairs(tableValue or {}) do count = count + 1 end
@@ -52,12 +92,21 @@ def make_harness() -> ControllerHarness:
             function unit:GetEntityId() return self.options.entityId or 1 end
             function unit:GetBlueprint()
                 if self.options.malformedBlueprint then return {} end
+                local stored = BlueprintData[self.options.blueprintId or ''] or {}
                 return {
                     BlueprintId = self.options.blueprintId or 'uel0001',
-                    Physics = self.options.blueprintPhysics or {},
-                    Economy = self.options.blueprintEconomy or {},
+                    Footprint = self.options.footprint or stored.Footprint,
+                    Size = self.options.blueprintSize or stored.Size,
+                    Physics = self.options.blueprintPhysics or stored.Physics or {},
+                    Economy = self.options.blueprintEconomy or stored.Economy or {},
+                    General = self.options.blueprintGeneral or stored.General or {},
                     Intel = self.options.blueprintIntel or {},
                 }
+            end
+            function unit:GetBuildRate()
+                if self.options.buildRate ~= nil then return self.options.buildRate end
+                local stored = BlueprintData[self.options.blueprintId or ''] or {}
+                return stored.Economy and stored.Economy.BuildRate or nil
             end
             function unit:GetFractionComplete() return self.options.fraction == nil and 1 or self.options.fraction end
             function unit:GetPosition() return self.options.position or { 10, 2, 10 } end
@@ -139,6 +188,7 @@ def make_harness() -> ControllerHarness:
             energyStoredRatio = 0.2,
             energyIncome = 20,
             energyUsage = 21,
+            energyRequested = 21,
             massTrend = 1,
             massStoredRatio = 0.5,
             massIncome = 2,
@@ -168,7 +218,8 @@ def make_harness() -> ControllerHarness:
         function brain:GetEconomyStoredRatio(resource) return resource == 'ENERGY' and self.energyStoredRatio or self.massStoredRatio end
         function brain:GetEconomyIncome(resource) return resource == 'ENERGY' and self.energyIncome or self.massIncome end
         function brain:GetEconomyUsage(resource) return resource == 'ENERGY' and self.energyUsage or self.massUsage end
-        function brain:GetEconomyRequested(resource) return resource == 'ENERGY' and self.energyUsage or self.massRequested end
+        function brain:GetEconomyRequested(resource) return resource == 'ENERGY' and self.energyRequested or self.massRequested end
+        function brain:GetUnitBlueprint(blueprintId) return BlueprintData[blueprintId] end
         function brain:GetArmyStat(name, default)
             local value = self.armyStats and self.armyStats[name]
             if value == nil then return { Value = default } end
@@ -255,7 +306,7 @@ def make_harness() -> ControllerHarness:
                 factory.options.idleState = false
                 factory.options.states = factory.options.states or {}
                 factory.options.states.Upgrading = true
-                factory.options.queue = { { commandType = 10, blueprintId = blueprintId } }
+                factory.options.queue = { { commandType = 27, blueprintId = blueprintId } }
             end
             return { kind = 'upgrade' }
         end

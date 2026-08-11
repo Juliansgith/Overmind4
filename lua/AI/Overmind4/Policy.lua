@@ -68,10 +68,9 @@ local function IsUsablePosition(position)
 end
 
 local function FiniteNumber(value)
-    local number = tonumber(value)
-    return number ~= nil
-        and number == number
-        and math.abs(number) <= 1000000000
+    return type(value) == 'number'
+        and value == value
+        and math.abs(value) <= 1000000000
 end
 
 local function PositionDistanceSquared(a, b)
@@ -189,6 +188,75 @@ local function PlacementKey(position)
         .. tostring(QuantizedCoordinate(position[3]))
 end
 
+local function PlacementRect(role, position)
+    if not IsUsablePosition(position) then return nil end
+    local size = nil
+    if role == 'air_factory'
+        or role == 'land_factory'
+        or role == 'land_factory_t2'
+    then
+        size = 8
+    elseif role == 'hydrocarbon' then
+        size = 6
+    elseif role == 'mass_extractor' or role == 'power_generator' then
+        size = 2
+    end
+    if not size then return nil end
+    local half = size * 0.5
+    return {
+        position[1] - half,
+        position[3] - half,
+        position[1] + half,
+        position[3] + half,
+    }
+end
+
+local function PlacementRectsOverlap(left, right)
+    return type(left) == 'table'
+        and type(right) == 'table'
+        and left[1] < right[3]
+        and right[1] < left[3]
+        and left[2] < right[4]
+        and right[2] < left[4]
+end
+
+local function PlacementAvailable(role, position, virtualPlacements)
+    local key = PlacementKey(position)
+    local rect = PlacementRect(role, position)
+    if not key or not rect or virtualPlacements.keys[key] then return false end
+    for _, occupied in ipairs(virtualPlacements.rects) do
+        if PlacementRectsOverlap(rect, occupied) then return false end
+    end
+    return true, key, rect
+end
+
+local function AddPlacementReservation(role, position, virtualPlacements)
+    local available, key, rect = PlacementAvailable(role, position, virtualPlacements)
+    if not available then return false end
+    virtualPlacements.keys[key] = true
+    TableInsert(virtualPlacements.rects, rect)
+    return true
+end
+
+local function ReserveSitePlacement(role, site, virtualPlacements)
+    if type(site) ~= 'table' or not IsUsablePosition(site.position) then
+        return false
+    end
+    virtualPlacements.siteKeys = virtualPlacements.siteKeys or {}
+    if type(site.key) == 'string'
+        and virtualPlacements.siteKeys[site.key] == true
+    then
+        return true
+    end
+    if not AddPlacementReservation(role, site.position, virtualPlacements) then
+        return false
+    end
+    if type(site.key) == 'string' then
+        virtualPlacements.siteKeys[site.key] = true
+    end
+    return true
+end
+
 local function ReservePlacement(snapshot, role, index, virtualPlacements)
     local placements = snapshot.placements or {}
     local candidates = placements[role] or {}
@@ -197,17 +265,13 @@ local function ReservePlacement(snapshot, role, index, virtualPlacements)
     if first < 1 or first > count then first = 1 end
     for candidateIndex = first, count do
         local position = candidates[candidateIndex]
-        local key = PlacementKey(position)
-        if key and not virtualPlacements[key] then
-            virtualPlacements[key] = true
+        if AddPlacementReservation(role, position, virtualPlacements) then
             return position
         end
     end
     for candidateIndex = 1, first - 1 do
         local position = candidates[candidateIndex]
-        local key = PlacementKey(position)
-        if key and not virtualPlacements[key] then
-            virtualPlacements[key] = true
+        if AddPlacementReservation(role, position, virtualPlacements) then
             return position
         end
     end
@@ -346,6 +410,16 @@ local function CampaignHasConnectedJob(snapshot, macro, massSites)
             then
                 return true
             end
+        end
+    end
+    for _, site in ipairs(massSites or {}) do
+        if site.occupied == true
+            and site.complete ~= true
+            and type(site.targetToken) == 'string'
+            and KeyInArray(macro.campaignMemberKeys, site.key)
+            and SiteSupportsLandCampaign(site)
+        then
+            return true
         end
     end
     return false
@@ -636,8 +710,34 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
     end
 
     local massSites = ((snapshot.sites or {}).mass) or {}
+    local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
+    local campaignActive = macro
+        and macro.campaignEnabled == true
+        and macro.campaignState ~= 'idle'
+    local connectedCampaignJob = campaignActive
+        and CampaignHasConnectedJob(snapshot, macro, massSites)
+        or false
+    local function FirstOpeningMassSite(lostOnly)
+        for _, site in ipairs(SortSites(massSites)) do
+            local connected = connectedCampaignJob
+                and KeyInArray(macro.campaignMemberKeys, site.key)
+                and SiteSupportsLandCampaign(site)
+            if (not lostOnly or site.lost == true)
+                and not connected
+                and SiteIsAvailable(site, virtualReserved, true)
+                and ReserveSitePlacement(
+                    'mass_extractor',
+                    site,
+                    virtualPlacements
+                )
+            then
+                return site
+            end
+        end
+        return nil
+    end
     if CanBuild(acu, 'mass_extractor') then
-        local lost = FirstLostSite(massSites, virtualReserved, true)
+        local lost = FirstOpeningMassSite(true)
         if lost then
             virtualReserved[lost.key] = true
             return BuildAtSite(acu, 'mass_extractor', lost, 9, 'rebuild_mex')
@@ -660,7 +760,7 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
     end
 
     if CountClaimedLocalSites(massSites, virtualReserved) < 4 and CanBuild(acu, 'mass_extractor') then
-        local site = FirstAvailableSite(massSites, virtualReserved, true)
+        local site = FirstOpeningMassSite(false)
         if site then
             virtualReserved[site.key] = true
             return BuildAtSite(acu, 'mass_extractor', site, 12, 'opening_mass')
@@ -739,10 +839,46 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local campaignJobPlanned = campaignActive
         and CampaignHasConnectedJob(snapshot, macro, massSites)
         or false
+    for _, planned in ipairs(intents or {}) do
+        if planned.siteKey and planned.buildRole then
+            local plannedSite = CampaignSiteByKey(massSites, planned.siteKey)
+            if not plannedSite then
+                for _, site in ipairs(hydroSites) do
+                    if site.key == planned.siteKey then plannedSite = site break end
+                end
+            end
+            if plannedSite then
+                ReserveSitePlacement(
+                    planned.buildRole,
+                    plannedSite,
+                    virtualPlacements
+                )
+            end
+        end
+    end
+    if campaignActive and not campaignJobPlanned then
+        for _, planned in ipairs(intents or {}) do
+            local site = CampaignSiteByKey(massSites, planned.siteKey)
+            if (planned.kind == 'build_structure'
+                    or planned.kind == 'assist_structure')
+                and planned.buildRole == 'mass_extractor'
+                and KeyInArray(macro.campaignMemberKeys, planned.siteKey)
+                and SiteSupportsLandCampaign(site)
+            then
+                campaignJobPlanned = true
+                break
+            end
+        end
+    end
     local lostAssignments = {}
+    local assignedEngineers = {}
     for _, site in ipairs(SortSites(massSites)) do
+        local connectedCampaignSite = campaignActive
+            and KeyInArray(macro.campaignMemberKeys, site.key)
+            and SiteSupportsLandCampaign(site)
         if site.lost == true
             and SiteIsAvailable(site, virtualReserved, false)
+            and (not connectedCampaignSite or not campaignJobPlanned)
         then
             local best = nil
             local bestDistance = nil
@@ -764,27 +900,231 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     end
                 end
             end
-            if best then
+            if best and ReserveSitePlacement(
+                'mass_extractor',
+                site,
+                virtualPlacements
+            ) then
                 lostAssignments[best.token] = site
+                assignedEngineers[best.token] = true
                 virtualReserved[site.key] = true
+                if connectedCampaignSite then campaignJobPlanned = true end
+            end
+        end
+    end
+    lostOutstanding = false
+    for _, site in ipairs(SortSites(massSites)) do
+        local cappedCampaignSite = campaignActive
+            and campaignJobPlanned
+            and KeyInArray(macro.campaignMemberKeys, site.key)
+            and SiteSupportsLandCampaign(site)
+        if site.lost == true
+            and SiteIsAvailable(site, virtualReserved, false)
+            and not cappedCampaignSite
+        then
+            lostOutstanding = true
+            break
+        end
+    end
+
+    local foundationAssignments = {}
+    local hydroAssignments = {}
+    for _, foundation in ipairs(SortFoundations(snapshot.foundations or {})) do
+        if type(foundation.targetToken) == 'string'
+            and type(foundation.role) == 'string'
+            and IsUsablePosition(foundation.position)
+            and foundation.reserved ~= true
+            and not virtualFoundations[foundation.targetToken]
+        then
+            local best = nil
+            local bestDistance = nil
+            for _, engineer in ipairs(engineers) do
+                if not assignedEngineers[engineer.token]
+                    and engineer.campaignEngineer ~= true
+                    and CanBuild(engineer, foundation.role)
+                then
+                    local distance = PositionDistanceSquared(
+                        engineer.position,
+                        foundation.position
+                    )
+                    if not best
+                        or distance < bestDistance
+                        or (distance == bestDistance
+                            and tostring(engineer.token) < tostring(best.token))
+                    then
+                        best = engineer
+                        bestDistance = distance
+                    end
+                end
+            end
+            if best then
+                foundationAssignments[best.token] = foundation
+                assignedEngineers[best.token] = true
+                virtualFoundations[foundation.targetToken] = true
             end
         end
     end
 
     local factoryTarget = macro and (tonumber(macro.factoryTarget)
         or tonumber(macro.factoryDemand)) or 2
-    if not lostOutstanding
-        and (counts.land_factory or 0) < factoryTarget
-        and snapshot.placements
-        and IsUsablePosition((snapshot.placements.land_factory or {})[1])
+    local placementAssignments = {}
+    local function AssignPlacement(role, index, priority, reason)
+        local hasBuilder = false
+        for _, engineer in ipairs(engineers) do
+            if not assignedEngineers[engineer.token]
+                and engineer.campaignEngineer ~= true
+                and CanBuild(engineer, role)
+            then
+                hasBuilder = true
+                break
+            end
+        end
+        if not hasBuilder then return false end
+        local position = ReservePlacement(
+            snapshot,
+            role,
+            index,
+            virtualPlacements
+        )
+        if not position then return false end
+        local best = nil
+        local bestDistance = nil
+        for _, engineer in ipairs(engineers) do
+            if not assignedEngineers[engineer.token]
+                and engineer.campaignEngineer ~= true
+                and CanBuild(engineer, role)
+            then
+                local distance = PositionDistanceSquared(
+                    engineer.position,
+                    position
+                )
+                if not best
+                    or distance < bestDistance
+                    or (distance == bestDistance
+                        and tostring(engineer.token) < tostring(best.token))
+                then
+                    best = engineer
+                    bestDistance = distance
+                end
+            end
+        end
+        if not best then return false end
+        placementAssignments[best.token] = BuildAtPlacement(
+            best,
+            role,
+            position,
+            priority,
+            reason
+        )
+        assignedEngineers[best.token] = true
+        return true
+    end
+
+    local completedMex = 0
+    local completedLand = 0
+    local completedHydro = 0
+    for _, unit in ipairs(units or {}) do
+        if unit.complete == true then
+            if unit.role == 'mass_extractor' then completedMex = completedMex + 1 end
+            if unit.role == 'land_factory' or unit.role == 'land_factory_t2' then
+                completedLand = completedLand + 1
+            end
+            if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
+        end
+    end
+    if not underContact and allowPlacement and lowEnergy then
+        if AssignPlacement(
+            'power_generator',
+            placementIndex.power_generator,
+            19,
+            'energy_recovery'
+        ) then
+            plannedPower = true
+            placementIndex.power_generator = placementIndex.power_generator + 1
+            counts.power_generator = (counts.power_generator or 0) + 1
+        end
+    end
+    if not underContact and (counts.hydrocarbon or 0) < 1 then
+        local site = FirstAvailableSite(hydroSites, virtualReserved, false)
+        local best = nil
+        local bestDistance = nil
+        if site then
+            for _, engineer in ipairs(engineers) do
+                if not assignedEngineers[engineer.token]
+                    and engineer.campaignEngineer ~= true
+                    and CanBuild(engineer, 'hydrocarbon')
+                then
+                    local distance = PositionDistanceSquared(
+                        engineer.position,
+                        site.position
+                    )
+                    if not best
+                        or distance < bestDistance
+                        or (distance == bestDistance
+                            and tostring(engineer.token) < tostring(best.token))
+                    then
+                        best = engineer
+                        bestDistance = distance
+                    end
+                end
+            end
+        end
+        if best and ReserveSitePlacement(
+            'hydrocarbon',
+            site,
+            virtualPlacements
+        ) then
+            hydroAssignments[best.token] = site
+            assignedEngineers[best.token] = true
+            virtualReserved[site.key] = true
+        end
+    end
+    local currentFactories = (counts.land_factory or 0)
+        + (counts.land_factory_t2 or 0)
+        + (counts.air_factory or 0)
+    local factoryDemand = macro and (tonumber(macro.factoryDemand) or currentFactories)
+        or 3
+    local sustainedFactory = not macro
+        or (tonumber(macro.massSurplusTicks) or 0) >= 300
+        or (tonumber(macro.factoryTarget) or 0) > currentFactories
+    if not underContact
+        and currentFactories >= 2
+        and currentFactories < factoryDemand
+        and (macro or (counts.mass_extractor or 0) >= 6)
+        and sustainedFactory
+        and not massStalled
     then
-        local placement = snapshot.placements.land_factory[1]
-        table.sort(engineers, function(a, b)
-            local ad = PositionDistanceSquared(a.position, placement)
-            local bd = PositionDistanceSquared(b.position, placement)
-            if ad == bd then return tostring(a.token) < tostring(b.token) end
-            return ad < bd
-        end)
+        if AssignPlacement(
+            'land_factory',
+            placementIndex.land_factory,
+            21,
+            macro and 'production_saturation' or 'third_factory'
+        ) then
+            plannedFactory = true
+            placementIndex.land_factory = placementIndex.land_factory + 1
+            counts.land_factory = (counts.land_factory or 0) + 1
+        end
+    end
+    if not underContact
+        and (counts.air_factory or 0) < 1
+        and completedMex >= 6
+        and completedLand >= 2
+        and completedHydro >= 1
+        and FiniteNumber(economy.energyTrend)
+        and FiniteNumber(economy.energyStoredRatio)
+        and tonumber(economy.energyTrend) >= 0
+        and tonumber(economy.energyStoredRatio) >= 0.5
+    then
+        if AssignPlacement(
+            'air_factory',
+            placementIndex.air_factory,
+            20,
+            'first_air_factory'
+        ) then
+            plannedAirFactory = true
+            placementIndex.air_factory = placementIndex.air_factory + 1
+            counts.air_factory = 1
+        end
     end
 
     for _, engineer in ipairs(engineers) do
@@ -806,6 +1146,25 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 end
             end
         end
+        if not intent and foundationAssignments[engineer.token] then
+            intent = AssistFoundation(
+                engineer,
+                foundationAssignments[engineer.token]
+            )
+        end
+        if not intent and hydroAssignments[engineer.token] then
+            counts.hydrocarbon = (counts.hydrocarbon or 0) + 1
+            intent = BuildAtSite(
+                engineer,
+                'hydrocarbon',
+                hydroAssignments[engineer.token],
+                20,
+                'first_hydro'
+            )
+        end
+        if not intent and placementAssignments[engineer.token] then
+            intent = placementAssignments[engineer.token]
+        end
         if not intent and campaignActive
             and not campaignJobPlanned
             and not underContact
@@ -817,7 +1176,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 macro.campaignMemberKeys,
                 true
             )
-            if cachedLost then
+            if cachedLost and ReserveSitePlacement(
+                'mass_extractor',
+                cachedLost,
+                virtualPlacements
+            ) then
                 virtualReserved[cachedLost.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(
@@ -838,7 +1201,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and CanBuild(engineer, 'mass_extractor')
         then
             local lost = FirstCampaignLostSite(massSites, virtualReserved)
-            if lost then
+            if lost and ReserveSitePlacement(
+                'mass_extractor',
+                lost,
+                virtualPlacements
+            ) then
                 virtualReserved[lost.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(
@@ -868,7 +1235,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 macro.campaignMemberKeys,
                 false
             )
-            if cached then
+            if cached and ReserveSitePlacement(
+                'mass_extractor',
+                cached,
+                virtualPlacements
+            ) then
                 virtualReserved[cached.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(
@@ -895,7 +1266,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 macro.selectedFrontierSite,
                 true
             )
-            if nextSite then
+            if nextSite and ReserveSitePlacement(
+                'mass_extractor',
+                nextSite,
+                virtualPlacements
+            ) then
                 virtualReserved[nextSite.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(
@@ -916,7 +1291,31 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and CanBuild(engineer, 'mass_extractor')
         then
             local site = FirstLostSite(massSites, virtualReserved, false)
-            if site then
+            if site
+                and campaignActive
+                and campaignJobPlanned
+                and KeyInArray(macro.campaignMemberKeys, site.key)
+                and SiteSupportsLandCampaign(site)
+            then
+                site = nil
+                for _, candidate in ipairs(SortSites(massSites)) do
+                    if candidate.lost == true
+                        and SiteIsAvailable(candidate, virtualReserved, false)
+                        and not (KeyInArray(
+                                macro.campaignMemberKeys,
+                                candidate.key
+                            ) and SiteSupportsLandCampaign(candidate))
+                    then
+                        site = candidate
+                        break
+                    end
+                end
+            end
+            if site and ReserveSitePlacement(
+                'mass_extractor',
+                site,
+                virtualPlacements
+            ) then
                 virtualReserved[site.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
                 intent = BuildAtSite(engineer, 'mass_extractor', site, 18, 'rebuild_mex')
@@ -968,7 +1367,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and CanBuild(engineer, 'hydrocarbon')
         then
             local site = FirstAvailableSite(hydroSites, virtualReserved, false)
-            if site then
+            if site and ReserveSitePlacement(
+                'hydrocarbon',
+                site,
+                virtualPlacements
+            ) then
                 virtualReserved[site.key] = true
                 counts.hydrocarbon = (counts.hydrocarbon or 0) + 1
                 intent = BuildAtSite(engineer, 'hydrocarbon', site, 20, 'first_hydro')
@@ -1015,9 +1418,9 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and not underContact
             and not plannedAirFactory
             and (counts.air_factory or 0) < 1
-            and (counts.mass_extractor or 0) >= 6
-            and ((counts.land_factory or 0) + (counts.land_factory_t2 or 0)) >= 2
-            and (counts.hydrocarbon or 0) >= 1
+            and completedMex >= 6
+            and completedLand >= 2
+            and completedHydro >= 1
             and FiniteNumber(economy.energyTrend)
             and FiniteNumber(economy.energyStoredRatio)
             and tonumber(economy.energyTrend) >= 0
@@ -1069,6 +1472,24 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                         macro.campaignMemberKeys,
                         false
                     )
+                elseif campaignJobPlanned then
+                    for _, candidate in ipairs(SortSites(massSites)) do
+                        if candidate.frontierSelected == true
+                            and candidate.lost ~= true
+                            and not KeyInArray(
+                                macro.campaignMemberKeys,
+                                candidate.key
+                            )
+                            and SiteIsAvailable(
+                                candidate,
+                                virtualReserved,
+                                false
+                            )
+                        then
+                            site = candidate
+                            break
+                        end
+                    end
                 end
             elseif macro then
                 site = FirstFrontierSite(
@@ -1078,6 +1499,38 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 )
             else
                 site = FirstAvailableSite(massSites, virtualReserved, false)
+            end
+            if site and not ReserveSitePlacement(
+                'mass_extractor',
+                site,
+                virtualPlacements
+            ) then
+                site = nil
+            end
+            if not site then
+                for _, candidate in ipairs(SortSites(massSites)) do
+                    local frontierAllowed = not macro
+                        or (candidate.frontierSelected == true
+                            and candidate.lost ~= true)
+                    local campaignAllowed = not campaignActive
+                        or not campaignJobPlanned
+                        or not KeyInArray(
+                            macro.campaignMemberKeys,
+                            candidate.key
+                        )
+                    if frontierAllowed
+                        and campaignAllowed
+                        and SiteIsAvailable(candidate, virtualReserved, false)
+                        and ReserveSitePlacement(
+                            'mass_extractor',
+                            candidate,
+                            virtualPlacements
+                        )
+                    then
+                        site = candidate
+                        break
+                    end
+                end
             end
             if site then
                 virtualReserved[site.key] = true
@@ -1089,11 +1542,15 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     22,
                     macro and 'frontier_expansion' or 'mass_expansion'
                 )
-                if campaignActive then
-                    intent.clusterKey = macro.campaignState == 'active'
-                        and macro.campaignCluster
-                        or site.clusterKey
+                if campaignActive
+                    and not campaignJobPlanned
+                    and KeyInArray(macro.campaignMemberKeys, site.key)
+                    and SiteSupportsLandCampaign(site)
+                then
+                    intent.clusterKey = macro.campaignCluster
                     campaignJobPlanned = true
+                elseif campaignActive then
+                    intent.clusterKey = nil
                 end
             end
         end
@@ -1186,10 +1643,27 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     local energyStored = tonumber(economy.energyStoredRatio)
     local massTrend = tonumber(economy.massTrend)
     local energyTrend = tonumber(economy.energyTrend)
+    local massIncome = tonumber(economy.massIncome)
+    local massRequested = tonumber(economy.massRequested)
+    local energyIncome = tonumber(economy.energyIncome)
+    local energyRequested = tonumber(economy.energyRequested)
+    local energyUsage = tonumber(economy.energyUsage)
     local t2Ready = FiniteNumber(massStored)
         and FiniteNumber(energyStored)
         and FiniteNumber(massTrend)
         and FiniteNumber(energyTrend)
+        and FiniteNumber(economy.massIncome)
+        and FiniteNumber(economy.massRequested)
+        and FiniteNumber(economy.energyIncome)
+        and FiniteNumber(economy.energyRequested)
+        and FiniteNumber(economy.energyUsage)
+        and massIncome >= 0
+        and massRequested >= 0
+        and massRequested <= massIncome
+        and energyIncome >= 0
+        and energyRequested >= 0
+        and energyRequested <= energyIncome
+        and energyUsage >= 0
         and completedMex >= 10
         and completedLand >= 3
         and completedAir >= 1
@@ -1677,14 +2151,22 @@ Policy.Decide = function(snapshot)
 
     local counts = CountRoles(units, pending, snapshot.foundations or {})
     local virtualReserved = {}
-    local virtualPlacements = {}
+    local virtualPlacements = { keys = {}, rects = {}, siteKeys = {} }
     for _, operation in ipairs(pending) do
         if operation.siteKey then
             virtualReserved[operation.siteKey] = true
         end
         if type(operation.placementKey) == 'string' then
-            virtualPlacements[operation.placementKey] = true
+            virtualPlacements.keys[operation.placementKey] = true
         end
+        local rect = PlacementRect(operation.buildRole, operation.position)
+        if rect then TableInsert(virtualPlacements.rects, rect) end
+    end
+    for _, foundation in ipairs(snapshot.foundations or {}) do
+        local key = PlacementKey(foundation.position)
+        local rect = PlacementRect(foundation.role, foundation.position)
+        if key then virtualPlacements.keys[key] = true end
+        if rect then TableInsert(virtualPlacements.rects, rect) end
     end
 
     local intents = {}

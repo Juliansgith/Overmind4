@@ -83,6 +83,7 @@ def ready_economy() -> dict[str, float]:
         "energyStoredRatio": 0.8,
         "energyIncome": 30,
         "energyUsage": 20,
+        "energyRequested": 20,
         "massTrend": 0.5,
         "massStoredRatio": 0.8,
         "massIncome": 1.5,
@@ -995,7 +996,7 @@ def test_live_upgrading_source_without_focus_does_not_bind_unrelated_t2_foundati
     reconcile(harness)
     pending = plain(harness.controller.pending["70:1"])
     assert pending.get("upgradeTargetToken") is None
-    assert pending["accepted"] is True
+    assert pending["accepted"] is False
 
 
 def test_lost_upgrade_source_without_bound_focus_does_not_claim_nearby_t2() -> None:
@@ -1039,6 +1040,13 @@ def test_upgrade_accepted_then_old_factory_idle_releases_for_immediate_retry() -
         blueprintId="ueb0101",
         canBuild={"ueb0201": True},
     )
+    target = harness.unit(
+        entityId=71,
+        blueprintId="ueb0201",
+        fraction=0.2,
+        idleState=False,
+        states={"BeingBuilt": True},
+    )
     harness.brain.units = harness.lua.table_from([factory])
     observation = harness.observe()
     intent = {
@@ -1048,6 +1056,8 @@ def test_upgrade_accepted_then_old_factory_idle_releases_for_immediate_retry() -
         "priority": 23,
     }
     execute_intents(harness, [intent], observation)
+    factory.options.focusUnit = target
+    harness.brain.units = harness.lua.table_from([factory, target])
     harness.brain.tick = 3
     reconcile(harness)
     assert harness.controller.pending["70:1"].accepted is True
@@ -1116,6 +1126,7 @@ def test_pending_upgrade_replaces_source_capacity_when_planning_next_factory() -
         factoryDemand=5,
         massSurplusTicks=300,
     )
+    snapshot["placements"]["land_factory"].append([40, 2, 20])
 
     land_builds = [
         intent
@@ -1514,7 +1525,10 @@ def test_rebuilding_campaign_resumes_only_after_full_readiness_returns() -> None
     blocked = reconcile(harness)
     assert campaign_intents(harness, blocked) == []
     set_support(harness, mex=8, land=3)
-    harness.brain.tick = 410
+    harness.brain.tick = 699
+    cooling_down = reconcile(harness)
+    assert campaign_intents(harness, cooling_down) == []
+    harness.brain.tick = 700
     ready = reconcile(harness)
     assert only(campaign_intents(harness, ready), "field_campaign")["mode"] == "resume"
 
