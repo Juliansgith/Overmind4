@@ -3575,6 +3575,20 @@ local function UpdateFieldCampaign(controller, observation)
         CampaignPruneAndFill(campaign, observation.units, true)
     end
     ApplyCampaignFlags(controller, campaign, observation.units)
+    if immediateContact
+        and TableGetn(campaign.homeTokens) < HOME_RESERVE_MIN
+        and TableGetn(campaign.fieldTokens) > 0
+    then
+        local emergencyField, emergencyHome = EmergencyCampaignCohorts(
+            campaign,
+            observation.units
+        )
+        campaign.pendingEmergencyReason = 'home_reserve'
+        campaign.pendingRecallFieldTokens = emergencyField
+        campaign.pendingRecallHomeTokens = emergencyHome
+        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
+        return
+    end
     if campaign.state == 'recalled' then
         if campaign.pendingMode == 'resume' then
             campaign.pendingMode = nil
@@ -3653,20 +3667,6 @@ local function UpdateFieldCampaign(controller, observation)
             campaign.pendingMode = nil
             campaign.pendingTokens = {}
         end
-        return
-    end
-    if immediateContact
-        and TableGetn(campaign.homeTokens) < HOME_RESERVE_MIN
-        and TableGetn(campaign.fieldTokens) > 0
-    then
-        local emergencyField, emergencyHome = EmergencyCampaignCohorts(
-            campaign,
-            observation.units
-        )
-        campaign.pendingEmergencyReason = 'home_reserve'
-        campaign.pendingRecallFieldTokens = emergencyField
-        campaign.pendingRecallHomeTokens = emergencyHome
-        CampaignSetPending(campaign, 'recall', campaign.fieldTokens)
         return
     end
     if health and health < FIELD_CAMPAIGN_RECALL_HEALTH

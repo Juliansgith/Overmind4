@@ -210,6 +210,82 @@ def expected_attrition_emergency_cohorts(
     return emergency_field, emergency_home
 
 
+def health_recalled_home_attrition(
+    *,
+    seed: int = 0,
+    home_survivors: int = 0,
+    enemy_x: float | None = 15,
+) -> tuple[Any, Any, Any, list[Any], list[str], list[str], Any]:
+    harness, acu, engineer, combat, observation = start_campaign(seed=seed)
+    activate_campaign(harness, observation)
+    field, home = expected_initial_cohorts(24, 2)
+    acu.options.health = 69
+    harness.brain.tick = 10
+    low = reconcile(harness)
+    execute_intents(harness, campaign_intents(harness, low), low)
+    assert harness.controller.fieldCampaign.state == "recalled"
+    assert harness.controller.fieldCampaign.emergencyReason == "acu_health"
+
+    by_token = {
+        f"{int(actor.options.entityId)}:1": actor
+        for actor in combat
+    }
+    for token in home[home_survivors:]:
+        by_token[token].Dead = True
+    live_tokens = [*field, *home[:home_survivors]]
+    live_combat = [by_token[token] for token in live_tokens]
+    units = [acu, engineer, *live_combat]
+    random.Random(seed + 500).shuffle(units)
+    harness.brain.units = harness.lua.table_from(units)
+    acu.options.health = 75
+    if enemy_x is None:
+        harness.brain.enemies = harness.lua.table_from([])
+    else:
+        enemy = harness.unit(
+            entityId=99200,
+            blueprintId="uel0201",
+            army=2,
+            position=[enemy_x, 2, 20],
+        )
+        harness.brain.enemies = harness.lua.table_from([enemy])
+    harness.brain.tick = 20
+    return harness, acu, engineer, live_combat, field, home, reconcile(harness)
+
+
+def second_recalled_attrition_epoch(
+    *,
+    seed: int = 0,
+    remaining_field: int = 4,
+) -> tuple[Any, Any, Any, list[Any], list[str], list[str], Any]:
+    harness, acu, engineer, live_combat, field, _, current = attrited_home_campaign(
+        seed=seed,
+        home_survivors=0,
+    )
+    execute_intents(harness, campaign_intents(harness, current), current)
+    emergency_field, emergency_home = expected_attrition_emergency_cohorts(field)
+    by_token = {
+        f"{int(actor.options.entityId)}:1": actor
+        for actor in live_combat
+    }
+    survivors = emergency_field[:remaining_field]
+    for token in [*emergency_home, *emergency_field[remaining_field:]]:
+        by_token[token].Dead = True
+    surviving_units = [by_token[token] for token in survivors]
+    units = [acu, engineer, *surviving_units]
+    random.Random(seed + 700).shuffle(units)
+    harness.brain.units = harness.lua.table_from(units)
+    harness.brain.tick = 30
+    return (
+        harness,
+        acu,
+        engineer,
+        surviving_units,
+        emergency_field,
+        emergency_home,
+        reconcile(harness),
+    )
+
+
 def activate_campaign(harness: Any, observation: Any) -> tuple[dict[str, Any], Any]:
     intents = campaign_intents(harness, observation)
     assert len(intents) == 1
@@ -1446,6 +1522,261 @@ def test_recalled_attrition_campaign_defers_full_gate_until_composite_safe_windo
     assert campaign.state == "active"
     assert campaign.emergency is False
     assert_campaign_cohort_indexes(campaign)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_health_recalled_campaign_stages_home_reserve_rebalance_after_home_attrition(
+    seed: int,
+) -> None:
+    harness, _, _, _, field, _, current = health_recalled_home_attrition(seed=seed)
+    intents = campaign_intents(harness, current)
+    campaign = plain(harness.controller.fieldCampaign)
+    expected_field, expected_home = expected_attrition_emergency_cohorts(field)
+
+    assert campaign.get("state") == "recalled"
+    assert campaign.get("emergencyReason") == "acu_health"
+    assert not [intent for intent in intents if intent.get("mode") == "resume"]
+    assert len(intents) == 1 and intents[0].get("mode") == "recall"
+    assert intents[0].get("actorTokens") == field
+    assert campaign.get("pendingEmergencyReason") == "home_reserve"
+    assert campaign.get("pendingRecallFieldTokens") == expected_field
+    assert campaign.get("pendingRecallHomeTokens") == expected_home
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_recalled_home_rebalance_stages_a_second_epoch_after_demoted_home_dies(
+    seed: int,
+) -> None:
+    harness, _, _, _, emergency_field, _, current = second_recalled_attrition_epoch(
+        seed=seed
+    )
+    intents = campaign_intents(harness, current)
+    campaign = plain(harness.controller.fieldCampaign)
+
+    assert campaign.get("state") == "recalled"
+    assert campaign.get("emergencyReason") == "home_reserve"
+    assert len(intents) == 1 and intents[0].get("mode") == "recall"
+    assert intents[0].get("actorTokens") == emergency_field
+    assert (campaign.get("pendingRecallFieldTokens") or []) == []
+    assert campaign.get("pendingRecallHomeTokens") == emergency_field
+    assert not [intent for intent in intents if intent.get("mode") == "resume"]
+
+
+@pytest.mark.parametrize(
+    "home_survivors,enemy_x,expect_recall",
+    [
+        (3, 30, True),
+        (3, 30.01, False),
+        (3, 40, False),
+        (4, 15, False),
+    ],
+)
+def test_recalled_home_attrition_uses_exact_immediate_and_four_home_boundaries(
+    home_survivors: int,
+    enemy_x: float,
+    expect_recall: bool,
+) -> None:
+    harness, _, _, _, _, home, current = health_recalled_home_attrition(
+        home_survivors=home_survivors,
+        enemy_x=enemy_x,
+    )
+    recall = [
+        intent
+        for intent in campaign_intents(harness, current)
+        if intent.get("mode") == "recall"
+    ]
+
+    assert bool(recall) is expect_recall
+    assert plain(harness.controller.fieldCampaign.homeTokens) == home[:home_survivors]
+    assert not [
+        intent
+        for intent in campaign_intents(harness, current)
+        if intent.get("mode") == "resume"
+    ]
+
+
+@pytest.mark.parametrize("failure", ["clear", "move"])
+@pytest.mark.parametrize("epoch", ["health", "second"])
+def test_recalled_attrition_rebalance_failure_latches_across_contact_flicker(
+    failure: str,
+    epoch: str,
+) -> None:
+    if epoch == "health":
+        harness, _, _, _, expected_actors, _, current = health_recalled_home_attrition()
+    else:
+        harness, _, _, _, expected_actors, _, current = second_recalled_attrition_epoch()
+    recall = campaign_intents(harness, current)
+    assert len(recall) == 1 and recall[0].get("mode") == "recall"
+    before = plain(harness.controller.fieldCampaign)
+    events_before = len(
+        [line for line in harness.logs if "event=campaign_order" in line]
+    )
+    if failure == "clear":
+        harness.calls.failClear = True
+    else:
+        harness.calls.failMove = True
+
+    execute_intents(harness, recall, current)
+
+    assert plain(harness.controller.fieldCampaign) == before
+    assert len(
+        [line for line in harness.logs if "event=campaign_order" in line]
+    ) == events_before
+    if failure == "clear":
+        harness.calls.failClear = False
+    else:
+        harness.calls.failMove = False
+    harness.brain.enemies = harness.lua.table_from([])
+    harness.brain.tick += 1
+    retry_observation = reconcile(harness)
+    retry = campaign_intents(harness, retry_observation)
+
+    assert len(retry) == 1 and retry[0].get("mode") == "recall"
+    assert retry[0].get("actorTokens") == expected_actors
+    execute_intents(harness, retry, retry_observation)
+    assert harness.controller.fieldCampaign.state == "recalled"
+    assert harness.controller.fieldCampaign.pendingMode is None
+    assert_campaign_cohort_indexes(harness.controller.fieldCampaign)
+    success_events = [
+        line
+        for line in harness.logs
+        if "event=campaign_order" in line and "command=recall" in line
+    ]
+    assert len(success_events) == 2
+
+
+@pytest.mark.parametrize("cohort", ["field", "home"])
+@pytest.mark.parametrize("mutation", ["dead", "captured", "recycled"])
+def test_recalled_attrition_revalidates_staged_generations_before_first_clear(
+    cohort: str,
+    mutation: str,
+) -> None:
+    harness, acu, engineer, live_combat, field, home, stale = (
+        health_recalled_home_attrition(home_survivors=3)
+    )
+    recall = campaign_intents(harness, stale)
+    assert len(recall) == 1 and recall[0].get("mode") == "recall"
+    token = field[-1] if cohort == "field" else home[0]
+    entity_id = int(token.split(":", 1)[0])
+    actor = next(
+        unit
+        for unit in live_combat
+        if int(unit.options.entityId) == entity_id
+    )
+    units = [acu, engineer, *live_combat]
+    if mutation == "dead":
+        actor.Dead = True
+    elif mutation == "captured":
+        actor.options.army = 2
+    else:
+        replacement = harness.unit(
+            entityId=entity_id,
+            blueprintId="uel0201",
+            position=[10, 2, 20],
+        )
+        units[units.index(actor)] = replacement
+    harness.brain.units = harness.lua.table_from(units)
+    harness.observe()
+    before = plain(harness.controller.fieldCampaign)
+    clear_before = len(harness.calls.clear)
+    move_before = len(harness.calls.move)
+
+    execute_intents(harness, recall, stale)
+
+    assert len(harness.calls.clear) == clear_before
+    assert len(harness.calls.move) == move_before
+    assert plain(harness.controller.fieldCampaign) == before
+    harness.brain.tick += 1
+    fresh = reconcile(harness)
+    retry = campaign_intents(harness, fresh)
+    assert len(retry) == 1 and retry[0].get("mode") == "recall"
+    execute_intents(harness, retry, fresh)
+    assert harness.controller.fieldCampaign.state == "recalled"
+    assert_campaign_cohort_indexes(harness.controller.fieldCampaign)
+
+
+def test_repeated_recalled_attrition_epochs_emit_once_and_restore_defenders_each_time() -> None:
+    harness, acu, engineer, live_combat, field, _, current = health_recalled_home_attrition()
+    first = campaign_intents(harness, current)
+    execute_intents(harness, first, current)
+    first_field, first_home = expected_attrition_emergency_cohorts(field)
+    assert plain(harness.controller.fieldCampaign.fieldTokens) == first_field
+    assert plain(harness.controller.fieldCampaign.homeTokens) == first_home
+    harness.brain.tick = 21
+    stable_contact = reconcile(harness)
+    assert campaign_intents(harness, stable_contact) == []
+    first_defend = [
+        intent
+        for intent in policy_intents(harness, stable_contact)
+        if intent.get("kind") == "defend_wave"
+    ]
+    assert len(first_defend) == 1
+    assert first_defend[0].get("actorTokens") == first_home
+    assert set(first_defend[0].get("actorTokens") or []).isdisjoint(first_field)
+
+    by_token = {
+        f"{int(actor.options.entityId)}:1": actor
+        for actor in live_combat
+    }
+    for token in first_home:
+        by_token[token].Dead = True
+    harness.brain.units = harness.lua.table_from(
+        [acu, engineer, *[by_token[token] for token in first_field]]
+    )
+    harness.brain.tick = 30
+    second_observation = reconcile(harness)
+    second = campaign_intents(harness, second_observation)
+    assert len(second) == 1 and second[0].get("mode") == "recall"
+    execute_intents(harness, second, second_observation)
+
+    assert (plain(harness.controller.fieldCampaign.fieldTokens) or []) == []
+    assert plain(harness.controller.fieldCampaign.homeTokens) == first_field
+    assert harness.controller.fieldCampaign.modeSwitches == 3
+    clear_after = len(harness.calls.clear)
+    move_after = len(harness.calls.move)
+    for tick in [31, 100, 600]:
+        harness.brain.tick = tick
+        stable = reconcile(harness)
+        execute_intents(harness, campaign_intents(harness, stable), stable)
+    assert len(harness.calls.clear) == clear_after
+    assert len(harness.calls.move) == move_after
+    final_defend = [
+        intent
+        for intent in policy_intents(harness, stable)
+        if intent.get("kind") == "defend_wave"
+    ]
+    assert len(final_defend) == 1
+    assert final_defend[0].get("actorTokens") == first_field
+
+
+@pytest.mark.parametrize("remaining", [1, 2, 3, 4])
+def test_recalled_attrition_with_four_or_fewer_survivors_demotes_all_and_stops(
+    remaining: int,
+) -> None:
+    harness, _, _, _, emergency_field, _, current = second_recalled_attrition_epoch(
+        remaining_field=remaining
+    )
+    survivors = emergency_field[:remaining]
+    recall = campaign_intents(harness, current)
+
+    assert len(recall) == 1 and recall[0].get("actorTokens") == survivors
+    execute_intents(harness, recall, current)
+    assert (plain(harness.controller.fieldCampaign.fieldTokens) or []) == []
+    assert plain(harness.controller.fieldCampaign.homeTokens) == survivors
+    assert_campaign_cohort_indexes(harness.controller.fieldCampaign)
+    calls_after = (len(harness.calls.clear), len(harness.calls.move))
+    for tick in [31, 100, 500]:
+        harness.brain.tick = tick
+        stable = reconcile(harness)
+        assert campaign_intents(harness, stable) == []
+    assert (len(harness.calls.clear), len(harness.calls.move)) == calls_after
+    defend = [
+        intent
+        for intent in policy_intents(harness, stable)
+        if intent.get("kind") == "defend_wave"
+    ]
+    assert len(defend) == 1
+    assert defend[0].get("actorTokens") == survivors
 
 
 def test_campaign_policy_never_targets_enemy_spawn_and_static_runtime_boundary_stays_minimal() -> None:
