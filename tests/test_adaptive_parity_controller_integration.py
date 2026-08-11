@@ -1220,7 +1220,19 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
         harness.unit(entityId=20 + index, blueprintId="ueb0101")
         for index in range(2)
     ]
-    harness.brain.units = harness.lua.table_from([acu, engineer, *factories])
+    opening_economy = [
+        *[
+            harness.unit(entityId=30 + index, blueprintId="ueb1101")
+            for index in range(2)
+        ],
+        *[
+            harness.unit(entityId=40 + index, blueprintId="ueb1103")
+            for index in range(4)
+        ],
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [acu, engineer, *factories, *opening_economy]
+    )
     _set_director_result(
         harness,
         "macroPlan",
@@ -1248,6 +1260,50 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
     order = harness.calls.buildMobile[1]
     assert order.blueprintId == "ueb0102"
     assert order.units[1].options.entityId == 1
+
+
+def test_acu_finishes_local_power_and_mex_before_starting_first_air() -> None:
+    harness = make_harness()
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        canBuild={"ueb0102": True, "ueb1101": True, "ueb1103": True},
+    )
+    land_factory = harness.unit(entityId=20, blueprintId="ueb0101")
+    harness.brain.units = harness.lua.table_from([acu, land_factory])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 1,
+            "airFactoryTarget": 1,
+            "lanes": {
+                "energy_recovery": {"admitted": True},
+                "factory_growth": {"admitted": True},
+            },
+            "grants": [
+                {
+                    "requestId": "energy-1",
+                    "lane": "energy_recovery",
+                    "source": "bank",
+                },
+                {
+                    "requestId": "factory-1",
+                    "lane": "factory_growth",
+                    "source": "bank",
+                },
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1101"
 
 
 def test_acu_completes_first_land_factory_before_starting_first_air() -> None:
