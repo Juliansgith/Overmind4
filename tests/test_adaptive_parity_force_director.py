@@ -86,25 +86,38 @@ class TestCombatOwnership:
     def test_immediate_home_breach_preempts_response_then_field_without_touching_garrison(self) -> None:
         snapshot = force_snapshot()
         plan = invoke(MODULE, GLOBAL, "Assign", snapshot)
+        original_response = assigned(plan, "response")
+        original_field = assigned(plan, "field")
+        required = len(assigned(plan, "home")) + len(original_response) + 2
+        breach_snapshot = {
+            **snapshot,
+            "home": {
+                "position": [0, 0, 0],
+                "breached": True,
+                "requiredDefenders": required,
+            },
+        }
         breach = invoke(
             MODULE,
             GLOBAL,
             "HandleHomeBreach",
-            {**snapshot, "home": {"position": [0, 0, 0], "breached": True}},
+            breach_snapshot,
             plan,
         )
 
         responders = breach["responseIntent"]["actorTokens"]
-        assert responders
+        assert responders == original_response + original_field[:2]
+        assert breach["responseIntent"]["priority"] == "immediate_home_breach"
         assert set(responders).isdisjoint(assigned(plan, "garrison"))
         assert breach["responseIntent"]["position"] == [0, 0, 0]
-        assert len(
-            [
-                token
-                for bucket in BUCKETS
-                for token in assigned(breach, bucket)
-            ]
-        ) == len(combat_units(40))
+        assert assigned(breach, "response") == responders
+        assert set(responders).isdisjoint(assigned(breach, "field"))
+        all_after = [
+            token
+            for bucket in BUCKETS
+            for token in assigned(breach, bucket)
+        ]
+        assert len(all_after) == len(set(all_after)) == len(combat_units(40))
 
     def test_dead_captured_and_recycled_generations_release_only_the_exact_assignment(self) -> None:
         snapshot = force_snapshot(20)

@@ -287,6 +287,14 @@ class TestFundedPortfolio:
             }
         )
         high = portfolio_snapshot()
+        high["opportunities"].update(
+            {
+                "fundableBuilderJobs": 12,
+                "constructionBacklog": 14,
+                "landProductionBacklog": 9,
+                "airProductionBacklog": 5,
+            }
+        )
         high["economy"].update(
             {
                 "massIncome": 12,
@@ -304,8 +312,59 @@ class TestFundedPortfolio:
 
         assert high_plan["engineerTarget"] > low_plan["engineerTarget"]
         assert high_plan["factoryTarget"] > low_plan["factoryTarget"]
+        assert high_plan["landFactoryTarget"] > low_plan["landFactoryTarget"]
+        assert high_plan["airFactoryTarget"] > low_plan["airFactoryTarget"]
+        assert (
+            high_plan["factoryTarget"]
+            == high_plan["landFactoryTarget"] + high_plan["airFactoryTarget"]
+        )
         assert high_plan["engineerTarget"] <= 32
         assert high_plan["factoryTarget"] <= 16
+
+        # Hold funding capacity constant so each actionable backlog remains a
+        # causal input rather than marker volume or the rich economy alone.
+        capacity = portfolio_snapshot()
+        capacity["economy"].update(
+            {
+                "massIncome": 8,
+                "massRequested": 1,
+                "energyIncome": 160,
+                "energyRequested": 20,
+                "massStored": 1000,
+                "energyStored": 10000,
+                "surplusTicks": 600,
+            }
+        )
+        capacity["opportunities"].update(
+            {
+                "fundableBuilderJobs": 0,
+                "constructionBacklog": 0,
+                "landProductionBacklog": 0,
+                "airProductionBacklog": 0,
+            }
+        )
+        baseline = build_portfolio(capacity)
+        backlog_cases = (
+            ("fundableBuilderJobs", "engineerTarget"),
+            ("constructionBacklog", "engineerTarget"),
+            ("landProductionBacklog", "landFactoryTarget"),
+            ("airProductionBacklog", "airFactoryTarget"),
+        )
+        scaled_by_opportunity = {}
+        for opportunity, target in backlog_cases:
+            with_backlog = copy.deepcopy(capacity)
+            with_backlog["opportunities"][opportunity] = 12
+            scaled = build_portfolio(with_backlog)
+            scaled_by_opportunity[opportunity] = scaled
+            assert scaled[target] > baseline[target], (opportunity, target)
+        assert (
+            scaled_by_opportunity["landProductionBacklog"]["airFactoryTarget"]
+            == baseline["airFactoryTarget"]
+        )
+        assert (
+            scaled_by_opportunity["airProductionBacklog"]["landFactoryTarget"]
+            == baseline["landFactoryTarget"]
+        )
 
     def test_stall_preserves_recovery_and_combat_while_shrinking_optional_work(self) -> None:
         snapshot = portfolio_snapshot()
@@ -359,7 +418,13 @@ class TestFundedPortfolio:
             snapshot["opportunities"]["publicMassMarkers"] = marker_count
             snapshot["opportunities"]["fundableBuilderJobs"] = 2
             plan = build_portfolio(snapshot)
-            targets.append((plan["engineerTarget"], plan["factoryTarget"]))
+            targets.append(
+                (
+                    plan["engineerTarget"],
+                    plan["landFactoryTarget"],
+                    plan["airFactoryTarget"],
+                )
+            )
 
         assert targets == [targets[0]] * len(targets)
 
@@ -373,6 +438,8 @@ class TestFundedPortfolio:
             assert 0 <= plan["fundedExpansionSlots"] <= 4, map_size
             assert 1 <= plan["engineerTarget"] <= 32, map_size
             assert 1 <= plan["factoryTarget"] <= 16, map_size
+            assert 1 <= plan["landFactoryTarget"] <= 12, map_size
+            assert 1 <= plan["airFactoryTarget"] <= 4, map_size
 
     def test_campaign_state_never_serializes_independent_macro_lanes(self) -> None:
         snapshot = portfolio_snapshot()
@@ -484,20 +551,33 @@ class TestRegionalMacro:
         assert result["jobs"][0]["kind"] == "rebuild_mex"
 
     def test_expansion_uses_global_nearest_eligible_engineer_not_token_order(self) -> None:
+        unreachable = mass_site("unreachable", 2, 0, region="region-a")
+        unreachable["reachable"] = False
+        reserved = mass_site("reserved", 4, 0, region="region-a")
+        reserved["reserved"] = True
         snapshot = {
             "fundedExpansionSlots": 1,
             "engineers": [
                 {"token": "eng-a", "position": [300, 0, 0], "available": True},
                 {"token": "eng-z", "position": [22, 0, 0], "available": True},
             ],
-            "sites": [mass_site("site", 20, 0, region="region-a")],
-            "regions": [{"key": "region-a", "state": "planned"}],
+            "sites": [
+                unreachable,
+                reserved,
+                mass_site("disconnected", 6, 0, region="region-b"),
+                mass_site("site", 20, 0, region="region-a"),
+            ],
+            "regions": [
+                {"key": "region-a", "state": "planned", "connected": True},
+                {"key": "region-b", "state": "planned", "connected": False},
+            ],
             "escorts": [{"token": "tank-1", "available": True}],
         }
 
         result = invoke(MODULE, GLOBAL, "PlanExpansion", snapshot)
 
         assert result["jobs"][0]["actorToken"] == "eng-z"
+        assert result["jobs"][0]["siteKey"] == "site"
 
     def test_multiple_funded_slots_choose_distinct_sites_and_regions(self) -> None:
         snapshot = {
@@ -604,7 +684,7 @@ class TestRegionalMacro:
             },
         )
 
-        assert without_screen["jobs"] == []
+        assert len(without_screen["jobs"]) == 0
         assert without_screen["denials"][0]["reason"] == "escort_not_ready"
         assert with_screen["jobs"][0]["escortTokens"] == ["aa", "tank"]
 
@@ -636,6 +716,20 @@ class TestRegionalMacro:
         assert len({job["targetKey"] for job in jobs}) == len(jobs)
         assert all(job["requiresLiveVisionRevalidation"] is True for job in jobs)
 
+        for seed in range(4):
+            permuted = copy.deepcopy(snapshot)
+            random.Random(seed).shuffle(permuted["candidates"])
+            random.Random(seed + 20).shuffle(permuted["engineers"])
+            assert invoke(MODULE, GLOBAL, "PlanReclaim", permuted)["jobs"] == jobs
+
+        revalidated = copy.deepcopy(snapshot)
+        for candidate in revalidated["candidates"]:
+            if candidate["key"] == "front-low":
+                candidate["live"] = False
+            elif candidate["key"] == "home-high":
+                candidate["visible"] = False
+        assert len(invoke(MODULE, GLOBAL, "PlanReclaim", revalidated)["jobs"]) == 0
+
     def test_remote_expansion_backlog_does_not_consume_each_regions_reclaim_lane(self) -> None:
         snapshot = portfolio_snapshot()
         snapshot["opportunities"].update(
@@ -646,6 +740,240 @@ class TestRegionalMacro:
 
         assert intent_by_id(plan, "reclaim")["admitted"] is True
         assert intent_by_id(plan, "reclaim")["admittedCount"] >= 2
+
+    def test_job_ledger_persists_travel_and_refreshes_only_on_real_progress(self) -> None:
+        first = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            {"jobs": {}},
+            {
+                "tick": 100,
+                "newJobs": [
+                    {
+                        "id": "mex:front:1",
+                        "kind": "build_mex",
+                        "actorToken": "eng-1:1",
+                        "targetKey": "front-1",
+                        "estimatedTravelTicks": 500,
+                    }
+                ],
+                "actors": [
+                    {
+                        "token": "eng-1:1",
+                        "live": True,
+                        "owned": True,
+                        "position": [0, 0, 0],
+                    }
+                ],
+                "targets": [
+                    {
+                        "key": "front-1",
+                        "live": True,
+                        "position": [100, 0, 0],
+                    }
+                ],
+            },
+        )
+        job = first["jobs"]["mex:front:1"]
+
+        assert job["phase"] == "travelling"
+        assert job["actorToken"] == "eng-1:1"
+        assert job["deadlineTick"] >= 600
+        assert job["lastProgressTick"] == 100
+        assert job["remainingDistance"] == pytest.approx(100)
+
+        progressed = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            first,
+            {
+                "tick": 250,
+                "newJobs": [],
+                "actors": [
+                    {
+                        "token": "eng-1:1",
+                        "live": True,
+                        "owned": True,
+                        "position": [40, 0, 0],
+                    }
+                ],
+                "targets": [
+                    {
+                        "key": "front-1",
+                        "live": True,
+                        "position": [100, 0, 0],
+                    }
+                ],
+            },
+        )
+        next_job = progressed["jobs"]["mex:front:1"]
+
+        assert next_job["lastProgressTick"] == 250
+        assert next_job["remainingDistance"] == pytest.approx(60)
+        assert next_job["retryCount"] == 0
+
+        unchanged = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            progressed,
+            {
+                "tick": 300,
+                "newJobs": [],
+                "actors": [
+                    {
+                        "token": "eng-1:1",
+                        "live": True,
+                        "owned": True,
+                        "position": [40, 0, 0],
+                    }
+                ],
+                "targets": [
+                    {
+                        "key": "front-1",
+                        "live": True,
+                        "position": [100, 0, 0],
+                    }
+                ],
+            },
+        )["jobs"]["mex:front:1"]
+        assert unchanged["lastProgressTick"] == 250
+        assert unchanged["deadlineTick"] == next_job["deadlineTick"]
+
+    def test_job_ledger_stall_deadline_releases_once_and_makes_job_retryable(self) -> None:
+        ledger = {
+            "jobs": {
+                "mex:front:1": {
+                    "id": "mex:front:1",
+                    "kind": "build_mex",
+                    "phase": "travelling",
+                    "actorToken": "eng-1:1",
+                    "targetKey": "front-1",
+                    "deadlineTick": 600,
+                    "lastProgressTick": 100,
+                    "remainingDistance": 100,
+                    "retryCount": 0,
+                }
+            }
+        }
+        observation = {
+            "tick": 601,
+            "newJobs": [],
+            "actors": [
+                {
+                    "token": "eng-1:1",
+                    "live": True,
+                    "owned": True,
+                    "position": [0, 0, 0],
+                }
+            ],
+            "targets": [
+                {"key": "front-1", "live": True, "position": [100, 0, 0]}
+            ],
+        }
+
+        released = invoke(
+            MODULE, GLOBAL, "UpdateJobLedger", ledger, observation
+        )
+        repeated = invoke(
+            MODULE, GLOBAL, "UpdateJobLedger", released, {**observation, "tick": 602}
+        )
+
+        assert released["jobs"]["mex:front:1"]["phase"] == "retryable"
+        assert released["jobs"]["mex:front:1"]["retryCount"] == 1
+        assert released["releasedActorTokens"] == ["eng-1:1"]
+        assert len(repeated["releasedActorTokens"]) == 0
+        assert repeated["jobs"]["mex:front:1"]["retryCount"] == 1
+
+        progressing = copy.deepcopy(ledger)
+        progressing["jobs"]["mex:front:1"]["phase"] = "progressing"
+        completed_observation = copy.deepcopy(observation)
+        completed_observation["tick"] = 300
+        completed_observation["targets"][0]["completed"] = True
+        completed = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            progressing,
+            completed_observation,
+        )
+        assert completed["jobs"]["mex:front:1"]["phase"] == "completed"
+        assert completed["jobs"]["mex:front:1"]["retryCount"] == 0
+        assert completed["releasedActorTokens"] == ["eng-1:1"]
+
+        gone_observation = copy.deepcopy(observation)
+        gone_observation["tick"] = 300
+        gone_observation["targets"][0]["live"] = False
+        gone = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            progressing,
+            gone_observation,
+        )
+        assert gone["jobs"]["mex:front:1"]["phase"] == "retryable"
+        assert gone["jobs"]["mex:front:1"]["failureReason"] == "target_gone"
+        assert gone["jobs"]["mex:front:1"]["retryCount"] == 1
+        assert gone["releasedActorTokens"] == ["eng-1:1"]
+
+    def test_job_ledger_generation_death_and_capture_reassign_nearest_exact_survivor(self) -> None:
+        base = {
+            "jobs": {
+                "mex:front:1": {
+                    "id": "mex:front:1",
+                    "kind": "build_mex",
+                    "phase": "travelling",
+                    "actorToken": "eng-1:1",
+                    "targetKey": "front-1",
+                    "deadlineTick": 900,
+                    "lastProgressTick": 100,
+                    "remainingDistance": 80,
+                    "retryCount": 0,
+                }
+            }
+        }
+        target = {"key": "front-1", "live": True, "position": [100, 0, 0]}
+        invalid_actors = (
+            {"token": "eng-1:1", "live": False, "owned": True, "position": [20, 0, 0]},
+            {"token": "eng-1:1", "live": True, "owned": False, "position": [20, 0, 0]},
+            {"token": "eng-1:2", "live": True, "owned": True, "position": [20, 0, 0]},
+        )
+
+        for invalid in invalid_actors:
+            result = invoke(
+                MODULE,
+                GLOBAL,
+                "UpdateJobLedger",
+                copy.deepcopy(base),
+                {
+                    "tick": 200,
+                    "newJobs": [],
+                    "actors": [
+                        invalid,
+                        {
+                            "token": "eng-near:1",
+                            "live": True,
+                            "owned": True,
+                            "available": True,
+                            "position": [90, 0, 0],
+                        },
+                        {
+                            "token": "eng-far:1",
+                            "live": True,
+                            "owned": True,
+                            "available": True,
+                            "position": [0, 0, 0],
+                        },
+                    ],
+                    "targets": [target],
+                },
+            )
+            job = result["jobs"]["mex:front:1"]
+            assert job["actorToken"] == "eng-near:1", invalid
+            assert job["retryCount"] == 1, invalid
+            assert "eng-1:1" in result["releasedActorTokens"], invalid
 
     def test_t2_hq_milestone_has_no_hydro_dependency_and_keeps_one_t1_lane(self) -> None:
         ready = {
@@ -703,32 +1031,3 @@ class TestRegionalMacro:
 
         assert len(plan["mexUpgradeSiteKeys"]) <= 1
         assert plan["t3Action"] == t3_action
-
-
-def test_controller_integrates_directors_and_exact_new_executor_surface() -> None:
-    controller = director_path("Controller.lua").read_text(encoding="utf-8")
-    policy = director_path("Policy.lua").read_text(encoding="utf-8")
-
-    for module_name in ("MacroDirector", "Intelligence", "ForceDirector"):
-        assert f"/{module_name}.lua" in controller
-        assert f"/{module_name}.lua" not in policy
-    for role in (
-        "radar",
-        "point_defense",
-        "static_anti_air",
-        "mass_extractor_t2",
-        "mass_extractor_t3",
-        "bomber",
-        "transport",
-    ):
-        assert role in controller
-    for intent_kind in (
-        "bomber_raid",
-        "transport_load",
-        "transport_unload",
-        "region_garrison",
-        "home_response",
-    ):
-        assert intent_kind in controller
-    assert "IssueTransportLoad" in controller
-    assert "IssueTransportUnload" in controller

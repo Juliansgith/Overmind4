@@ -43,6 +43,7 @@ class TestFairIntel:
         regions = [
             {"key": "home", "state": "secured", "position": [0, 0, 0]},
             {"key": "front", "state": "establishing", "position": [200, 0, 0]},
+            {"key": "new", "state": "establishing", "position": [300, 0, 0]},
             {"key": "lost", "state": "lost", "position": [400, 0, 0]},
         ]
         coverage = [
@@ -53,7 +54,8 @@ class TestFairIntel:
         plan = invoke(MODULE, GLOBAL, "PlanRadar", regions, coverage)
 
         assert [(intent["regionKey"], intent["reason"]) for intent in plan] == [
-            ("front", "restore_region_radar")
+            ("front", "restore_region_radar"),
+            ("new", "establish_region_radar"),
         ]
 
     def test_scout_route_cycles_multiple_public_objectives_in_stable_order(self) -> None:
@@ -199,6 +201,7 @@ class TestAirAndMobility:
 
         assert (engineer["targetToken"], engineer["targetRole"]) == ("eng", "engineer")
         assert (fallback["targetToken"], fallback["targetRole"]) == ("mex", "mass_extractor")
+        assert invoke(MODULE, GLOBAL, "SelectBomberTarget", observations[:1]) is None
 
     def test_bomber_execution_revalidates_live_ownership_generation_and_current_vision(self) -> None:
         intent = {
@@ -279,13 +282,15 @@ class TestAirAndMobility:
             "transportToken": "transport:1",
             "cargoTokens": ["eng:1"],
             "dropPosition": [2600, 0, 0],
+            "dropTolerance": 20,
             "retryCount": 0,
         }
         events = (
             ({"kind": "load_ordered", "tick": 100}, "loading"),
             ({"kind": "observed", "tick": 110, "transportToken": "transport:1", "attachedCargoTokens": ["eng:1"]}, "loaded"),
             ({"kind": "unload_ordered", "tick": 120}, "unloading"),
-            ({"kind": "observed", "tick": 130, "transportToken": "transport:1", "attachedCargoTokens": [], "cargoPositions": {"eng:1": [2601, 0, 0]}}, "completed"),
+            ({"kind": "observed", "tick": 125, "transportToken": "transport:1", "attachedCargoTokens": ["eng:1"]}, "unloading"),
+            ({"kind": "observed", "tick": 130, "transportToken": "transport:1", "attachedCargoTokens": [], "cargoPositions": {"eng:1": [2620, 0, 0]}}, "completed"),
         )
 
         for event, expected in events:
@@ -300,15 +305,19 @@ class TestAirAndMobility:
             "transportToken": "transport:1",
             "cargoTokens": ["eng:1"],
             "dropPosition": [2600, 0, 0],
+            "dropTolerance": 20,
             "deadlineTick": 500,
             "retryCount": 0,
         }
         failures = (
             {"kind": "transport_dead", "tick": 200},
             {"kind": "transport_captured", "tick": 200},
+            {"kind": "cargo_dead", "tick": 200, "cargoToken": "eng:1"},
+            {"kind": "cargo_captured", "tick": 200, "cargoToken": "eng:1"},
             {"kind": "observed", "tick": 200, "transportToken": "transport:2", "attachedCargoTokens": ["eng:1"]},
             {"kind": "observed", "tick": 501, "transportToken": "transport:1", "attachedCargoTokens": []},
             {"kind": "observed", "tick": 200, "transportToken": "transport:1", "attachedCargoTokens": ["eng:2"]},
+            {"kind": "observed", "tick": 200, "transportToken": "transport:1", "attachedCargoTokens": ["eng:1", "eng:2"]},
         )
 
         for event in failures:
@@ -319,6 +328,27 @@ class TestAirAndMobility:
             assert result["retryable"] is True, event
             assert result["released"] is True, event
             assert result["retryCount"] == 1, event
+
+        unloading = {
+            **loading,
+            "state": "unloading",
+            "deadlineTick": 700,
+        }
+        outside_drop = invoke(
+            MODULE,
+            GLOBAL,
+            "AdvanceTransport",
+            unloading,
+            {
+                "kind": "observed",
+                "tick": 300,
+                "transportToken": "transport:1",
+                "attachedCargoTokens": [],
+                "cargoPositions": {"eng:1": [2620.01, 0, 0]},
+            },
+        )
+        assert outside_drop["state"] == "unloading"
+        assert outside_drop["released"] is not True
 
     def test_intelligence_module_has_no_engine_global_hidden_scan_or_warp_surface(self) -> None:
         text = director_path(MODULE).read_text(encoding="utf-8")
@@ -338,9 +368,14 @@ class TestAirAndMobility:
 
 
 def test_current_ai_runtime_does_not_receive_observer_opponent_aggregates() -> None:
-    controller = Path("lua/AI/Overmind4/Controller.lua").read_text(encoding="utf-8")
-    policy = Path("lua/AI/Overmind4/Policy.lua").read_text(encoding="utf-8")
-    combined = controller + "\n" + policy
+    runtime_paths = [
+        Path("lua/AI/Overmind4/Controller.lua"),
+        Path("lua/AI/Overmind4/Policy.lua"),
+        *(director_path(name) for name in ("MacroDirector.lua", "Intelligence.lua", "ForceDirector.lua")),
+    ]
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in runtime_paths if path.is_file()
+    )
 
     for forbidden in (
         "opponentAggregate",
@@ -349,5 +384,6 @@ def test_current_ai_runtime_does_not_receive_observer_opponent_aggregates() -> N
         "opponentReclaim",
         "benchmarkCheckpoints",
         "benchmarkOpponent",
+        "OM4BenchmarkLatest",
     ):
         assert forbidden not in combined

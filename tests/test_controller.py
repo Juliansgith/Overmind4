@@ -35,8 +35,18 @@ def make_harness() -> ControllerHarness:
             own = {}, enemy = {}, nav = {}, navLabel = {}, navPath = {}, canBuild = {}, terrain = {},
             buildMobile = {}, buildFactory = {}, rally = {}, aggressive = {},
             guard = {}, move = {}, clear = {}, reclaim = {}, reclaimQuery = {},
-            upgrade = {}, patrol = {},
+            upgrade = {}, patrol = {}, transportLoad = {}, transportUnload = {},
+            macroBuildPortfolio = {}, macroUpdateJobLedger = {},
+            intelligenceUpdateMemory = {}, intelligencePlanRadar = {},
+            forceAssign = {}, forceReconcile = {}, policySnapshots = {},
             waits = {}, sequence = {}, unitReclaimInspections = 0,
+        }
+        directorResults = {
+            macroPlan = { valid = true, lanes = {}, regions = {}, intents = {} },
+            jobLedger = { jobs = {} },
+            intelState = { contacts = {}, threat = {}, expansionSafety = {} },
+            radarIntents = {},
+            forcePlan = { assignments = {}, ownershipByToken = {}, intents = {} },
         }
 
         BlueprintData = {
@@ -77,6 +87,19 @@ def make_harness() -> ControllerHarness:
                 Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
                 Economy = { BuildTime = 60, BuildCostMass = 36, BuildCostEnergy = 360, ProductionPerSecondMass = 2, MaintenanceConsumptionPerSecondEnergy = 2 },
             },
+            ueb1202 = {
+                BlueprintId = 'ueb1202',
+                General = { UpgradesFrom = 'ueb1103' },
+                Economy = { BuildTime = 900, BuildCostMass = 900, BuildCostEnergy = 5400 },
+            },
+            ueb1302 = {
+                BlueprintId = 'ueb1302',
+                General = { UpgradesFrom = 'ueb1202' },
+                Economy = { BuildTime = 2875, BuildCostMass = 4600, BuildCostEnergy = 31600 },
+            },
+            ueb2101 = { BlueprintId = 'ueb2101', Economy = { BuildTime = 500, BuildCostMass = 250, BuildCostEnergy = 2500 } },
+            ueb2104 = { BlueprintId = 'ueb2104', Economy = { BuildTime = 300, BuildCostMass = 120, BuildCostEnergy = 900 } },
+            ueb3101 = { BlueprintId = 'ueb3101', Economy = { BuildTime = 400, BuildCostMass = 80, BuildCostEnergy = 800 } },
             uel0001 = { BlueprintId = 'uel0001', Economy = { BuildRate = 10, ProductionPerSecondMass = 1, ProductionPerSecondEnergy = 20 } },
             uel0101 = { BlueprintId = 'uel0101', Economy = { BuildTime = 60, BuildCostMass = 12, BuildCostEnergy = 80 } },
             uel0103 = { BlueprintId = 'uel0103', Economy = { BuildTime = 200, BuildCostMass = 36, BuildCostEnergy = 180 } },
@@ -86,6 +109,8 @@ def make_harness() -> ControllerHarness:
             uel0201 = { BlueprintId = 'uel0201', Economy = { BuildTime = 300, BuildCostMass = 56, BuildCostEnergy = 266 } },
             uea0101 = { BlueprintId = 'uea0101', Economy = { BuildTime = 200, BuildCostMass = 40, BuildCostEnergy = 580 } },
             uea0102 = { BlueprintId = 'uea0102', Economy = { BuildTime = 500, BuildCostMass = 50, BuildCostEnergy = 2250 } },
+            uea0103 = { BlueprintId = 'uea0103', Economy = { BuildTime = 500, BuildCostMass = 60, BuildCostEnergy = 3000 } },
+            uea0107 = { BlueprintId = 'uea0107', Economy = { BuildTime = 600, BuildCostMass = 100, BuildCostEnergy = 4000 } },
             uel0202 = { BlueprintId = 'uel0202', Economy = { BuildTime = 880, BuildCostMass = 198, BuildCostEnergy = 990 } },
             uel0205 = { BlueprintId = 'uel0205', Economy = { BuildTime = 800, BuildCostMass = 160, BuildCostEnergy = 800 } },
         }
@@ -137,6 +162,9 @@ def make_harness() -> ControllerHarness:
             end
             function unit:IsUnitState(name)
                 local states = self.options.states or {}
+                if name == 'Attached' and self.options.attached ~= nil then
+                    return self.options.attached
+                end
                 return states[name] or false
             end
             function unit:IsPaused() return self.options.paused or false end
@@ -154,6 +182,20 @@ def make_harness() -> ControllerHarness:
                 return canBuild[blueprintId] == true
             end
             function unit:GetFocusUnit() return self.options.focusUnit end
+            function unit:GetTransport() return self.options.transport end
+            function unit:GetCargo() return self.options.cargo or {} end
+            function unit:GetBlip(army)
+                local options = self.options
+                return {
+                    IsSeenNow = function(_, observedArmy)
+                        return observedArmy == army and options.seenNow ~= false
+                    end,
+                    IsOnRadar = function(_, observedArmy)
+                        return observedArmy == army
+                            and (options.onRadar == true or options.seenNow ~= false)
+                    end,
+                }
+            end
             return unit
         end
 
@@ -361,6 +403,34 @@ def make_harness() -> ControllerHarness:
             if calls.failPatrol then error('patrol failed') end
             return { kind = 'patrol' }
         end
+        function IssueTransportLoad(units, transport)
+            table.insert(calls.sequence, 'transport_load')
+            table.insert(calls.transportLoad, { units = units, transport = transport })
+            if calls.failTransportLoad then error('transport load failed') end
+            transport.options.cargo = {}
+            for _, unit in ipairs(units) do
+                unit.options.attached = true
+                unit.options.transport = transport
+                table.insert(transport.options.cargo, unit)
+            end
+            return { kind = 'transport-load' }
+        end
+        function IssueTransportUnload(transports, position)
+            table.insert(calls.sequence, 'transport_unload')
+            table.insert(calls.transportUnload, { transports = transports, position = position })
+            if calls.failTransportUnload then error('transport unload failed') end
+            if not calls.keepCargoAttached then
+                for _, transport in ipairs(transports) do
+                    for _, unit in ipairs(transport.options.cargo or {}) do
+                        unit.options.attached = false
+                        unit.options.transport = nil
+                        unit.options.position = { position[1], position[2], position[3] }
+                    end
+                    transport.options.cargo = {}
+                end
+            end
+            return { kind = 'transport-unload' }
+        end
         function IssueFactoryRallyPoint(units, position)
             table.insert(calls.rally, { units = units, position = position })
             for _, factory in ipairs(units) do
@@ -413,6 +483,61 @@ def make_harness() -> ControllerHarness:
             if calls.failReclaim then error('reclaim failed') end
             return { kind = 'reclaim' }
         end
+        MacroDirectorStub = {
+            BuildPortfolio = function(snapshot)
+                table.insert(calls.macroBuildPortfolio, snapshot)
+                return directorResults.macroPlan
+            end,
+            UpdateJobLedger = function(ledger, snapshot)
+                table.insert(calls.macroUpdateJobLedger, {
+                    ledger = ledger,
+                    snapshot = snapshot,
+                })
+                return directorResults.jobLedger
+            end,
+            ClusterRegions = function() return {} end,
+            AdvanceRegion = function(region) return region end,
+            PlanExpansion = function() return { jobs = {}, denials = {} } end,
+            PlanRegionPackage = function() return { requiredRoles = {} } end,
+            PlanReclaim = function() return { jobs = {} } end,
+            PlanTech = function() return {} end,
+        }
+        IntelligenceStub = {
+            UpdateMemory = function(previous, snapshot)
+                table.insert(calls.intelligenceUpdateMemory, {
+                    previous = previous,
+                    snapshot = snapshot,
+                })
+                return directorResults.intelState
+            end,
+            PlanRadar = function(regions, coverage)
+                table.insert(calls.intelligencePlanRadar, {
+                    regions = regions,
+                    coverage = coverage,
+                })
+                return directorResults.radarIntents
+            end,
+            PlanScoutRoute = function() return {} end,
+            PlanAir = function() return { orders = {} } end,
+            SelectBomberTarget = function() return nil end,
+            ValidateBomberIntent = function() return { valid = false } end,
+            PlanTransport = function() return { mode = 'hold' } end,
+            AdvanceTransport = function(mission) return mission end,
+        }
+        ForceDirectorStub = {
+            Assign = function(snapshot)
+                table.insert(calls.forceAssign, snapshot)
+                return directorResults.forcePlan
+            end,
+            Reconcile = function(plan, snapshot)
+                table.insert(calls.forceReconcile, {
+                    plan = plan,
+                    snapshot = snapshot,
+                })
+                return directorResults.forcePlan
+            end,
+            HandleHomeBreach = function(_, plan) return plan end,
+        }
         function WaitTicks(ticks) table.insert(calls.waits, ticks) end
         """
     )
@@ -423,6 +548,9 @@ def make_harness() -> ControllerHarness:
         "/mods/overmind4/lua/AI/Overmind4/Telemetry.lua": lua.table_from({"Telemetry": lua.globals().Telemetry}),
         "/mods/overmind4/lua/AI/Overmind4/Catalog.lua": lua.table_from({"Catalog": lua.globals().Catalog}),
         "/mods/overmind4/lua/AI/Overmind4/Policy.lua": lua.table_from({"Policy": lua.globals().Policy}),
+        "/mods/overmind4/lua/AI/Overmind4/MacroDirector.lua": lua.table_from({"MacroDirector": lua.globals().MacroDirectorStub}),
+        "/mods/overmind4/lua/AI/Overmind4/Intelligence.lua": lua.table_from({"Intelligence": lua.globals().IntelligenceStub}),
+        "/mods/overmind4/lua/AI/Overmind4/ForceDirector.lua": lua.table_from({"ForceDirector": lua.globals().ForceDirectorStub}),
         "/lua/sim/MarkerUtilities.lua": lua.globals().MarkerUtilities,
         "/lua/sim/NavUtils.lua": lua.globals().NavUtils,
     }

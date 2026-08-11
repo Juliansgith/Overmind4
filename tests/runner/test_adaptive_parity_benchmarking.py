@@ -5,15 +5,20 @@ from dataclasses import asdict, fields, is_dataclass
 import json
 import math
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
 
-from conftest import ROOT
+from adaptive_parity_helpers import lua_value
+from conftest import ROOT, runtime
 from tools.overmind4_runner import parsing, reporting
 
 
 RUN_ID = "parity-run"
+OBSERVER_PATH = (
+    ROOT / "tools" / "autorun" / "schook" / "lua" / "Overmind4Benchmark.lua"
+)
 REQUIRED_METRICS = {
     "mass_income",
     "energy_income",
@@ -43,10 +48,12 @@ REQUIRED_METRICS = {
     "air_factory_t3",
     "factory_idle",
     "factory_utilization",
+    "factory_full_bank_idle_ticks",
     "air_scout",
     "air_interceptor",
     "air_bomber",
     "air_transport",
+    "air_other",
     "mobile_t2",
     "mobile_t3",
     "army_count_home",
@@ -87,8 +94,10 @@ def metric_values(**updates: float | int) -> dict[str, float | int]:
             "land_factory_t1": 3,
             "air_factory_t1": 1,
             "factory_utilization": 0.85,
+            "factory_full_bank_idle_ticks": 0,
             "air_scout": 1,
             "air_interceptor": 4,
+            "air_other": 1,
             "army_count_home": 10,
             "army_count_garrison": 4,
             "army_count_field": 15,
@@ -147,6 +156,7 @@ BENCHMARK_SCHEMA_READY = {
     "operation_integrity_reason",
 } <= TELEMETRY_FIELDS
 PARITY_API_READY = callable(getattr(reporting, "evaluate_parity", None))
+PROMOTION_API_READY = callable(getattr(reporting, "evaluate_promotion", None))
 
 
 def test_log_telemetry_has_observer_checkpoint_and_causal_operation_contract() -> None:
@@ -160,16 +170,75 @@ def test_log_telemetry_has_observer_checkpoint_and_causal_operation_contract() -
 
 def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> None:
     launch_path = ROOT / "tools" / "autorun" / "schook" / "lua" / "SinglePlayerLaunch.lua"
-    observer_path = ROOT / "tools" / "autorun" / "schook" / "lua" / "Overmind4Benchmark.lua"
     launch = launch_path.read_text(encoding="utf-8")
 
-    assert observer_path.is_file()
+    assert OBSERVER_PATH.is_file()
     assert "Overmind4Benchmark.lua" in launch
-    observer = observer_path.read_text(encoding="utf-8")
+    observer = OBSERVER_PATH.read_text(encoding="utf-8")
     assert "OM4BENCH" in observer
     assert "CHECKPOINT_TICKS = 300" in observer
     assert "Controller" not in observer
     assert "Policy" not in observer
+    assert "OM4BenchmarkLatest" not in observer
+    wait_loop = re.search(
+        r"while\s+not\s+WorldIsPlaying\(\)\s+do(?P<body>.*?)^\s*end\s*$",
+        launch,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert wait_loop is not None
+    assert "BenchmarkObserver.Create" not in wait_loop.group("body")
+    assert launch.find("BenchmarkObserver.Create") > wait_loop.end()
+    for forbidden in (
+        r"\bIssue[A-Za-z0-9_]*\b",
+        r"\bCreateUnit\b",
+        r"\bDestroyUnit\b",
+        r"\bGiveResource\b",
+        r"\bTakeResource\b",
+        r"\bSetGameSpeed\b",
+        r"\bSessionEndGame\b",
+        r"\bWarp\b",
+    ):
+        assert re.search(forbidden, observer) is None, forbidden
+
+
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+def test_observer_import_is_inert_and_sampling_is_explicit_ordered_and_nonduplicating() -> None:
+    lua = runtime()
+    emitted: list[str] = []
+    reads: list[int] = []
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+
+    assert emitted == []
+    assert reads == []
+
+    def reader(army: int) -> Any:
+        reads.append(army)
+        return lua_value(lua, metric_values())
+
+    lua.globals().observer_reader = reader
+    lua.globals().observer_logger = emitted.append
+    lua.execute(
+        "observer = BenchmarkObserver.Create('parity-run', {1, 2}, "
+        "observer_reader, observer_logger)"
+    )
+
+    assert emitted == []
+    assert reads == []
+
+    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 299)
+    assert emitted == []
+    assert reads == []
+
+    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 300)
+    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 300)
+    assert reads == [1, 2]
+    assert len(emitted) == 2
+    assert "|tick=300|army=1|" in emitted[0]
+    assert "|tick=300|army=2|" in emitted[1]
+
+    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 600)
+    assert reads == [1, 2, 1, 2]
+    assert len(emitted) == 4
 
 
 @pytest.mark.skipif(not BENCHMARK_SCHEMA_READY, reason="benchmark parser RED schema missing")
@@ -177,10 +246,10 @@ class TestBenchmarkParsing:
     def test_parser_collects_both_armies_at_each_checkpoint_in_tick_army_order(self) -> None:
         text = "\n".join(
             [
-                benchmark_line(600, 2, mass_income=20),
                 benchmark_line(300, 2, mass_income=16),
-                benchmark_line(600, 1, mass_income=12),
                 benchmark_line(300, 1, mass_income=10),
+                benchmark_line(600, 2, mass_income=20),
+                benchmark_line(600, 1, mass_income=12),
             ]
         )
 
@@ -341,108 +410,262 @@ class TestBenchmarkParsing:
 
 def test_reporting_exposes_a_public_parity_gate_api() -> None:
     assert callable(getattr(reporting, "evaluate_parity", None))
+    assert callable(getattr(reporting, "evaluate_promotion", None))
 
 
-def parity_checkpoint(
-    minutes: int,
-    army: int,
-    *,
-    scale: float = 1,
-    **updates: float | int,
-) -> dict[str, Any]:
-    floors = {
-        5: {
-            "engineers_alive": 6,
-            "mex_alive": 8,
-            "mass_reclaim": 250,
-            "factories": 3,
-            "combat_units": 12,
-            "mex_survival": 0.90,
-            "mass_income": 6,
-            "mass_spent": 1000,
-        },
-        10: {
-            "engineers_alive": 10,
-            "mex_alive": 14,
-            "mass_reclaim": 1000,
-            "factories": 5,
-            "combat_units": 35,
-            "mex_survival": 0.85,
-            "mass_income": 12,
-            "mass_spent": 4000,
-        },
-        15: {
-            "engineers_alive": 16,
-            "mex_alive": 18,
-            "mass_reclaim": 3000,
-            "factories": 7,
-            "combat_units": 75,
-            "mex_survival": 0.80,
-            "mass_income": 20,
-            "mass_spent": 9000,
-        },
-        20: {
-            "engineers_alive": 22,
-            "mex_alive": 22,
-            "mass_reclaim": 6000,
-            "factories": 9,
-            "combat_units": 120,
-            "mex_survival": 0.75,
-            "mass_income": 28,
-            "mass_spent": 16000,
-        },
-    }
-    metrics = {
-        key: (value * scale if key != "mex_survival" else value)
-        for key, value in floors[minutes].items()
-    }
-    metrics.update(
+IAN_FLOORS = {
+    5: {
+        "engineers_alive": 6,
+        "mex_alive": 8,
+        "mass_reclaim": 250,
+        "factories": 3,
+        "combat_units": 12,
+        "mex_survival": 0.90,
+        "mass_income": 6,
+        "mass_spent": 1000,
+        "air_total": 3,
+    },
+    10: {
+        "engineers_alive": 10,
+        "mex_alive": 14,
+        "mass_reclaim": 1000,
+        "factories": 5,
+        "combat_units": 35,
+        "mex_survival": 0.85,
+        "mass_income": 12,
+        "mass_spent": 4000,
+        "air_total": 5,
+    },
+    15: {
+        "engineers_alive": 16,
+        "mex_alive": 18,
+        "mass_reclaim": 3000,
+        "factories": 7,
+        "combat_units": 75,
+        "mex_survival": 0.80,
+        "mass_income": 20,
+        "mass_spent": 9000,
+        "air_total": 18,
+    },
+    20: {
+        "engineers_alive": 22,
+        "mex_alive": 22,
+        "mass_reclaim": 6000,
+        "factories": 9,
+        "combat_units": 120,
+        "mex_survival": 0.75,
+        "mass_income": 28,
+        "mass_spent": 16000,
+        "air_total": 30,
+    },
+}
+
+
+def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | int]:
+    floor = IAN_FLOORS[minutes]
+    values = metric_values()
+    scaled_count = lambda value: int(math.ceil(float(value) * scale - 1e-9))
+    engineers_alive = scaled_count(floor["engineers_alive"])
+    engineers_built = max(engineers_alive, math.floor(engineers_alive / 0.95))
+    mex_t2 = scaled_count(8 if minutes >= 20 else (4 if minutes >= 15 else 0))
+    mex_t3 = 0
+    mex_t1 = scaled_count(floor["mex_alive"]) - mex_t2 - mex_t3
+    if minutes == 5:
+        land_t1, land_t2, air_t1 = 2, 0, 1
+    elif minutes == 10:
+        land_t1, land_t2, air_t1 = 4, 0, 1
+    elif minutes == 15:
+        land_t1, land_t2, air_t1 = 3, 1, 3
+    else:
+        land_t1, land_t2, air_t1 = 3, 2, 4
+    air_scout = scaled_count(1)
+    air_interceptor = scaled_count(4 if minutes >= 10 else 2)
+    air_bomber = scaled_count(1 if minutes >= 15 else 0)
+    air_transport = scaled_count(1 if minutes >= 15 else 0)
+    air_other = max(
+        0,
+        scaled_count(floor["air_total"])
+        - air_scout
+        - air_interceptor
+        - air_bomber
+        - air_transport,
+    )
+    combat = scaled_count(floor["combat_units"])
+    home = math.ceil(combat * 0.25)
+    garrison = math.ceil(combat * 0.15)
+    response = math.ceil(combat * 0.10)
+    field = combat - home - garrison - response
+    utilization_floor = 0.85 if minutes >= 15 else 0.75
+    mass_spent = floor["mass_spent"] * scale
+    mass_excess = mass_spent / utilization_floor - mass_spent
+    values.update(
         {
-            "air_scout": 1,
-            "air_interceptor": 4 if minutes >= 10 else 2,
-            "air_total": 30 if minutes >= 20 else (18 if minutes >= 15 else 6),
-            "land_factory_t1": 3,
-            "land_factory_t2": 2 if minutes >= 20 else (1 if minutes >= 15 else 0),
-            "air_factory_t1": 2 if minutes >= 15 else 1,
-            "mobile_t2": 35 if minutes >= 20 else (12 if minutes >= 15 else 0),
-            "mex_t2": 8 if minutes >= 20 else (4 if minutes >= 15 else 0),
-            "t3_admitted": 1 if minutes >= 20 else 0,
-            "t2_hq_started_tick": 5700,
-            "mass_utilization": 0.85 if minutes >= 15 else 0.75,
+            "mass_income": floor["mass_income"] * scale,
+            "mass_spent": mass_spent,
+            "mass_excess": mass_excess,
+            "mass_reclaim": floor["mass_reclaim"] * scale,
+            "engineers_alive": engineers_alive,
+            "engineers_built": engineers_built,
+            "engineers_lost": engineers_built - engineers_alive,
+            "mex_t1": mex_t1,
+            "mex_t2": mex_t2,
+            "mex_t3": mex_t3,
+            "mex_survival": floor["mex_survival"],
+            "land_factory_t1": scaled_count(land_t1),
+            "land_factory_t2": scaled_count(land_t2),
+            "land_factory_t3": 0,
+            "air_factory_t1": scaled_count(air_t1),
+            "air_factory_t2": 0,
+            "air_factory_t3": 0,
+            "factory_utilization": utilization_floor,
             "factory_full_bank_idle_ticks": 0,
-            "engineer_attrition": 0.05,
+            "air_scout": air_scout,
+            "air_interceptor": air_interceptor,
+            "air_bomber": air_bomber,
+            "air_transport": air_transport,
+            "air_other": air_other,
+            "mobile_t2": scaled_count(
+                35 if minutes >= 20 else (12 if minutes >= 15 else 0)
+            ),
+            "army_count_home": home,
+            "army_count_garrison": garrison,
+            "army_count_field": field,
+            "army_count_response": response,
+            "army_count_unassigned": 0,
         }
     )
-    metrics.update(updates)
-    return {"tick": minutes * 600, "army": army, "metrics": metrics}
+    return values
 
 
-def passing_parity_checkpoints() -> list[dict[str, Any]]:
-    checkpoints = []
-    for minutes in (5, 10, 15, 20):
-        checkpoints.append(parity_checkpoint(minutes, 1))
-        # Adaptive remains a meaningful reference, but the own-army absolute
-        # Ian floors above remain the stricter gate in this passing fixture.
-        checkpoints.append(parity_checkpoint(minutes, 2, scale=1.05))
-    return checkpoints
+def passing_parity_telemetry(
+    *,
+    max_minutes: int = 20,
+    raw_overrides: dict[tuple[int, int, str], float | int] | None = None,
+    t2_start_tick: int = 5700,
+    include_t3_admission: bool = True,
+) -> parsing.LogTelemetry:
+    overrides = raw_overrides or {}
+    records: list[tuple[int, int, int, str]] = []
+    for tick in range(300, max_minutes * 600 + 1, 300):
+        stage = 5 if tick <= 3000 else (10 if tick <= 6000 else (15 if tick <= 9000 else 20))
+        for army, scale in ((1, 1.0), (2, 1.05)):
+            values = parity_raw_metrics(stage, scale=scale)
+            if tick == stage * 600:
+                for (minute, override_army, field), value in overrides.items():
+                    if minute == stage and override_army == army:
+                        values[field] = value
+            records.append((tick, 0, army, benchmark_line(tick, army, **values)))
+    t2_phases = (
+        (5500, "opportunity"),
+        (5600, "selected"),
+        (5650, "admitted"),
+        (t2_start_tick, "ordered"),
+    )
+    records.extend(
+        (tick, 1, index, operation_line(tick, "tech:t2_hq", phase))
+        for index, (tick, phase) in enumerate(t2_phases)
+        if tick <= max_minutes * 600
+    )
+    if include_t3_admission and max_minutes >= 20:
+        records.extend(
+            (
+                (11700, 1, 10, operation_line(11700, "tech:t3", "opportunity")),
+                (11800, 1, 11, operation_line(11800, "tech:t3", "selected")),
+                (11900, 1, 12, operation_line(11900, "tech:t3", "admitted")),
+            )
+        )
+    lines = [record[3] for record in sorted(records)]
+    telemetry = parsing.parse_log("\n".join(lines), RUN_ID, our_slot=1)
+    assert telemetry.benchmark_integrity_reason is None
+    assert telemetry.operation_integrity_reason is None
+    return telemetry
 
 
-@pytest.mark.skipif(not PARITY_API_READY, reason="parity reporting RED API missing")
+def derived_failure_telemetry(
+    minutes: int, metric: str, value: float | int
+) -> parsing.LogTelemetry:
+    if metric == "t2_hq_started_tick":
+        return passing_parity_telemetry(t2_start_tick=int(value))
+    if metric == "t3_admitted":
+        return passing_parity_telemetry(include_t3_admission=bool(value))
+    raw = parity_raw_metrics(minutes)
+    overrides: dict[tuple[int, int, str], float | int] = {}
+    if metric == "factories":
+        for field in (
+            "land_factory_t1",
+            "land_factory_t2",
+            "land_factory_t3",
+            "air_factory_t1",
+            "air_factory_t2",
+            "air_factory_t3",
+        ):
+            overrides[(minutes, 1, field)] = 0
+        overrides[(minutes, 1, "land_factory_t1")] = value
+    elif metric == "mex_alive":
+        overrides[(minutes, 1, "mex_t1")] = value
+        overrides[(minutes, 1, "mex_t2")] = 0
+        overrides[(minutes, 1, "mex_t3")] = 0
+    elif metric == "air_total":
+        for field in (
+            "air_scout",
+            "air_interceptor",
+            "air_bomber",
+            "air_transport",
+            "air_other",
+        ):
+            overrides[(minutes, 1, field)] = 0
+        overrides[(minutes, 1, "air_other")] = value
+    elif metric == "combat_units":
+        for field in (
+            "army_count_home",
+            "army_count_garrison",
+            "army_count_field",
+            "army_count_response",
+            "army_count_unassigned",
+        ):
+            overrides[(minutes, 1, field)] = 0
+        overrides[(minutes, 1, "army_count_home")] = value
+    elif metric == "mass_utilization":
+        spent = float(raw["mass_spent"])
+        overrides[(minutes, 1, "mass_excess")] = spent / float(value) - spent
+    elif metric == "engineer_attrition":
+        built = float(raw["engineers_built"])
+        overrides[(minutes, 1, "engineers_lost")] = built * float(value)
+    else:
+        overrides[(minutes, 1, metric)] = value
+    return passing_parity_telemetry(raw_overrides=overrides)
+
+
+@pytest.mark.skipif(
+    not (PARITY_API_READY and BENCHMARK_SCHEMA_READY),
+    reason="parity reporting or parser RED API missing",
+)
 class TestParityReporting:
     def test_ian_5_10_15_20_absolute_and_relative_floors_pass_together(self) -> None:
         result = reporting.evaluate_parity(
-            passing_parity_checkpoints(),
+            passing_parity_telemetry(),
             our_army=1,
             opponent_army=2,
             map_size_km=20,
             official_result="victory",
             operational_failure=None,
+            seed=7777,
+            spawn="normal",
         )
 
         assert result["failures"] == []
         assert result["classification"] == "macro-parity-win"
         assert result["keep"] is True
-        assert result["promotable"] is True
+        assert result["matchEligible"] is True
+        assert result["promotable"] is False
+        assert result["derived"]["20m"]["mex_alive"] == 22
+        assert result["derived"]["20m"]["factories"] == 9
+        assert result["derived"]["20m"]["combat_units"] == 120
+        assert result["derived"]["20m"]["air_total"] == 30
+        assert result["derived"]["10m"]["t2_hq_started_tick"] == 5700
+        assert result["derived"]["20m"]["mass_utilization"] == pytest.approx(0.85)
+        assert result["derived"]["20m"]["factory_full_bank_idle_ticks"] == 0
+        assert result["derived"]["20m"]["engineer_attrition"] <= 0.05
 
     def test_one_absolute_or_relative_shortfall_names_exact_checkpoint_and_metric(self) -> None:
         absolute_cases = (
@@ -471,15 +694,9 @@ class TestParityReporting:
             (20, "engineer_attrition", 0.41, "20m:engineer_attrition:absolute"),
         )
         for minutes, metric, value, expected in absolute_cases:
-            checkpoints = copy.deepcopy(passing_parity_checkpoints())
-            own = next(
-                item
-                for item in checkpoints
-                if item["army"] == 1 and item["tick"] == minutes * 600
-            )
-            own["metrics"][metric] = value
+            telemetry = derived_failure_telemetry(minutes, metric, value)
             result = reporting.evaluate_parity(
-                checkpoints,
+                telemetry,
                 our_army=1,
                 opponent_army=2,
                 map_size_km=20,
@@ -495,15 +712,9 @@ class TestParityReporting:
             "mex_alive",
             "mass_reclaim",
         ):
-            checkpoints = copy.deepcopy(passing_parity_checkpoints())
-            own = next(
-                item
-                for item in checkpoints
-                if item["army"] == 1 and item["tick"] == 9000
-            )
-            own["metrics"][metric] = 0
+            telemetry = derived_failure_telemetry(15, metric, 0)
             result = reporting.evaluate_parity(
-                checkpoints,
+                telemetry,
                 our_army=1,
                 opponent_army=2,
                 map_size_km=20,
@@ -515,15 +726,17 @@ class TestParityReporting:
             )
 
     def test_quick_tactical_win_without_macro_gates_is_not_a_parity_promotion(self) -> None:
-        checkpoints = [
-            parity_checkpoint(5, 1, scale=0.2),
-            parity_checkpoint(5, 2, scale=1),
-            parity_checkpoint(10, 1, scale=0.2),
-            parity_checkpoint(10, 2, scale=1),
-        ]
+        overrides = {}
+        for minutes in (5, 10):
+            for field in REQUIRED_METRICS:
+                base = parity_raw_metrics(minutes)[field]
+                overrides[(minutes, 1, field)] = float(base) * 0.2
+        telemetry = passing_parity_telemetry(
+            max_minutes=10, raw_overrides=overrides
+        )
 
         result = reporting.evaluate_parity(
-            checkpoints,
+            telemetry,
             our_army=1,
             opponent_army=2,
             map_size_km=20,
@@ -532,11 +745,12 @@ class TestParityReporting:
 
         assert result["classification"] == "tactical-win-macro-fail"
         assert result["keep"] is False
+        assert result["matchEligible"] is False
         assert result["promotable"] is False
 
     def test_macro_parity_loss_is_kept_and_classified_as_combat_not_macro_failure(self) -> None:
         result = reporting.evaluate_parity(
-            passing_parity_checkpoints(),
+            passing_parity_telemetry(),
             our_army=1,
             opponent_army=2,
             map_size_km=20,
@@ -545,12 +759,13 @@ class TestParityReporting:
 
         assert result["classification"] == "combat-loss-macro-parity"
         assert result["keep"] is True
+        assert result["matchEligible"] is False
         assert result["promotable"] is False
 
     def test_operational_failure_or_missing_benchmark_integrity_is_a_hard_reject(self) -> None:
         for failure in ("lua-error", "desync", "missing-benchmark-tick:600"):
             result = reporting.evaluate_parity(
-                passing_parity_checkpoints(),
+                passing_parity_telemetry(),
                 our_army=1,
                 opponent_army=2,
                 map_size_km=20,
@@ -559,24 +774,117 @@ class TestParityReporting:
             )
             assert result["classification"] == "operational-reject", failure
             assert result["keep"] is False, failure
+            assert result["matchEligible"] is False, failure
             assert result["promotable"] is False, failure
 
-    def test_json_report_contains_checkpoints_operations_and_parity_without_feeding_ai(self) -> None:
-        text = "\n".join(
-            [
-                benchmark_line(300, 1),
-                benchmark_line(300, 2),
-                operation_line(100, "mex-1", "opportunity"),
-                operation_line(110, "mex-1", "denied", reason="budget"),
-            ]
+        missing_checkpoint = parsing.parse_log(
+            "\n".join(
+                (
+                    benchmark_line(300, 1),
+                    benchmark_line(300, 2),
+                    benchmark_line(900, 1),
+                    benchmark_line(900, 2),
+                )
+            ),
+            RUN_ID,
+            our_slot=1,
         )
-        telemetry = parsing.parse_log(text, RUN_ID, our_slot=1)
+        assert missing_checkpoint.benchmark_integrity_reason == (
+            "missing-benchmark-tick:600"
+        )
+        rejected = reporting.evaluate_parity(
+            missing_checkpoint,
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="victory",
+            operational_failure=None,
+        )
+        assert rejected["classification"] == "operational-reject"
+        assert rejected["matchEligible"] is False
+        assert rejected["promotable"] is False
+
+    def test_json_report_contains_checkpoints_operations_and_parity_without_feeding_ai(self) -> None:
+        telemetry = passing_parity_telemetry()
+        parity = reporting.evaluate_parity(
+            telemetry,
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="victory",
+            seed=7777,
+            spawn="normal",
+        )
         outcome = parsing.classify_outcome(
             telemetry,
             parsing.ProcessObservation(exit_code=0, wall_seconds=2),
         )
-        document = json.loads(reporting.render_json(outcome, RUN_ID))
+        document = json.loads(
+            reporting.render_json(outcome, RUN_ID, parity_result=parity)
+        )
 
-        assert len(document["benchmark_checkpoints"]) == 2
-        assert len(document["operation_events"]) == 2
-        assert document["benchmark_checkpoints"][1]["army"] == 2
+        assert len(document["benchmark_checkpoints"]) == 80
+        assert len(document["operation_events"]) == 7
+        assert document["parity"] == parity
+        assert document["parity"]["classification"] == "macro-parity-win"
+
+    @pytest.mark.skipif(
+        not PROMOTION_API_READY, reason="promotion aggregation RED API missing"
+    )
+    def test_all_size_promotion_requires_unique_normal_and_swapped_8_of_8(self) -> None:
+        matches = []
+        for map_size in (5, 10, 20, 40):
+            for spawn, seed in (("normal", 7777), ("swapped", 7778)):
+                result = reporting.evaluate_parity(
+                    passing_parity_telemetry(),
+                    our_army=1,
+                    opponent_army=2,
+                    map_size_km=map_size,
+                    official_result="victory",
+                    seed=seed,
+                    spawn=spawn,
+                )
+                assert result["matchEligible"] is True
+                assert result["promotable"] is False
+                matches.append(result)
+
+        promoted = reporting.evaluate_promotion(matches)
+
+        assert promoted["promotable"] is True
+        assert promoted["passed"] == 8
+        assert promoted["required"] == 8
+        assert promoted["maps"] == [5, 10, 20, 40]
+
+        parity_loss = reporting.evaluate_parity(
+            passing_parity_telemetry(),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=10,
+            official_result="defeat",
+            seed=7777,
+            spawn="normal",
+        )
+        wrong_spawn = reporting.evaluate_parity(
+            passing_parity_telemetry(),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=5,
+            official_result="victory",
+            seed=7779,
+            spawn="third",
+        )
+        assert parity_loss["matchEligible"] is False
+        invalid_matrices = (
+            matches[:-1],
+            matches[:-1] + [copy.deepcopy(matches[0])],
+            [
+                ({**match, "matchEligible": False} if index == 3 else match)
+                for index, match in enumerate(matches)
+            ],
+            [wrong_spawn, *matches[1:]],
+            [*matches[:2], parity_loss, *matches[3:]],
+        )
+        for invalid in invalid_matrices:
+            rejected = reporting.evaluate_promotion(invalid)
+            assert rejected["promotable"] is False
+            assert rejected["failures"]

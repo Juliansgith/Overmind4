@@ -89,21 +89,23 @@ def test_only_reviewed_low_level_order_surface_is_used() -> None:
     assert re.search(r"IssueBuildMobile\s*\([^\n]+,[^\n]+,[^\n]+,[^\n]+\)", controller)
 
 
-def test_policy_has_no_imports_engine_globals_or_side_effect_surface() -> None:
-    policy = source("lua/AI/Overmind4/Policy.lua")
-    assert "import(" not in policy
-    for symbol in (
-        "categories.",
-        "GetGameTick",
-        "GetTerrainHeight",
-        "GetSurfaceHeight",
-        "GetListOfUnits",
-        "GetUnitsAroundPoint",
-        "Issue",
-        "LOG(",
-        "WARN(",
-    ):
-        assert symbol not in policy
+def test_policy_and_pure_directors_have_no_imports_engine_globals_or_side_effect_surface() -> None:
+    checked = {"Policy.lua"} | (DIRECTOR_MODULES & _present_runtime_modules())
+    for name in sorted(checked):
+        text = source(f"lua/AI/Overmind4/{name}")
+        assert "import(" not in text, name
+        for symbol in (
+            "categories.",
+            "GetGameTick",
+            "GetTerrainHeight",
+            "GetSurfaceHeight",
+            "GetListOfUnits",
+            "GetUnitsAroundPoint",
+            "Issue",
+            "LOG(",
+            "WARN(",
+        ):
+            assert symbol not in text, (name, symbol)
 
 
 def test_controller_has_exact_engine_observation_calls() -> None:
@@ -131,10 +133,11 @@ def test_controller_varargs_use_installed_luaplus_50_arg_semantics() -> None:
 
 
 def test_runtime_avoids_lua51_length_operator_in_installed_luaplus_50() -> None:
-    for relative in (
-        "lua/AI/Overmind4/Policy.lua",
-        "lua/AI/Overmind4/Controller.lua",
-    ):
+    checked = {"Policy.lua", "Controller.lua"} | (
+        DIRECTOR_MODULES & _present_runtime_modules()
+    )
+    for name in sorted(checked):
+        relative = f"lua/AI/Overmind4/{name}"
         executable = "\n".join(
             line.split("--", 1)[0]
             for line in source(relative).splitlines()
@@ -143,8 +146,9 @@ def test_runtime_avoids_lua51_length_operator_in_installed_luaplus_50() -> None:
 
 
 def test_runtime_does_not_use_missing_game_math_huge() -> None:
-    for relative in (
-        "lua/AI/Overmind4/Policy.lua",
-        "lua/AI/Overmind4/Controller.lua",
-    ):
+    checked = {"Policy.lua", "Controller.lua"} | (
+        DIRECTOR_MODULES & _present_runtime_modules()
+    )
+    for name in sorted(checked):
+        relative = f"lua/AI/Overmind4/{name}"
         assert "math.huge" not in source(relative), relative
