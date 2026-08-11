@@ -249,12 +249,14 @@ Intelligence.PlanAir = function(snapshot)
         local role = nil
         if totals.air_scout < 1 and needs.scoutCoverageStale ~= false then
             role = 'air_scout'
+        elseif totals.interceptor < 2 then
+            role = 'interceptor'
+        elseif totals.transport < 1 and needs.remoteSafeExpansion == true then
+            role = 'transport'
         elseif totals.interceptor < 4 then
             role = 'interceptor'
         elseif totals.bomber < 1 and needs.visibleRaidTarget == true then
             role = 'bomber'
-        elseif totals.transport < 1 and needs.remoteSafeExpansion == true then
-            role = 'transport'
         else
             if totals.bomber < 1 then
                 role = 'bomber'

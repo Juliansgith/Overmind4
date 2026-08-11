@@ -274,25 +274,35 @@ def air_snapshot(**updates: Any) -> dict[str, Any]:
 @pytest.mark.skipif(not director_present(MODULE), reason="Intelligence RED module missing")
 class TestAirAndMobility:
     @pytest.mark.parametrize(
-        ("scouts", "interceptors", "expected"),
-        [(0, 0, "air_scout"), (1, 0, "interceptor"), (1, 4, "bomber")],
+        ("scouts", "interceptors", "transports", "expected"),
+        [
+            (0, 0, 0, "air_scout"),
+            (1, 0, 0, "interceptor"),
+            (1, 1, 0, "interceptor"),
+            (1, 2, 0, "transport"),
+            (1, 2, 1, "interceptor"),
+            (1, 4, 1, "bomber"),
+        ],
     )
-    def test_air_mix_builds_scout_then_four_interceptors_before_funded_specialists(
-        self, scouts: int, interceptors: int, expected: str
+    def test_air_mix_builds_scout_two_interceptors_transport_then_full_screen(
+        self,
+        scouts: int,
+        interceptors: int,
+        transports: int,
+        expected: str,
     ) -> None:
         snapshot = air_snapshot()
         snapshot["completed"].update(
-            {"air_scout": scouts, "interceptor": interceptors}
+            {
+                "air_scout": scouts,
+                "interceptor": interceptors,
+                "transport": transports,
+            }
         )
 
         plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
 
         assert plan["orders"][0]["buildRole"] == expected
-        if expected == "bomber":
-            snapshot["completed"]["bomber"] = 1
-            snapshot["needs"]["visibleRaidTarget"] = False
-            transport_plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
-            assert transport_plan["orders"][0]["buildRole"] == "transport"
 
     @pytest.mark.parametrize(
         ("completed", "needs", "expected"),
