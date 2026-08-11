@@ -181,6 +181,180 @@ def _economic(result: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [intent for intent in result if intent["kind"] in ECONOMIC_INTENTS]
 
 
+def _strategic_expansion_snapshot(
+    *,
+    engineers: int = 5,
+    hydro: bool = True,
+    air: bool = False,
+    slots: int = 4,
+    seed: int = 0,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    roles = ["engineer"] * (engineers - 1) + ["mass_extractor"] * 5
+    if hydro:
+        roles.append("hydrocarbon")
+    if air:
+        roles.append("air_factory")
+    snapshot = _policy_allocator_snapshot(*roles)
+    snapshot["placements"]["air_factory"] = [[26, 2, 18]]
+    snapshot["sites"]["hydro"] = [] if hydro else [
+        mass_site("home-hydro", 26, 18)
+    ]
+    builders = sorted(
+        (unit for unit in snapshot["units"] if unit["role"] == "engineer"),
+        key=lambda unit: unit["token"],
+    )
+    positions = [24, 60, 100, 140, 180, 220]
+    for index, builder in enumerate(builders):
+        builder["position"] = [positions[index], 2, 18]
+        builder["canBuild"].update(
+            mass_extractor=True,
+            hydrocarbon=False,
+            air_factory=False,
+        )
+    builders[0]["canBuild"].update(hydrocarbon=True, air_factory=True)
+    snapshot["sites"]["mass"] = [
+        mass_site(f"expansion-{index}", x, 20, frontier=True)
+        for index, x in enumerate([24, 60, 100, 140], start=1)
+    ]
+    snapshot["macro"].update(
+        expansionRecurringMassBudget=slots * 0.3,
+        expansionRecurringEnergyBudget=slots * 3,
+        availableRecurringMass=5,
+        availableRecurringEnergy=50,
+        oneTimeMassReserve=10000,
+        oneTimeEnergyReserve=10000,
+        expansionOpportunityCount=4,
+    )
+    random.Random(seed).shuffle(snapshot["units"])
+    random.Random(seed + 17).shuffle(snapshot["sites"]["mass"])
+    return snapshot, builders
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_artifact_five_engineers_reserve_air_builder_before_four_expansions(seed: int) -> None:
+    snapshot, builders = _strategic_expansion_snapshot(seed=seed)
+
+    builds = intents_of(decide(snapshot), "build_structure")
+    air = [intent for intent in builds if intent.get("buildRole") == "air_factory"]
+    mex = [intent for intent in builds if intent.get("reason") == "frontier_expansion"]
+
+    assert [(intent["actorToken"], intent["reason"]) for intent in air] == [
+        (builders[0]["token"], "first_air_factory")
+    ]
+    assert 1 <= len(mex) <= 4
+    assert len({intent["actorToken"] for intent in [*air, *mex]}) == len(air) + len(mex)
+
+
+def test_four_engineers_reserve_one_air_builder_and_schedule_at_most_three_expansions() -> None:
+    snapshot, builders = _strategic_expansion_snapshot(engineers=4)
+
+    builds = intents_of(decide(snapshot), "build_structure")
+    air = [intent for intent in builds if intent.get("buildRole") == "air_factory"]
+    mex = [intent for intent in builds if intent.get("reason") == "frontier_expansion"]
+
+    assert [intent["actorToken"] for intent in air] == [builders[0]["token"]]
+    assert len(mex) == 3
+    assert len({intent["actorToken"] for intent in [*air, *mex]}) == 4
+
+
+def test_missing_hydro_reserves_its_home_builder_before_expansion() -> None:
+    snapshot, builders = _strategic_expansion_snapshot(hydro=False)
+
+    builds = intents_of(decide(snapshot), "build_structure")
+    hydro = [intent for intent in builds if intent.get("buildRole") == "hydrocarbon"]
+    mex = [intent for intent in builds if intent.get("reason") == "frontier_expansion"]
+
+    assert [(intent["actorToken"], intent.get("siteKey")) for intent in hydro] == [
+        (builders[0]["token"], "home-hydro")
+    ]
+    assert 1 <= len(mex) <= 4
+    assert len({intent["actorToken"] for intent in [*hydro, *mex]}) == len(hydro) + len(mex)
+
+
+def test_first_air_factory_reserves_before_optional_third_land_factory() -> None:
+    snapshot, builders = _strategic_expansion_snapshot()
+    snapshot["macro"].update(factoryTarget=3, factoryDemand=3)
+    snapshot["economy"]["massStalled"] = False
+
+    builds = intents_of(decide(snapshot), "build_structure")
+    air = [intent for intent in builds if intent.get("buildRole") == "air_factory"]
+
+    assert [intent["actorToken"] for intent in air] == [builders[0]["token"]]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_strategic_builder_is_nearest_capable_noncampaign_engineer_under_permutation(
+    seed: int,
+) -> None:
+    snapshot, builders = _strategic_expansion_snapshot(seed=seed)
+    builders[0]["campaignEngineer"] = True
+    builders[1]["canBuild"]["air_factory"] = True
+
+    air = [
+        intent for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("buildRole") == "air_factory"
+    ]
+
+    assert [intent["actorToken"] for intent in air] == [builders[1]["token"]]
+
+
+def test_lost_mex_keeps_priority_then_remaining_builder_takes_air_factory() -> None:
+    snapshot, builders = _strategic_expansion_snapshot(engineers=2, slots=2)
+    builders[1]["canBuild"]["air_factory"] = True
+    snapshot["sites"]["mass"] = [
+        dict(mass_site("lost-home", 20, 20, lost=True), engineerReachable=True),
+        mass_site("new-forward", 60, 20, frontier=True),
+    ]
+    snapshot["macro"]["lostMexCount"] = 1
+
+    builds = intents_of(decide(snapshot), "build_structure")
+    lost = [intent for intent in builds if intent.get("reason") == "rebuild_mex"]
+    air = [intent for intent in builds if intent.get("buildRole") == "air_factory"]
+
+    assert [(intent["actorToken"], intent["siteKey"]) for intent in lost] == [
+        (builders[0]["token"], "lost-home")
+    ]
+    assert [intent["actorToken"] for intent in air] == [builders[1]["token"]]
+
+
+@pytest.mark.parametrize(
+    ("blocked", "expected_mex"),
+    [
+        ("low_energy", 4),
+        ("incomplete_mex", 4),
+        ("incomplete_land", 4),
+        ("existing_air", 4),
+        ("contact", 0),
+    ],
+)
+def test_false_air_milestones_do_not_reserve_an_expansion_builder(
+    blocked: str,
+    expected_mex: int,
+) -> None:
+    snapshot, _ = _strategic_expansion_snapshot(engineers=4, air=blocked == "existing_air")
+    if blocked == "low_energy":
+        snapshot["economy"]["energyTrend"] = -0.01
+    elif blocked == "incomplete_mex":
+        removed = 4
+        snapshot["units"] = [
+            unit for unit in snapshot["units"]
+            if not (unit["role"] == "mass_extractor" and (removed := removed - 1) >= 0)
+        ]
+    elif blocked == "incomplete_land":
+        removed = 1
+        snapshot["units"] = [
+            unit for unit in snapshot["units"]
+            if not (unit["role"] == "land_factory" and (removed := removed - 1) >= 0)
+        ]
+    elif blocked == "contact":
+        snapshot["enemyContact"] = {"position": [12, 2, 12], "immediate": True}
+
+    builds = intents_of(decide(snapshot), "build_structure")
+
+    assert not [intent for intent in builds if intent.get("buildRole") == "air_factory"]
+    assert len([intent for intent in builds if intent.get("reason") == "frontier_expansion"]) == expected_mex
+
+
 def test_transient_reclaim_income_is_one_time_not_recurring_factory_capacity() -> None:
     harness = make_harness()
     harness.controller.fieldCampaignEnabled = False
@@ -554,6 +728,7 @@ def test_expansion_lane_can_spend_its_exact_reserved_headroom_once(
     harness.brain.massStored = 0
     harness.brain.energyStored = 0
     harness.brain.units = harness.lua.table_from([_engineer(harness, 70, 20)])
+    harness.controller.markers.hydro = harness.lua.table_from([])
     harness.controller.markers.mass = lua_value(harness.lua, [{
         "key": "funded", "name": "funded", "kind": "mass",
         "position": [30, 2, 20], "distance": 20,
@@ -1010,6 +1185,7 @@ def test_blocked_route_uses_next_roi_site_without_duplicate(seed: int) -> None:
 def test_reconcile_blocked_site_is_visible_before_same_step_policy_and_selects_alternate() -> None:
     harness = make_harness()
     harness.controller.fieldCampaignEnabled = False
+    harness.controller.markers.hydro = harness.lua.table_from([])
     _set_economy(
         harness,
         mass_income=2,

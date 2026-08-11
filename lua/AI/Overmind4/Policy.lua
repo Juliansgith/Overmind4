@@ -1105,33 +1105,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
     end
 
-    -- The secured campaign may reserve one member job, but it is not a global
-    -- economy mutex.  Build a deterministic nearest-builder assignment over
-    -- every other reachable opportunity after required energy recovery.
-    local expansionAssignments = {}
-    local reservedReclaimActor = nil
-    if macro and macro.allocatorEnabled == true then
-        for _, candidate in ipairs(reclaimCandidates) do
-            for _, engineer in ipairs(engineers) do
-                if not assignedEngineers[engineer.token]
-                    and candidate.observerToken == engineer.token
-                    and ReclaimVisibleToEngineer(candidate, engineer)
-                then
-                    reservedReclaimActor = engineer.token
-                    break
-                end
-            end
-            if reservedReclaimActor then break end
-        end
-        AssignMexPairs(expansionAssignments, false, reservedReclaimActor)
-        if TableGetn(engineers) == 1
-            and remainingMexSlots > 0
-            and reservedReclaimActor
-        then
-            AssignMexPairs(expansionAssignments, false, nil)
-        end
-    end
-
     local completedMex = 0
     local completedLand = 0
     local completedHydro = 0
@@ -1179,6 +1152,27 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             virtualReserved[site.key] = true
         end
     end
+    if not underContact
+        and (counts.air_factory or 0) < 1
+        and completedMex >= 6
+        and completedLand >= 2
+        and completedHydro >= 1
+        and FiniteNumber(economy.energyTrend)
+        and FiniteNumber(economy.energyStoredRatio)
+        and tonumber(economy.energyTrend) >= 0
+        and tonumber(economy.energyStoredRatio) >= 0.5
+    then
+        if AssignPlacement(
+            'air_factory',
+            placementIndex.air_factory,
+            20,
+            'first_air_factory'
+        ) then
+            plannedAirFactory = true
+            placementIndex.air_factory = placementIndex.air_factory + 1
+            counts.air_factory = 1
+        end
+    end
     local currentFactories = (counts.land_factory or 0)
         + (counts.land_factory_t2 or 0)
         + (counts.air_factory or 0)
@@ -1205,25 +1199,31 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             counts.land_factory = (counts.land_factory or 0) + 1
         end
     end
-    if not underContact
-        and (counts.air_factory or 0) < 1
-        and completedMex >= 6
-        and completedLand >= 2
-        and completedHydro >= 1
-        and FiniteNumber(economy.energyTrend)
-        and FiniteNumber(economy.energyStoredRatio)
-        and tonumber(economy.energyTrend) >= 0
-        and tonumber(economy.energyStoredRatio) >= 0.5
-    then
-        if AssignPlacement(
-            'air_factory',
-            placementIndex.air_factory,
-            20,
-            'first_air_factory'
-        ) then
-            plannedAirFactory = true
-            placementIndex.air_factory = placementIndex.air_factory + 1
-            counts.air_factory = 1
+
+    -- Once required energy and the first strategic production milestone have
+    -- had a chance to reserve their nearest home builder, the secured campaign
+    -- may use every remaining engineer for distinct expansion opportunities.
+    local expansionAssignments = {}
+    local reservedReclaimActor = nil
+    if macro and macro.allocatorEnabled == true then
+        for _, candidate in ipairs(reclaimCandidates) do
+            for _, engineer in ipairs(engineers) do
+                if not assignedEngineers[engineer.token]
+                    and candidate.observerToken == engineer.token
+                    and ReclaimVisibleToEngineer(candidate, engineer)
+                then
+                    reservedReclaimActor = engineer.token
+                    break
+                end
+            end
+            if reservedReclaimActor then break end
+        end
+        AssignMexPairs(expansionAssignments, false, reservedReclaimActor)
+        if TableGetn(engineers) == 1
+            and remainingMexSlots > 0
+            and reservedReclaimActor
+        then
+            AssignMexPairs(expansionAssignments, false, nil)
         end
     end
 
