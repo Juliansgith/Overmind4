@@ -11224,12 +11224,23 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     end
     local mexBlueprint = Catalog.IdFor('mass_extractor')
     local buildPosition = site and TerrainPosition(site.position) or nil
-    local buildQueued = cargoActor and mexBlueprint and buildPosition
+    local buildable = cargoActor and mexBlueprint and buildPosition
         and SafeCall(false, controller.brain.CanBuildStructureAt,
             controller.brain, mexBlueprint, buildPosition) == true
+    local buildQueued = cargoActor and mexBlueprint and buildPosition
+        and buildable
         and pcall(function()
             IssueBuildMobile({ cargoActor }, buildPosition, mexBlueprint, {})
         end)
+    Emit(controller, 'airlift_build_queue', {
+        actor = cargoToken or 'none',
+        actor_live = cargoActor ~= nil,
+        blueprint = mexBlueprint or 'none',
+        buildable = buildable == true,
+        positioned = buildPosition ~= nil,
+        queued = buildQueued == true,
+        site = mission.siteKey or 'none',
+    })
     if buildQueued then
         Emit(controller, 'order', {
             actor = cargoToken,
