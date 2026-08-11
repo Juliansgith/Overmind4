@@ -4,10 +4,26 @@ from typing import Any
 
 from test_controller import execute_intents, make_harness
 from test_policy import lua_value, plain
+from tools.overmind4_runner import parsing
 
 
 def _set_director_result(harness: Any, name: str, value: Any) -> None:
     harness.lua.globals().directorResults[name] = lua_value(harness.lua, value)
+
+
+def _set_starved_economy(harness: Any) -> None:
+    harness.brain.massIncome = 0
+    harness.brain.massRequested = 2
+    harness.brain.massUsage = 2
+    harness.brain.massTrend = -2
+    harness.brain.massStored = 0
+    harness.brain.massStoredRatio = 0
+    harness.brain.energyIncome = 0
+    harness.brain.energyRequested = 20
+    harness.brain.energyUsage = 20
+    harness.brain.energyTrend = -20
+    harness.brain.energyStored = 0
+    harness.brain.energyStoredRatio = 0
 
 
 def test_controller_assembles_director_snapshot_in_dependency_order_and_persists_state() -> None:
@@ -601,6 +617,335 @@ def test_step_default_merge_adapts_every_planner_output_once_and_persists_lifecy
     ]
     assert transport_events[1]["attachedCargoTokens"] == ["51:1"]
     assert len(transport_events[3]["attachedCargoTokens"]) == 0
+
+def test_step_turns_macro_targets_and_t2_roles_into_exact_growth_orders_once() -> None:
+    harness = make_harness()
+    harness.controller.crossMapOffenseEnabled = False
+    land_builder = harness.unit(
+        entityId=10,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        canBuild={"ueb0101": True},
+    )
+    air_builder = harness.unit(
+        entityId=11,
+        blueprintId="uel0105",
+        position=[11, 2, 20],
+        canBuild={"ueb0102": True},
+    )
+    t1_factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0101",
+        position=[10, 2, 22],
+        canBuild={"uel0105": True},
+    )
+    t2_direct_factory = harness.unit(
+        entityId=21,
+        blueprintId="ueb0201",
+        position=[12, 2, 22],
+        canBuild={"uel0202": True},
+    )
+    t2_aa_factory = harness.unit(
+        entityId=22,
+        blueprintId="ueb0201",
+        position=[14, 2, 22],
+        canBuild={"uel0205": True},
+    )
+    harness.brain.units = harness.lua.table_from(
+        [
+            land_builder,
+            air_builder,
+            t1_factory,
+            t2_direct_factory,
+            t2_aa_factory,
+        ]
+    )
+    _set_starved_economy(harness)
+
+    def set_epoch(epoch: int, *, grow: bool) -> None:
+        _set_director_result(
+            harness,
+            "intelState",
+            {
+                "epoch": epoch,
+                "contacts": {},
+                "threat": {"home": 0, "air": 0},
+                "expansionSafety": {},
+            },
+        )
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": epoch,
+                "engineerTarget": 3 if grow else 2,
+                "factoryTarget": 5 if grow else 3,
+                "landFactoryTarget": 4 if grow else 3,
+                "airFactoryTarget": 1 if grow else 0,
+                "lanes": {
+                    "engineers": {"admitted": grow},
+                    "factory_growth": {"admitted": grow},
+                    "land_production": {"admitted": grow},
+                },
+                "regions": [],
+                "intents": [],
+            },
+        )
+        _set_director_result(
+            harness,
+            "jobLedger",
+            {"epoch": epoch, "jobs": {}, "releasedActorTokens": []},
+        )
+        _set_director_result(
+            harness,
+            "techPlan",
+            {
+                "hqAction": "hold",
+                "t2ProductionRoles": (
+                    ["t2_direct_fire", "t2_anti_air"] if grow else []
+                ),
+            },
+        )
+        _set_director_result(
+            harness,
+            "forcePlan",
+            {
+                "epoch": epoch,
+                "assignments": {
+                    "home": [],
+                    "garrison": [],
+                    "field": [],
+                    "response": [],
+                    "raider": [],
+                    "unassigned": [],
+                },
+                "ownershipByToken": {},
+                "intents": [],
+            },
+        )
+
+    # The same observed economy and units issue nothing while the funded
+    # targets equal current capacity. This is the causal control for the
+    # target increase below; the legacy Policy still runs through Step.
+    set_epoch(1, grow=False)
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.buildMobile) == 0
+    assert len(harness.calls.buildFactory) == 0
+
+    set_epoch(2, grow=True)
+    harness.brain.tick = 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    structures = {
+        call.blueprintId: call.units[1].options.entityId
+        for call in harness.calls.buildMobile.values()
+    }
+    assert structures == {"ueb0101": 10, "ueb0102": 11}
+    production = {
+        call.units[1].options.entityId: (call.blueprintId, call.count)
+        for call in harness.calls.buildFactory.values()
+    }
+    assert production == {
+        20: ("uel0105", 1),
+        21: ("uel0202", 1),
+        22: ("uel0205", 1),
+    }
+    assert plain(harness.controller.macroPlan)["engineerTarget"] == 3
+    assert plain(harness.controller.macroPlan)["factoryTarget"] == 5
+    first_order_counts = (
+        len(harness.calls.buildMobile),
+        len(harness.calls.buildFactory),
+    )
+
+    set_epoch(3, grow=True)
+    harness.brain.tick = 2
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert (
+        len(harness.calls.buildMobile),
+        len(harness.calls.buildFactory),
+    ) == first_order_counts
+    assert set(plain(harness.controller.pending)) >= {
+        "10:1",
+        "11:1",
+        "20:1",
+        "21:1",
+        "22:1",
+    }
+    assert plain(harness.calls.macroBuildPortfolio[3])["previousMacroPlan"][
+        "epoch"
+    ] == 2
+
+
+def test_step_binds_land_and_aa_escorts_before_remote_expansion_departure_once() -> None:
+    harness = make_harness()
+    harness.controller.crossMapOffenseEnabled = False
+    land_escort = harness.unit(
+        entityId=70,
+        blueprintId="uel0201",
+        position=[10, 2, 20],
+    )
+    aa_escort = harness.unit(
+        entityId=71,
+        blueprintId="uel0104",
+        position=[11, 2, 20],
+    )
+    engineer = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    harness.brain.units = harness.lua.table_from(
+        [land_escort, aa_escort, engineer]
+    )
+    _set_starved_economy(harness)
+    remote_site = plain(harness.controller.markers.mass[2])
+    assert remote_site["name"] == "Far Mass"
+    expansion_job = {
+        "id": "mex:front:far",
+        "kind": "build_mex",
+        "actorToken": "72:1",
+        "targetKey": remote_site["key"],
+        "siteKey": remote_site["key"],
+        "regionKey": "front",
+        "position": remote_site["position"],
+        "estimatedTravelTicks": 300,
+        "escortTokens": ["70:1", "71:1"],
+    }
+    region = {
+        "key": "front",
+        "state": "establishing",
+        "position": remote_site["position"],
+        "requiresGarrison": True,
+        "requiresAntiAir": True,
+    }
+
+    def set_epoch(epoch: int) -> None:
+        _set_director_result(
+            harness,
+            "intelState",
+            {
+                "epoch": epoch,
+                "contacts": {},
+                "threat": {"home": 0, "air": 0},
+                "expansionSafety": {"front": "safe"},
+            },
+        )
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": epoch,
+                "fundedExpansionSlots": 1,
+                "lanes": {"mex_rebuild": {"admitted": True}},
+                "regions": [region],
+                "intents": [],
+            },
+        )
+        _set_director_result(
+            harness,
+            "expansionPlan",
+            {"jobs": [expansion_job], "denials": []},
+        )
+        _set_director_result(
+            harness,
+            "jobLedger",
+            {
+                "epoch": epoch,
+                "jobs": {
+                    expansion_job["id"]: {
+                        **expansion_job,
+                        "phase": "travelling",
+                        "deadlineTick": 900,
+                    }
+                },
+                "releasedActorTokens": [],
+            },
+        )
+        force_plan = {
+            "epoch": epoch,
+            "assignments": {
+                "home": [],
+                "garrison": ["70:1", "71:1"],
+                "field": [],
+                "response": [],
+                "raider": [],
+                "unassigned": [],
+            },
+            "ownershipByToken": {"70:1": "garrison", "71:1": "garrison"},
+            "regionAssignments": {
+                "front": {
+                    "actorTokens": ["70:1", "71:1"],
+                    "antiAirCount": 1,
+                    "ready": True,
+                }
+            },
+            "intents": [],
+        }
+        _set_director_result(harness, "forcePlan", force_plan)
+
+    set_epoch(1)
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert [call.kind for call in harness.calls.orderTrace.values()] == [
+        "guard",
+        "build_mobile",
+    ]
+    guard = harness.calls.guard[1]
+    assert [
+        guard.units[index].options.entityId
+        for index in range(1, len(guard.units) + 1)
+    ] == [70, 71]
+    assert guard.target.options.entityId == 72
+    build = harness.calls.buildMobile[1]
+    assert build.units[1].options.entityId == 72
+    assert build.blueprintId == "ueb1103"
+    assert plain(build.position) == [40, 40.4, 40]
+    assert plain(harness.controller.forcePlan)["ownershipByToken"] == {
+        "70:1": "garrison",
+        "71:1": "garrison",
+    }
+    assert len(
+        plain(harness.calls.macroUpdateJobLedger[1].snapshot)["newJobs"]
+    ) == 1
+
+    set_epoch(2)
+    harness.brain.tick = 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.orderTrace) == 2
+    assert len(harness.calls.guard) == 1
+    assert len(harness.calls.buildMobile) == 1
+    assert len(
+        plain(harness.calls.macroUpdateJobLedger[2].snapshot)["newJobs"]
+    ) == 0
+    assert plain(harness.calls.macroUpdateJobLedger[2].ledger)["epoch"] == 1
+    assert plain(harness.controller.jobLedger)["jobs"][expansion_job["id"]][
+        "actorToken"
+    ] == "72:1"
+    operation_events = [
+        fields
+        for line in harness.logs
+        if (fields := parsing.overmind_marker_fields(line)) is not None
+        and fields.get("kind") == "operation"
+    ]
+    expansion_events = [
+        event
+        for event in operation_events
+        if event.get("operation") == expansion_job["id"]
+    ]
+    assert [event["phase"] for event in expansion_events] == [
+        "opportunity",
+        "selected",
+        "admitted",
+        "ordered",
+        "travelling",
+    ]
+    assert all(event["army"] == "1" for event in expansion_events)
+    assert all(int(event["tick"]) >= 0 for event in expansion_events)
 
 
 def test_policy_receives_own_director_state_but_never_observer_opponent_aggregates() -> None:

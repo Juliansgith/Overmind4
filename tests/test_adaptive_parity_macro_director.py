@@ -842,6 +842,111 @@ class TestRegionalMacro:
         assert unchanged["lastProgressTick"] == 250
         assert unchanged["deadlineTick"] == next_job["deadlineTick"]
 
+    @pytest.mark.parametrize(
+        ("progress_field", "last_field", "initial", "advanced"),
+        (
+            ("fractionComplete", "lastFraction", 0.20, 0.35),
+            ("workProgress", "lastWorkProgress", 12, 19),
+        ),
+        ids=("fraction", "work"),
+    )
+    def test_building_job_refreshes_only_on_real_construction_progress_and_releases_at_exact_stall_bound(
+        self,
+        progress_field: str,
+        last_field: str,
+        initial: float,
+        advanced: float,
+    ) -> None:
+        ledger = {
+            "jobs": {
+                "mex:front:1": {
+                    "id": "mex:front:1",
+                    "kind": "build_mex",
+                    "phase": "building",
+                    "actorToken": "eng-1:1",
+                    "targetKey": "front-1",
+                    "deadlineTick": 500,
+                    "lastProgressTick": 100,
+                    last_field: initial,
+                    "retryCount": 0,
+                }
+            }
+        }
+
+        def observation(tick: int, fraction: float) -> dict[str, Any]:
+            return {
+                "tick": tick,
+                "newJobs": [],
+                "actors": [
+                    {
+                        "token": "eng-1:1",
+                        "live": True,
+                        "owned": True,
+                        "position": [100, 0, 0],
+                    }
+                ],
+                "targets": [
+                    {
+                        "key": "front-1",
+                        "live": True,
+                        "completed": False,
+                        "position": [100, 0, 0],
+                        progress_field: fraction,
+                    }
+                ],
+            }
+
+        unchanged = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            ledger,
+            observation(300, initial),
+        )
+        unchanged_job = unchanged["jobs"]["mex:front:1"]
+        assert unchanged_job["phase"] == "building"
+        assert unchanged_job["lastProgressTick"] == 100
+        assert unchanged_job["deadlineTick"] == 500
+        assert unchanged_job[last_field] == pytest.approx(initial)
+
+        progressed = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            unchanged,
+            observation(400, advanced),
+        )
+        progressed_job = progressed["jobs"]["mex:front:1"]
+        assert progressed_job["phase"] == "building"
+        assert progressed_job["lastProgressTick"] == 400
+        assert progressed_job[last_field] == pytest.approx(advanced)
+        assert progressed_job["deadlineTick"] > 500
+
+        stalled = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            progressed,
+            observation(progressed_job["deadlineTick"] - 1, advanced),
+        )
+        stalled_job = stalled["jobs"]["mex:front:1"]
+        assert stalled_job["phase"] == "building"
+        assert stalled_job["lastProgressTick"] == 400
+        assert stalled_job["deadlineTick"] == progressed_job["deadlineTick"]
+
+        released = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            stalled,
+            observation(progressed_job["deadlineTick"], advanced),
+        )
+        released_job = released["jobs"]["mex:front:1"]
+        assert released_job["phase"] == "retryable"
+        assert released_job["failureReason"] == "construction_stalled"
+        assert released_job["retryCount"] == 1
+        assert released["releasedActorTokens"] == ["eng-1:1"]
+
     def test_job_ledger_stall_deadline_releases_once_and_makes_job_retryable(self) -> None:
         ledger = {
             "jobs": {

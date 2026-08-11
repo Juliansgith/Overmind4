@@ -44,7 +44,7 @@ def make_harness() -> ControllerHarness:
             intelligencePlanTransport = {}, intelligenceAdvanceTransport = {},
             forceAssign = {}, forceReconcile = {}, forceHandleHomeBreach = {},
             policySnapshots = {},
-            waits = {}, sequence = {}, unitReclaimInspections = 0,
+            waits = {}, sequence = {}, orderTrace = {}, unitReclaimInspections = 0,
         }
         directorResults = {
             macroPlan = { valid = true, lanes = {}, regions = {}, intents = {} },
@@ -383,6 +383,10 @@ def make_harness() -> ControllerHarness:
             return found
         end
         function IssueBuildMobile(units, position, blueprintId, alternatives)
+            table.insert(calls.orderTrace, {
+                kind = 'build_mobile', units = units, position = position,
+                blueprintId = blueprintId,
+            })
             table.insert(calls.buildMobile, { units = units, position = position, blueprintId = blueprintId, alternatives = alternatives, argc = 4 })
             if calls.failBuildMobile then error('build mobile failed') end
             return { kind = 'build-mobile' }
@@ -464,6 +468,9 @@ def make_harness() -> ControllerHarness:
         end
         function IssueGuard(units, target)
             table.insert(calls.sequence, 'guard')
+            table.insert(calls.orderTrace, {
+                kind = 'guard', units = units, target = target,
+            })
             table.insert(calls.guard, { units = units, target = target })
             if calls.failGuard
                 or tonumber(calls.failGuardAt) == table.getn(calls.guard)

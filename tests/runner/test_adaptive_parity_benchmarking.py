@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import asdict, fields, is_dataclass, replace
 import json
 import math
 from pathlib import Path
@@ -16,6 +16,9 @@ from conftest import ROOT, runtime
 from test_lua_hooks import _runtime as hook_runtime
 from test_lua_hooks import _valid_args as hook_valid_args
 from tools.overmind4_runner import parsing, reporting
+from tools.overmind4_runner.model import RunConfig
+from tools.overmind4_runner.runner import Runner
+from test_process_and_runner import _deps as runner_dependencies
 
 
 RUN_ID = "parity-run"
@@ -121,11 +124,17 @@ def metric_values(**updates: float | int) -> dict[str, float | int]:
     return values
 
 
-def benchmark_line(tick: int, army: int, **updates: float | int) -> str:
+def benchmark_line(
+    tick: int,
+    army: int,
+    *,
+    run_id: str = RUN_ID,
+    **updates: float | int,
+) -> str:
     values = metric_values(**updates)
     fields_text = "|".join(f"{key}={values[key]}" for key in sorted(values))
     return (
-        f"OM4BENCH|v=1|kind=checkpoint|run={RUN_ID}|tick={tick}|army={army}|"
+        f"OM4BENCH|v=1|kind=checkpoint|run={run_id}|tick={tick}|army={army}|"
         f"{fields_text}"
     )
 
@@ -212,7 +221,7 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
         assert re.search(forbidden, observer) is None, forbidden
 
 
-def test_launch_hook_passes_nondefault_actual_army_slots_to_sampler_thread() -> None:
+def test_launch_hook_repeats_300_tick_samples_for_nondefault_actual_army_slots() -> None:
     lua, _, _ = hook_runtime(
         hook_valid_args(
             **{
@@ -222,12 +231,14 @@ def test_launch_hook_passes_nondefault_actual_army_slots_to_sampler_thread() -> 
     )
     step_calls: list[tuple[Any, ...]] = []
 
-    def stop_after_sample(*arguments: Any) -> None:
+    def stop_after_three_samples(*arguments: Any) -> None:
         step_calls.append(arguments)
-        raise RuntimeError("observer-stop")
+        if len(step_calls) == 3:
+            raise RuntimeError("observer-stop")
 
-    lua.globals().benchmark_stub.Step = stop_after_sample
-    lua.globals().GetGameTick = lambda: 300
+    ticks = iter((300, 600, 900))
+    lua.globals().benchmark_stub.Step = stop_after_three_samples
+    lua.globals().GetGameTick = lambda: next(ticks)
     lua.globals().coroutine.yield_ = lambda *_: None
     lua.execute("coroutine.yield = coroutine.yield_")
     lua.execute(
@@ -248,7 +259,7 @@ def test_launch_hook_passes_nondefault_actual_army_slots_to_sampler_thread() -> 
     assert len(creates[0]) == 3
     assert creates[0][0] == "run-1"
     assert [creates[0][1][index] for index in range(1, 3)] == [4, 2]
-    assert len(step_calls) == 1
+    assert [int(arguments[1]) for arguments in step_calls] == [300, 600, 900]
 
 
 def _benchmark_lua_fixture(lua: Any) -> None:
@@ -866,6 +877,76 @@ IAN_FLOORS = {
     },
 }
 
+RELATIVE_RATIOS = {
+    5: {
+        "mass_income": 0.60,
+        "mass_spent": 0.55,
+        "engineers_alive": 0.65,
+        "factories": 0.65,
+        "mex_alive": 0.75,
+        "mass_reclaim": 0.40,
+    },
+    10: {
+        "mass_income": 0.70,
+        "mass_spent": 0.65,
+        "engineers_alive": 0.70,
+        "factories": 0.70,
+        "mex_alive": 0.80,
+        "mass_reclaim": 0.50,
+    },
+    15: {
+        "mass_income": 0.80,
+        "mass_spent": 0.75,
+        "engineers_alive": 0.75,
+        "factories": 0.75,
+        "mex_alive": 0.85,
+        "mass_reclaim": 0.65,
+    },
+    20: {
+        "mass_income": 0.85,
+        "mass_spent": 0.80,
+        "engineers_alive": 0.80,
+        "factories": 0.80,
+        "mex_alive": 0.85,
+        "mass_reclaim": 0.70,
+    },
+}
+
+RELATIVE_OPPONENT_PROBES = {
+    5: {
+        "mass_income": 20,
+        "mass_spent": 2000,
+        "engineers_alive": 13,
+        "factories": 7,
+        "mex_alive": 17,
+        "mass_reclaim": 1000,
+    },
+    10: {
+        "mass_income": 40,
+        "mass_spent": 8000,
+        "engineers_alive": 21,
+        "factories": 11,
+        "mex_alive": 29,
+        "mass_reclaim": 3000,
+    },
+    15: {
+        "mass_income": 40,
+        "mass_spent": 16000,
+        "engineers_alive": 33,
+        "factories": 15,
+        "mex_alive": 37,
+        "mass_reclaim": 6000,
+    },
+    20: {
+        "mass_income": 40,
+        "mass_spent": 24000,
+        "engineers_alive": 46,
+        "factories": 19,
+        "mex_alive": 45,
+        "mass_reclaim": 10000,
+    },
+}
+
 
 def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | int]:
     floor = IAN_FLOORS[minutes]
@@ -877,13 +958,18 @@ def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | i
     mex_t3 = 0
     mex_t1 = scaled_count(floor["mex_alive"]) - mex_t2 - mex_t3
     if minutes == 5:
-        land_t1, land_t2, air_t1 = 2, 0, 1
+        base_land_t1, base_land_t2, base_air_t1 = 2, 0, 1
     elif minutes == 10:
-        land_t1, land_t2, air_t1 = 4, 0, 1
+        base_land_t1, base_land_t2, base_air_t1 = 4, 0, 1
     elif minutes == 15:
-        land_t1, land_t2, air_t1 = 3, 1, 3
+        base_land_t1, base_land_t2, base_air_t1 = 3, 1, 3
     else:
-        land_t1, land_t2, air_t1 = 3, 2, 4
+        base_land_t1, base_land_t2, base_air_t1 = 3, 2, 4
+    base_factory_total = base_land_t1 + base_land_t2 + base_air_t1
+    scaled_factory_total = scaled_count(base_factory_total)
+    land_t1 = base_land_t1 + (scaled_factory_total - base_factory_total)
+    land_t2 = base_land_t2
+    air_t1 = base_air_t1
     air_scout = scaled_count(1)
     air_interceptor = scaled_count(4 if minutes >= 10 else 2)
     air_bomber = scaled_count(1 if minutes >= 15 else 0)
@@ -918,10 +1004,10 @@ def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | i
             "mex_t2": mex_t2,
             "mex_t3": mex_t3,
             "mex_survival": floor["mex_survival"],
-            "land_factory_t1": scaled_count(land_t1),
-            "land_factory_t2": scaled_count(land_t2),
+            "land_factory_t1": land_t1,
+            "land_factory_t2": land_t2,
             "land_factory_t3": 0,
-            "air_factory_t1": scaled_count(air_t1),
+            "air_factory_t1": air_t1,
             "air_factory_t2": 0,
             "air_factory_t3": 0,
             "factory_utilization": utilization_floor,
@@ -945,13 +1031,15 @@ def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | i
     return values
 
 
-def passing_parity_telemetry(
+def passing_parity_log(
     *,
     max_minutes: int = 20,
     raw_overrides: dict[tuple[int, int, str], float | int] | None = None,
     t2_start_tick: int = 5700,
     include_t3_admission: bool = True,
-) -> parsing.LogTelemetry:
+    official_result: str | None = None,
+    run_id: str = RUN_ID,
+) -> str:
     overrides = raw_overrides or {}
     records: list[tuple[int, int, int, str]] = []
     for tick in range(300, max_minutes * 600 + 1, 300):
@@ -962,7 +1050,14 @@ def passing_parity_telemetry(
                 for (minute, override_army, field), value in overrides.items():
                     if minute == stage and override_army == army:
                         values[field] = value
-            records.append((tick, 0, army, benchmark_line(tick, army, **values)))
+            records.append(
+                (
+                    tick,
+                    0,
+                    army,
+                    benchmark_line(tick, army, run_id=run_id, **values),
+                )
+            )
     t2_phases = (
         (5500, "opportunity"),
         (5600, "selected"),
@@ -983,10 +1078,106 @@ def passing_parity_telemetry(
             )
         )
     lines = [record[3] for record in sorted(records)]
-    telemetry = parsing.parse_log("\n".join(lines), RUN_ID, our_slot=1)
+    if official_result is not None:
+        lines.append(
+            "OM4HARNESS|v=1|kind=result|"
+            f"run={run_id}|army=1|result={official_result}|"
+            f"sim={max_minutes * 60}"
+        )
+    return "\n".join(lines)
+
+
+def passing_parity_telemetry(
+    *,
+    max_minutes: int = 20,
+    raw_overrides: dict[tuple[int, int, str], float | int] | None = None,
+    t2_start_tick: int = 5700,
+    include_t3_admission: bool = True,
+    official_result: str | None = None,
+    run_id: str = RUN_ID,
+) -> parsing.LogTelemetry:
+    telemetry = parsing.parse_log(
+        passing_parity_log(
+            max_minutes=max_minutes,
+            raw_overrides=raw_overrides,
+            t2_start_tick=t2_start_tick,
+            include_t3_admission=include_t3_admission,
+            official_result=official_result,
+            run_id=run_id,
+        ),
+        run_id,
+        our_slot=1,
+    )
     assert telemetry.benchmark_integrity_reason is None
     assert telemetry.operation_integrity_reason is None
     return telemetry
+
+
+def derived_metric_overrides(
+    minutes: int,
+    army: int,
+    metric: str,
+    value: float | int,
+) -> dict[tuple[int, int, str], float | int]:
+    raw = parity_raw_metrics(minutes, scale=1 if army == 1 else 1.05)
+    overrides: dict[tuple[int, int, str], float | int] = {}
+
+    def override(field: str, updated: float | int) -> None:
+        overrides[(minutes, army, field)] = updated
+
+    if metric == "factories":
+        fields_ = (
+            "land_factory_t1",
+            "land_factory_t2",
+            "land_factory_t3",
+            "air_factory_t1",
+            "air_factory_t2",
+            "air_factory_t3",
+        )
+        current = sum(float(raw[field]) for field in fields_)
+        override(
+            "land_factory_t1",
+            float(raw["land_factory_t1"]) + float(value) - current,
+        )
+    elif metric == "mex_alive":
+        current = sum(float(raw[field]) for field in ("mex_t1", "mex_t2", "mex_t3"))
+        override("mex_t1", float(raw["mex_t1"]) + float(value) - current)
+    elif metric == "engineers_alive":
+        override("engineers_alive", value)
+        override("engineers_built", value)
+        override("engineers_lost", 0)
+    elif metric == "combat_units":
+        fields_ = (
+            "army_count_home",
+            "army_count_garrison",
+            "army_count_field",
+            "army_count_response",
+            "army_count_raider",
+            "army_count_unassigned",
+        )
+        for field in fields_:
+            override(field, 0)
+        override("army_count_raider", value)
+    elif metric == "air_total":
+        fields_ = (
+            "air_scout",
+            "air_interceptor",
+            "air_bomber",
+            "air_transport",
+            "air_other",
+        )
+        for field in fields_:
+            override(field, 0)
+        override("air_other", value)
+    elif metric == "mass_utilization":
+        spent = float(raw["mass_spent"])
+        override("mass_excess", spent / float(value) - spent)
+    elif metric == "engineer_attrition":
+        built = float(raw["engineers_built"])
+        override("engineers_lost", built * float(value))
+    else:
+        override(metric, value)
+    return overrides
 
 
 def derived_failure_telemetry(
@@ -996,53 +1187,78 @@ def derived_failure_telemetry(
         return passing_parity_telemetry(t2_start_tick=int(value))
     if metric == "t3_admitted":
         return passing_parity_telemetry(include_t3_admission=bool(value))
-    raw = parity_raw_metrics(minutes)
-    overrides: dict[tuple[int, int, str], float | int] = {}
-    if metric == "factories":
-        for field in (
-            "land_factory_t1",
-            "land_factory_t2",
-            "land_factory_t3",
-            "air_factory_t1",
-            "air_factory_t2",
-            "air_factory_t3",
-        ):
-            overrides[(minutes, 1, field)] = 0
-        overrides[(minutes, 1, "land_factory_t1")] = value
-    elif metric == "mex_alive":
-        overrides[(minutes, 1, "mex_t1")] = value
-        overrides[(minutes, 1, "mex_t2")] = 0
-        overrides[(minutes, 1, "mex_t3")] = 0
-    elif metric == "air_total":
-        for field in (
-            "air_scout",
-            "air_interceptor",
-            "air_bomber",
-            "air_transport",
-            "air_other",
-        ):
-            overrides[(minutes, 1, field)] = 0
-        overrides[(minutes, 1, "air_other")] = value
-    elif metric == "combat_units":
-        for field in (
-            "army_count_home",
-            "army_count_garrison",
-            "army_count_field",
-            "army_count_response",
-            "army_count_raider",
-            "army_count_unassigned",
-        ):
-            overrides[(minutes, 1, field)] = 0
-        overrides[(minutes, 1, "army_count_raider")] = value
-    elif metric == "mass_utilization":
-        spent = float(raw["mass_spent"])
-        overrides[(minutes, 1, "mass_excess")] = spent / float(value) - spent
-    elif metric == "engineer_attrition":
-        built = float(raw["engineers_built"])
-        overrides[(minutes, 1, "engineers_lost")] = built * float(value)
-    else:
-        overrides[(minutes, 1, metric)] = value
-    return passing_parity_telemetry(raw_overrides=overrides)
+    return passing_parity_telemetry(
+        raw_overrides=derived_metric_overrides(minutes, 1, metric, value)
+    )
+
+
+def test_real_runner_automatically_parses_evaluates_and_writes_live_parity_artifacts(
+    tmp_path: Path,
+) -> None:
+    lifecycle = "\n".join(
+        (
+            "OM4HARNESS|v=1|kind=start|run=run-fixed|map=SCMP_007",
+            "OM4|v=1|kind=lifecycle|army=1|event=created|plan=none",
+            "OM4|v=1|kind=lifecycle|army=1|event=begin_session",
+            "OM4HARNESS|v=1|kind=speed|run=run-fixed|requested=25|sim=1",
+        )
+    )
+    live_log = "\n".join(
+        (
+            lifecycle,
+            passing_parity_log(run_id="run-fixed"),
+            "OM4|v=1|kind=lifecycle|army=1|event=terminal|result=victory",
+            "OM4HARNESS|v=1|kind=result|run=run-fixed|army=1|"
+            "result=victory 10|sim=1200",
+        )
+    )
+
+    class CompletedBenchmarkMonitor:
+        def wait(
+            self,
+            process: Any,
+            log_path: Path,
+            wall_limit: float,
+            **_: Any,
+        ) -> parsing.ProcessObservation:
+            del process, wall_limit
+            log_path.write_text(live_log, encoding="utf-8")
+            return parsing.ProcessObservation(exit_code=0, wall_seconds=2)
+
+        def stop_owned(self, process: Any) -> tuple[int | None, bool]:
+            del process
+            return 0, False
+
+    deps, _, _, _ = runner_dependencies(tmp_path)
+    deps = replace(
+        deps,
+        monitor=CompletedBenchmarkMonitor(),
+        map_fingerprint=lambda _: {
+            "version": 3,
+            "sha256": "map123",
+            "size_km": 20,
+        },
+    )
+    result = Runner(tmp_path / "repo", deps).run(
+        RunConfig(
+            opponent_ai="adaptive",
+            seed=7777,
+            sim_time_limit=1200,
+        ),
+        tmp_path / "artifacts",
+        dry_run=False,
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.state == "win"
+    report = json.loads(result.paths.report_json_path.read_text(encoding="utf-8"))
+    assert report["official_result"] == "victory 10"
+    assert len(report["benchmark_checkpoints"]) == 80
+    assert len(report["operation_events"]) == 7
+    assert report["parity"]["classification"] == "macro-parity-win"
+    assert report["parity"]["matchEligible"] is True
+    markdown = result.paths.report_markdown_path.read_text(encoding="utf-8")
+    assert "macro-parity-win" in markdown
 
 
 @pytest.mark.skipif(
@@ -1075,6 +1291,156 @@ class TestParityReporting:
         assert result["derived"]["20m"]["mass_utilization"] == pytest.approx(0.85)
         assert result["derived"]["20m"]["factory_full_bank_idle_ticks"] == 0
         assert result["derived"]["20m"]["engineer_attrition"] <= 0.05
+
+    @pytest.mark.parametrize(
+        ("official_result", "classification", "eligible"),
+        (
+            ("victory 10", "macro-parity-win", True),
+            ("defeat -10", "combat-loss-macro-parity", False),
+        ),
+    )
+    def test_parity_uses_the_real_parsed_official_result_with_score_suffix(
+        self,
+        official_result: str,
+        classification: str,
+        eligible: bool,
+    ) -> None:
+        telemetry = passing_parity_telemetry(official_result=official_result)
+
+        assert telemetry.official_result == official_result
+        result = reporting.evaluate_parity(
+            telemetry,
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result=telemetry.official_result,
+            seed=7777,
+            spawn="normal",
+        )
+
+        assert result["classification"] == classification
+        assert result["matchEligible"] is eligible
+
+    @pytest.mark.parametrize(
+        ("minutes", "metric"),
+        [
+            (minutes, metric)
+            for minutes in (5, 10, 15, 20)
+            for metric in (
+                "mass_income",
+                "mass_spent",
+                "engineers_alive",
+                "factories",
+                "mex_alive",
+                "mass_reclaim",
+            )
+        ],
+    )
+    def test_every_opponent_relative_gate_fails_immediately_below_and_passes_at_boundary(
+        self,
+        minutes: int,
+        metric: str,
+    ) -> None:
+        opponent = RELATIVE_OPPONENT_PROBES[minutes][metric]
+        ratio = RELATIVE_RATIOS[minutes][metric]
+        raw_required = max(float(IAN_FLOORS[minutes][metric]), opponent * ratio)
+        if metric in {"engineers_alive", "factories", "mex_alive"}:
+            at_boundary: float | int = int(math.ceil(raw_required - 1e-9))
+            below_boundary: float | int = at_boundary - 1
+        else:
+            at_boundary = raw_required
+            below_boundary = math.nextafter(raw_required, -math.inf)
+        expected = f"{minutes}m:{metric}:relative"
+        common_overrides = derived_metric_overrides(
+            minutes, 2, metric, opponent
+        )
+
+        below = reporting.evaluate_parity(
+            passing_parity_telemetry(
+                raw_overrides={
+                    **common_overrides,
+                    **derived_metric_overrides(
+                        minutes, 1, metric, below_boundary
+                    ),
+                }
+            ),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="defeat -10",
+        )
+        at = reporting.evaluate_parity(
+            passing_parity_telemetry(
+                raw_overrides={
+                    **common_overrides,
+                    **derived_metric_overrides(
+                        minutes, 1, metric, at_boundary
+                    ),
+                }
+            ),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="defeat -10",
+        )
+
+        assert [
+            failure
+            for failure in below["failures"]
+            if failure.endswith(":relative")
+        ] == [expected]
+        assert not [
+            failure
+            for failure in at["failures"]
+            if failure.endswith(":relative")
+        ]
+
+    @pytest.mark.parametrize(
+        ("minutes", "metric", "floor"),
+        (
+            (5, "mex_survival", 0.90),
+            (10, "mex_survival", 0.85),
+            (15, "mex_survival", 0.80),
+            (20, "mex_survival", 0.75),
+            (10, "mass_utilization", 0.75),
+            (15, "mass_utilization", 0.85),
+            (20, "mass_utilization", 0.85),
+        ),
+    )
+    def test_every_nonintegral_absolute_floor_fails_immediately_below_and_passes_exactly_at_boundary(
+        self,
+        minutes: int,
+        metric: str,
+        floor: float,
+    ) -> None:
+        expected = f"{minutes}m:{metric}:absolute"
+        below = reporting.evaluate_parity(
+            derived_failure_telemetry(
+                minutes, metric, math.nextafter(floor, -math.inf)
+            ),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="defeat -10",
+        )
+        at = reporting.evaluate_parity(
+            derived_failure_telemetry(minutes, metric, floor),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="defeat -10",
+        )
+
+        assert [
+            failure
+            for failure in below["failures"]
+            if failure.endswith(":absolute")
+        ] == [expected]
+        assert not [
+            failure
+            for failure in at["failures"]
+            if failure.endswith(":absolute")
+        ]
 
     def test_one_absolute_or_relative_shortfall_names_exact_checkpoint_and_metric(self) -> None:
         absolute_cases = (
