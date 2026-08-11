@@ -1927,9 +1927,12 @@ local function MacroSnapshot(controller, units, economy)
         and expansionAvailableEnergy + 0.000001
             >= ESCALATION.LAND_COMBAT_ENERGY_RESERVE
                 + ESCALATION.ENERGY_EXPANSION_RESERVE
-    engineerTarget = math.max(2, math.min(12,
-        CountArray(fundedBuilderWork)
-            + (postCombatExpansionFunded and 1 or 0)))
+    engineerTarget = math.max(
+        math.max(2, math.min(12,
+            CountArray(fundedBuilderWork)
+                + (postCombatExpansionFunded and 1 or 0))),
+        math.min(8, 2 + math.floor(completedMex / 3))
+    )
     unlockingEngineerNeeded = postCombatExpansionFunded
         and completedEngineers < engineerTarget
     local supportedFactories = ESCALATION.MIN_FACTORY_TARGET

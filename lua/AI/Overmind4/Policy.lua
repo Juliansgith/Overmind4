@@ -1745,6 +1745,21 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
         or (tonumber(economy.massTrend) or 0) < 0
         or (tonumber(economy.massStoredRatio) or 0) < 0.1
     local plannedEngineer = false
+    local protectedCombatOutstanding = false
+    for _, operation in ipairs(snapshot.pending or {}) do
+        if operation.kind == 'factory_build'
+            and (operation.buildRole == 'tank'
+                or operation.buildRole == 'artillery'
+                or operation.buildRole == 'anti_air'
+                or operation.buildRole == 'lab')
+        then
+            protectedCombatOutstanding = true
+        elseif operation.kind == 'factory_build'
+            and operation.buildRole == 'engineer'
+        then
+            plannedEngineer = true
+        end
+    end
     local completedEngineers = 0
     for _, unit in ipairs(units or {}) do
         if unit.role == 'engineer' and unit.complete == true then
@@ -1753,7 +1768,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
     end
     local recoveryMode = completedEngineers < MIN_RECOVERY_ENGINEERS
     local recoveryOutstanding = (counts.engineer or 0) >= MIN_RECOVERY_ENGINEERS
-    local plannedAllocatorCombat = false
+    local plannedAllocatorCombat = protectedCombatOutstanding
     local plannedUpgrade = false
     local completedMex = 0
     local completedLand = 0
@@ -2381,6 +2396,14 @@ Policy.ApplyAllocator = function(snapshot, intents)
         lab = true,
         tank = true,
     }
+    for _, operation in ipairs(snapshot.pending or {}) do
+        if operation.kind == 'factory_build'
+            and landCombatRoles[operation.buildRole] == true
+        then
+            protectedCombatAccepted = true
+            break
+        end
+    end
     local ordered = CopyArray(intents)
     local leadingExpansion = nil
     local hasLandCombatRequest = false

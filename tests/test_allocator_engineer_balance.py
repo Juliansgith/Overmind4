@@ -605,6 +605,164 @@ def test_live_two_factory_lane_builds_one_missing_engineer_then_returns_both_to_
     assert intents_of(decide(starved), "factory_build") == []
 
 
+@pytest.mark.parametrize("combat_phase", ["issued", "accepted", "building"])
+def test_staggered_active_combat_reserves_idle_peer_for_the_missing_engineer(
+    combat_phase: str,
+) -> None:
+    snapshot = _policy_allocator_snapshot()
+    snapshot["macro"].update(
+        engineerTarget=2,
+        engineerDemand=2,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=0,
+        factoryFundedCount=0,
+        availableRecurringMass=1.9,
+        availableRecurringEnergy=6,
+        expansionRecurringMassBudget=1.9,
+        expansionRecurringEnergyBudget=6,
+        oneTimeMassReserve=820,
+        oneTimeEnergyReserve=4000,
+    )
+    snapshot["pending"] = [
+        {
+            "kind": "factory_build",
+            "actorToken": "10:1",
+            "buildRole": "tank",
+            "reason": "continuous_land_production",
+            "phase": combat_phase,
+            "accepted": combat_phase != "issued",
+        }
+    ]
+
+    orders = intents_of(decide(snapshot), "factory_build")
+
+    assert [(intent["actorToken"], intent["buildRole"], intent["reason"]) for intent in orders] == [
+        ("11:1", "engineer", "unlock_profitable_expansion")
+    ]
+
+
+def test_pending_missing_engineer_suppresses_duplicate_and_leaves_next_factory_for_combat() -> None:
+    snapshot = _policy_allocator_snapshot()
+    third_factory = copy.deepcopy(
+        next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
+    )
+    third_factory["token"] = "99:1"
+    snapshot["units"].append(third_factory)
+    snapshot["macro"].update(
+        engineerTarget=3,
+        engineerDemand=3,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=0,
+        factoryFundedCount=1,
+        availableRecurringMass=1.9,
+        availableRecurringEnergy=6,
+        expansionRecurringMassBudget=1.9,
+        expansionRecurringEnergyBudget=6,
+        oneTimeMassReserve=820,
+        oneTimeEnergyReserve=4000,
+    )
+    snapshot["pending"] = [
+        {
+            "kind": "factory_build",
+            "actorToken": "10:1",
+            "buildRole": "tank",
+            "reason": "continuous_land_production",
+            "phase": "accepted",
+            "accepted": True,
+        },
+        {
+            "kind": "factory_build",
+            "actorToken": "11:1",
+            "buildRole": "engineer",
+            "reason": "unlock_profitable_expansion",
+            "phase": "accepted",
+            "accepted": True,
+        },
+    ]
+
+    orders = intents_of(decide(snapshot), "factory_build")
+
+    assert [(intent["actorToken"], intent["buildRole"]) for intent in orders] == [
+        ("99:1", "artillery")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("completed_mex", "expected_target"),
+    [(0, 2), (2, 2), (3, 3), (6, 4), (9, 5), (18, 8), (30, 8)],
+)
+def test_completed_mex_economy_ramp_sets_a_bounded_engineer_target_floor(
+    completed_mex: int,
+    expected_target: int,
+) -> None:
+    harness = make_harness()
+    harness.controller.fieldCampaignEnabled = False
+    harness.controller.markers.mass = lua_value(harness.lua, [])
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(
+                entityId=200 + index,
+                blueprintId="ueb1103",
+                position=[20 + index, 2, 20],
+            )
+            for index in range(completed_mex)
+        ]
+    )
+    _set_economy(
+        harness,
+        mass_income=2,
+        mass_requested=0,
+        energy_income=20,
+        energy_requested=0,
+        mass_stored_ratio=1,
+        energy_stored_ratio=1,
+        mass_usage=0,
+        energy_usage=0,
+    )
+
+    observation = _sample(harness, 4)
+
+    assert observation.macro.engineerTarget == expected_target
+
+
+@pytest.mark.parametrize("fraction", [0, 0.999, -1, "malformed"])
+def test_incomplete_or_malformed_mex_never_advances_the_engineer_target(
+    fraction: Any,
+) -> None:
+    harness = make_harness()
+    harness.controller.fieldCampaignEnabled = False
+    harness.controller.markers.mass = lua_value(harness.lua, [])
+    units = [
+        harness.unit(entityId=210 + index, blueprintId="ueb1103", position=[20 + index, 2, 20])
+        for index in range(2)
+    ]
+    units.extend(
+        harness.unit(
+            entityId=220 + index,
+            blueprintId="ueb1103",
+            position=[30 + index, 2, 20],
+            fraction=fraction,
+        )
+        for index in range(6)
+    )
+    harness.brain.units = harness.lua.table_from(units)
+    _set_economy(
+        harness,
+        mass_income=2,
+        mass_requested=0,
+        energy_income=20,
+        energy_requested=0,
+        mass_stored_ratio=1,
+        energy_stored_ratio=1,
+        mass_usage=0,
+        energy_usage=0,
+    )
+
+    observation = _sample(harness, 4)
+
+    assert observation.macro.engineerTarget == 2
+
+
 @pytest.mark.parametrize(
     ("available_mass", "available_energy", "bank_mass", "bank_energy"),
     [

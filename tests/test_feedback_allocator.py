@@ -1355,7 +1355,7 @@ def test_artifact_tick8569_state_idles_excess_factories_without_marker_driven_en
     assert observation.macro.factoryFundedCount == 0
     assert observation.macro.factoryIdleCount == 11
     assert observation.macro.expansionOpportunityCount == 12
-    assert observation.macro.engineerTarget == 2
+    assert observation.macro.engineerTarget == 5
     assert observation.macro.techAdmission != "admitted"
 
 
