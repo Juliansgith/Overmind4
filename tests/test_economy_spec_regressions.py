@@ -945,10 +945,16 @@ def test_committed_rollback_has_600_tick_cooldown_before_repeat_attrition() -> N
     execute_intents(harness, macro_work, early_resume)
     harness.brain.tick = 102
     spending = reconcile(harness)
+    spending_intents = policy_intents(harness, spending)
     assert not any(
-        intent.get("kind") == "factory_build"
-        for intent in policy_intents(harness, spending)
+        intent.get("kind") == "field_campaign" for intent in spending_intents
     )
+    protected_production = [
+        (intent.get("buildRole"), intent.get("reason"))
+        for intent in spending_intents
+        if intent.get("kind") == "factory_build"
+    ]
+    assert protected_production == [("tank", "continuous_land_production")]
     assert spending.macro.allocatorDeniedRequest == "factory_queue"
     assert spending.macro.allocatorDeniedReason == "recurring_budget"
     harness.brain.tick = 699
