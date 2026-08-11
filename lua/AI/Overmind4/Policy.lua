@@ -2491,7 +2491,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
         and FiniteNumber(rollingMassStoredRatio)
         and FiniteNumber(rollingEnergyStoredRatio)
         and rollingMassStoredRatio >= 0.95
-        and rollingEnergyStoredRatio >= 0.95
+        and rollingEnergyStoredRatio >= 0.5
     then
         overflowFactorySlots = math.min(4, completedLandFactories)
     end

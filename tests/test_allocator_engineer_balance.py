@@ -512,7 +512,7 @@ def test_tick5815_bank_and_forecast_fund_combat_when_generic_factory_slots_are_z
     assert ("tank", "continuous_land_production") in _factory_orders(snapshot)
 
 
-def test_full_storage_converts_overflow_through_four_idle_land_factories() -> None:
+def test_full_mass_and_half_energy_convert_overflow_through_four_idle_land_factories() -> None:
     snapshot = _policy_allocator_snapshot("land_factory", "land_factory")
     snapshot["economy"].update(
         massStoredRatio=1,
@@ -531,7 +531,7 @@ def test_full_storage_converts_overflow_through_four_idle_land_factories() -> No
         oneTimeMassReserve=0,
         oneTimeEnergyReserve=0,
         rollingMassStoredRatio=1,
-        rollingEnergyStoredRatio=1,
+        rollingEnergyStoredRatio=0.5,
     )
 
     orders = _factory_orders(snapshot)
