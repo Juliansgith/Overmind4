@@ -3317,7 +3317,34 @@ local function ExecuteStructure(controller, intent, record)
 
     intent.position = position
     RecordPending(controller, intent, record)
-    local ok = pcall(function() IssueBuildMobile({ actor }, position, blueprintId, {}) end)
+    local ok = false
+    if intent.reason == 'airlift_mex' then
+        local actorPosition = CopyPosition(record.position) or CopyPosition(position)
+        local dx = actorPosition[1] - position[1]
+        local dz = actorPosition[3] - position[3]
+        local length = math.sqrt(dx * dx + dz * dz)
+        if length <= 0.01 then
+            dx = controller.basePosition[1] - position[1]
+            dz = controller.basePosition[3] - position[3]
+            length = math.sqrt(dx * dx + dz * dz)
+        end
+        if length <= 0.01 then dx = 1; dz = 0; length = 1 end
+        local stagingPosition = TerrainPosition({
+            position[1] + dx * 20 / length,
+            0,
+            position[3] + dz * 20 / length,
+        })
+        if stagingPosition then
+            ok = pcall(function()
+                IssueMove({ actor }, stagingPosition)
+                IssueBuildMobile({ actor }, position, blueprintId, {})
+            end)
+        end
+    else
+        ok = pcall(function()
+            IssueBuildMobile({ actor }, position, blueprintId, {})
+        end)
+    end
     if not ok then
         ReleaseOperation(controller, intent.actorToken, 'command_error')
         return false
