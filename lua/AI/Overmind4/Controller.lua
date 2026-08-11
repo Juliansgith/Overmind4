@@ -2113,7 +2113,7 @@ local function MacroSnapshot(controller, units, economy)
         math.max(2, math.min(12,
             CountArray(fundedBuilderWork)
                 + (postCombatExpansionFunded and 1 or 0))),
-        math.min(8, 2 + math.floor(completedMex / 3))
+        math.min(10, 2 + math.floor(completedMex * 3 / 4))
     )
     unlockingEngineerNeeded = postCombatExpansionFunded
         and completedEngineers < engineerTarget
