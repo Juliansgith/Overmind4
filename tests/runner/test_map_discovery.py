@@ -97,6 +97,28 @@ def test_versioned_map_fingerprint_is_portable_deterministic_and_content_sensiti
     assert first["sha256"] != changed["sha256"]
 
 
+@pytest.mark.parametrize(
+    ("scenario_size", "expected_km"),
+    (((256, 256), 5), ((512, 512), 10), ((1024, 1024), 20), ((2048, 2048), 40)),
+)
+def test_map_fingerprint_reports_declared_standard_map_size_for_parity_matrix(
+    tmp_path: Path, scenario_size: tuple[int, int], expected_km: int
+) -> None:
+    root = tmp_path / "maps"
+    directory = root / "parity_map"
+    directory.mkdir(parents=True)
+    (directory / "parity_map_scenario.lua").write_text(
+        "version = 1\n"
+        f"ScenarioInfo = {{ size = {{{scenario_size[0]}, {scenario_size[1]}}} }}\n",
+        encoding="utf-8",
+    )
+    (directory / "parity_map.scmap").write_bytes(b"map")
+
+    fingerprint = fingerprint_map("parity_map", (root,))
+
+    assert fingerprint["size_km"] == expected_km
+
+
 def test_map_fingerprint_fails_when_no_discovered_root_contains_the_map(tmp_path: Path) -> None:
     with pytest.raises(MapDiscoveryError, match="not found"):
         fingerprint_map("SCMP_007", (tmp_path / "maps",))

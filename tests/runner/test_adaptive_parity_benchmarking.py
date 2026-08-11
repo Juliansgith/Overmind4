@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from lupa.lua51 import LuaError
 
-from adaptive_parity_helpers import lua_value
+from adaptive_parity_helpers import lua_value, plain
 from conftest import ROOT, runtime
 from test_lua_hooks import _runtime as hook_runtime
 from test_lua_hooks import _valid_args as hook_valid_args
@@ -650,6 +650,52 @@ def test_step_resolves_both_actual_army_brains_samples_and_never_duplicates_tick
     assert "|mass_income=25" in emitted[1]
 
 
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+def test_step_normalizes_late_scheduler_wakeups_to_the_due_300_tick_checkpoint() -> None:
+    lua = runtime()
+    _benchmark_lua_fixture(lua)
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+    emitted: list[str] = []
+    brain = lua.globals().MakeBenchmarkBrain(1)
+    lua.globals().GetArmyBrain = lambda _: brain
+    lua.globals().observer_logger = emitted.append
+    observer = lua.globals().Overmind4Benchmark.Create(
+        RUN_ID, lua.table_from([1]), lua.globals().observer_logger
+    )
+
+    lua.globals().Overmind4Benchmark.Step(observer, 329)
+    lua.globals().Overmind4Benchmark.Step(observer, 359)
+    lua.globals().Overmind4Benchmark.Step(observer, 601)
+
+    assert [line.split("|tick=", 1)[1].split("|", 1)[0] for line in emitted] == [
+        "300",
+        "600",
+    ]
+
+
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+def test_overmind_force_metrics_fail_closed_when_public_snapshot_is_unavailable() -> None:
+    lua = runtime()
+    _benchmark_lua_fixture(lua)
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+    emitted: list[str] = []
+    observer = lua.globals().Overmind4Benchmark.Create(
+        RUN_ID, lua.table_from([1]), emitted.append
+    )
+    brain = lua.globals().MakeBenchmarkBrain(1)
+    brain.Overmind4 = True
+    brain.Overmind4ForcePlan = None
+    brain.Overmind4EntityGenerations = None
+
+    lua.globals().Overmind4Benchmark.SampleArmy(observer, brain, 1, 300)
+
+    assert any(
+        "|kind=integrity|" in line
+        and "|reason=force-plan-unavailable|" in line
+        for line in emitted
+    )
+
+
 @pytest.mark.skipif(not BENCHMARK_SCHEMA_READY, reason="benchmark parser RED schema missing")
 class TestBenchmarkParsing:
     def test_parser_collects_both_armies_at_each_checkpoint_in_tick_army_order(self) -> None:
@@ -743,6 +789,7 @@ class TestBenchmarkParsing:
             benchmark_line(300, 1).replace("mass_income=10", "mass_income=nan"),
             benchmark_line(300, 1).replace("mass_income=10", "mass_income=-1"),
             benchmark_line(300, 1).replace("mass_income=10", "mass_income=bad"),
+            benchmark_line(300, 1) + "|mass_income=999",
             benchmark_line(300, 1).replace(f"run={RUN_ID}", "run=other"),
         )
 
@@ -752,6 +799,20 @@ class TestBenchmarkParsing:
             )
             assert len(telemetry.benchmark_checkpoints) < 2
             assert telemetry.benchmark_integrity_reason is not None
+
+    def test_explicit_observer_integrity_failure_is_preserved_as_hard_reject_reason(self) -> None:
+        text = "\n".join(
+            (
+                benchmark_line(300, 1),
+                benchmark_line(300, 2),
+                f"OM4BENCH|v=1|kind=integrity|run={RUN_ID}|tick=300|army=1|"
+                "reason=force-plan-unavailable",
+            )
+        )
+
+        telemetry = parsing.parse_log(text, RUN_ID, our_slot=1)
+
+        assert telemetry.benchmark_integrity_reason == "force-plan-unavailable"
 
     def test_operation_parser_retains_complete_success_lifecycle_and_timing_fields(self) -> None:
         phases = (
@@ -823,6 +884,47 @@ class TestBenchmarkParsing:
             110,
             105,
         ]
+
+    @pytest.mark.parametrize(
+        "malformed",
+        (
+            operation_line(100, "mex-1", "opportunity")
+            + "|operation=mex-2",
+            operation_line(100, "mex-1", "opportunity", response_ticks=-1),
+            operation_line(100, "mex-1", "opportunity", scout_coverage_age="nan"),
+        ),
+    )
+    def test_duplicate_fields_or_invalid_causal_timings_fail_closed(
+        self, malformed: str
+    ) -> None:
+        telemetry = parsing.parse_log(malformed, RUN_ID, our_slot=1)
+
+        assert telemetry.operation_integrity_reason is not None
+
+    def test_malformed_records_for_another_run_or_army_do_not_poison_our_stream(self) -> None:
+        other_run_duplicate = (
+            benchmark_line(300, 1, run_id="other") + "|mass_income=999"
+        )
+        opponent_duplicate = (
+            operation_line(100, "opponent-op", "opportunity")
+            .replace("army=1", "army=2")
+            + "|operation=duplicate"
+        )
+        text = "\n".join(
+            (
+                other_run_duplicate,
+                opponent_duplicate,
+                benchmark_line(300, 1),
+                benchmark_line(300, 2),
+                operation_line(100, "our-op", "opportunity"),
+                operation_line(110, "our-op", "selected"),
+            )
+        )
+
+        telemetry = parsing.parse_log(text, RUN_ID, our_slot=1)
+
+        assert telemetry.benchmark_integrity_reason is None
+        assert telemetry.operation_integrity_reason is None
 
 
 def test_reporting_exposes_a_public_parity_gate_api() -> None:
@@ -1134,14 +1236,13 @@ def derived_metric_overrides(
             "air_factory_t2",
             "air_factory_t3",
         )
-        current = sum(float(raw[field]) for field in fields_)
-        override(
-            "land_factory_t1",
-            float(raw["land_factory_t1"]) + float(value) - current,
-        )
+        for field in fields_:
+            override(field, 0)
+        override("land_factory_t1", value)
     elif metric == "mex_alive":
-        current = sum(float(raw[field]) for field in ("mex_t1", "mex_t2", "mex_t3"))
-        override("mex_t1", float(raw["mex_t1"]) + float(value) - current)
+        for field in ("mex_t1", "mex_t2", "mex_t3"):
+            override(field, 0)
+        override("mex_t1", value)
     elif metric == "engineers_alive":
         override("engineers_alive", value)
         override("engineers_built", value)
@@ -1523,6 +1624,20 @@ class TestParityReporting:
         assert result["matchEligible"] is False
         assert result["promotable"] is False
 
+    def test_early_win_cannot_skip_unobserved_15_and_20_minute_macro_gates(self) -> None:
+        result = reporting.evaluate_parity(
+            passing_parity_telemetry(max_minutes=10),
+            our_army=1,
+            opponent_army=2,
+            map_size_km=20,
+            official_result="victory 10",
+        )
+
+        assert result["classification"] == "tactical-win-macro-fail"
+        assert result["matchEligible"] is False
+        assert "15m:checkpoint:missing" in result["failures"]
+        assert "20m:checkpoint:missing" in result["failures"]
+
     def test_macro_parity_loss_is_kept_and_classified_as_combat_not_macro_failure(self) -> None:
         result = reporting.evaluate_parity(
             passing_parity_telemetry(),
@@ -1665,6 +1780,10 @@ class TestParityReporting:
             ],
             [wrong_spawn, *matches[1:]],
             [*matches[:2], parity_loss, *matches[3:]],
+            [
+                ({**match, "benchmarkConfig": "different-build"} if index == 4 else match)
+                for index, match in enumerate(matches)
+            ],
         )
         for invalid in invalid_matrices:
             rejected = reporting.evaluate_promotion(invalid)

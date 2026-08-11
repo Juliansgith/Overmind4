@@ -2,13 +2,85 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import re
 from typing import Any
 
 
 HARNESS_PREFIX = "OM4HARNESS|"
 OVERMIND_PREFIX = "OM4|"
+BENCHMARK_PREFIX = "OM4BENCH|"
 TERMINAL_RESULTS = {"victory", "defeat", "draw"}
+
+BENCHMARK_METRICS = (
+    "mass_income",
+    "energy_income",
+    "mass_spent",
+    "energy_spent",
+    "mass_reclaim",
+    "energy_reclaim",
+    "mass_stored",
+    "energy_stored",
+    "mass_excess",
+    "energy_excess",
+    "engineers_alive",
+    "engineers_built",
+    "engineers_lost",
+    "mex_t1",
+    "mex_t2",
+    "mex_t3",
+    "mex_built",
+    "mex_lost",
+    "mex_rebuilt",
+    "mex_survival",
+    "land_factory_t1",
+    "land_factory_t2",
+    "land_factory_t3",
+    "air_factory_t1",
+    "air_factory_t2",
+    "air_factory_t3",
+    "factory_idle",
+    "factory_utilization",
+    "factory_full_bank_idle_ticks",
+    "air_scout",
+    "air_interceptor",
+    "air_bomber",
+    "air_transport",
+    "air_other",
+    "mobile_t2",
+    "mobile_t3",
+    "army_count_home",
+    "army_count_garrison",
+    "army_count_field",
+    "army_count_response",
+    "army_count_raider",
+    "army_count_unassigned",
+    "army_mass_home",
+    "army_mass_garrison",
+    "army_mass_field",
+    "army_mass_response",
+    "army_mass_raider",
+    "army_mass_unassigned",
+    "mass_killed",
+    "mass_lost",
+)
+_BENCHMARK_METRIC_SET = frozenset(BENCHMARK_METRICS)
+
+
+@dataclass(frozen=True)
+class BenchmarkCheckpoint:
+    tick: int
+    army: int
+    metrics: dict[str, int | float]
+
+
+@dataclass(frozen=True)
+class OperationEvent:
+    tick: int
+    army: int
+    operation: str
+    phase: str
+    fields: dict[str, str | int | float]
 
 
 @dataclass(frozen=True)
@@ -67,6 +139,10 @@ class LogTelemetry:
     result_integrity_reason: str | None = None
     harness_failure_reason: str | None = None
     warning_details: tuple[WarningDetail, ...] = ()
+    benchmark_checkpoints: tuple[BenchmarkCheckpoint, ...] = ()
+    benchmark_integrity_reason: str | None = None
+    operation_events: tuple[OperationEvent, ...] = ()
+    operation_integrity_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +160,10 @@ class Outcome:
     lifecycle: LifecycleStatus
     warnings: tuple[str, ...] = ()
     warning_details: tuple[WarningDetail, ...] = ()
+    benchmark_checkpoints: tuple[BenchmarkCheckpoint, ...] = ()
+    benchmark_integrity_reason: str | None = None
+    operation_events: tuple[OperationEvent, ...] = ()
+    operation_integrity_reason: str | None = None
 
 
 def _balanced_json_object(text: str, start: int) -> tuple[str | None, int]:
@@ -243,6 +323,257 @@ def overmind_marker_fields(line: str) -> dict[str, str] | None:
     return _overmind_fields(line)
 
 
+def _benchmark_fields(line: str) -> dict[str, str] | None:
+    return _fields_at_prefix(line, BENCHMARK_PREFIX)
+
+
+def _has_duplicate_fields(line: str, prefix: str) -> bool:
+    log_prefix = _LOG_PREFIX.match(line)
+    marker_at = log_prefix.end() if log_prefix else 0
+    if not line.startswith(prefix, marker_at):
+        return False
+    names = [
+        token.split("=", 1)[0]
+        for token in line[marker_at:].strip().split("|")[1:]
+        if "=" in token
+    ]
+    return len(names) != len(set(names))
+
+
+def _finite_nonnegative(value: str | None) -> int | float | None:
+    try:
+        number = float(value) if value is not None else math.nan
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def _nonnegative_integer(value: str | None) -> int | None:
+    number = _finite_nonnegative(value)
+    if number is None or isinstance(number, float):
+        return None
+    return number
+
+
+def _typed_operation_value(value: str) -> str | int | float:
+    number = _finite_nonnegative(value)
+    return value if number is None else number
+
+
+def _parse_benchmark_stream(
+    lines: list[str], run_id: str
+) -> tuple[tuple[BenchmarkCheckpoint, ...], str | None]:
+    checkpoints: list[BenchmarkCheckpoint] = []
+    invalid = False
+    integrity_reason: str | None = None
+    wrong_run_seen = False
+    duplicate = False
+    out_of_order = False
+    seen: set[tuple[int, int]] = set()
+    previous_tick: int | None = None
+
+    for line in lines:
+        fields = _benchmark_fields(line)
+        if fields is None:
+            continue
+        if fields.get("run") != run_id:
+            wrong_run_seen = True
+            continue
+        if _has_duplicate_fields(line, BENCHMARK_PREFIX):
+            invalid = True
+            continue
+        if fields.get("v") != "1":
+            invalid = True
+            continue
+        if fields.get("kind") == "integrity":
+            reason = fields.get("reason")
+            if reason and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", reason):
+                integrity_reason = integrity_reason or reason
+            else:
+                invalid = True
+            continue
+        if fields.get("kind") != "checkpoint":
+            invalid = True
+            continue
+        tick = _nonnegative_integer(fields.get("tick"))
+        army = _nonnegative_integer(fields.get("army"))
+        metric_names = set(fields) - {"v", "kind", "run", "tick", "army"}
+        if tick is None or tick <= 0 or army is None or army <= 0:
+            invalid = True
+            continue
+        if metric_names != _BENCHMARK_METRIC_SET:
+            invalid = True
+            continue
+        metrics: dict[str, int | float] = {}
+        for name in BENCHMARK_METRICS:
+            parsed = _finite_nonnegative(fields.get(name))
+            if parsed is None:
+                invalid = True
+                break
+            metrics[name] = parsed
+        else:
+            key = (tick, army)
+            if key in seen:
+                duplicate = True
+                continue
+            if previous_tick is not None and tick < previous_tick:
+                out_of_order = True
+            previous_tick = tick
+            seen.add(key)
+            checkpoints.append(BenchmarkCheckpoint(tick=tick, army=army, metrics=metrics))
+
+    checkpoints.sort(key=lambda item: (item.tick, item.army))
+    armies = sorted({item.army for item in checkpoints})
+    ticks = sorted({item.tick for item in checkpoints})
+    reason: str | None = None
+    if integrity_reason:
+        reason = integrity_reason
+    elif duplicate:
+        reason = "duplicate-benchmark-checkpoint"
+    elif out_of_order:
+        reason = "out-of-order-benchmark-checkpoint"
+    elif invalid:
+        reason = "malformed-benchmark-checkpoint"
+    elif len(armies) != 2:
+        reason = "missing-army-benchmark-checkpoint"
+    elif any(sum(item.tick == tick for item in checkpoints) != 2 for tick in ticks):
+        reason = "missing-army-benchmark-checkpoint"
+    elif ticks:
+        expected_tick = ticks[0]
+        for tick in ticks:
+            if tick != expected_tick:
+                reason = f"missing-benchmark-tick:{expected_tick}"
+                break
+            expected_tick += 300
+        if reason is None and ticks[0] != 300:
+            reason = "missing-benchmark-tick:300"
+    elif wrong_run_seen:
+        reason = "wrong-run-benchmark-checkpoint"
+
+    return tuple(checkpoints), reason
+
+
+_OPERATION_PHASES = frozenset(
+    {
+        "opportunity",
+        "selected",
+        "admitted",
+        "ordered",
+        "travelling",
+        "progressing",
+        "completed",
+        "survived",
+        "denied",
+        "rejected",
+        "lost",
+    }
+)
+_OPERATION_TRANSITIONS = {
+    None: frozenset({"opportunity"}),
+    "opportunity": frozenset({"selected"}),
+    "selected": frozenset({"admitted", "denied"}),
+    "admitted": frozenset({"ordered", "rejected"}),
+    "ordered": frozenset({"travelling", "progressing", "completed", "rejected"}),
+    "travelling": frozenset({"progressing", "completed", "rejected"}),
+    "progressing": frozenset({"completed", "rejected"}),
+    "completed": frozenset({"survived", "lost"}),
+    "survived": frozenset(),
+    "denied": frozenset(),
+    "rejected": frozenset(),
+    "lost": frozenset(),
+}
+
+
+def _parse_operation_stream(
+    lines: list[str], our_slot: int
+) -> tuple[tuple[OperationEvent, ...], str | None]:
+    events: list[OperationEvent] = []
+    reason: str | None = None
+    state: dict[tuple[str, str], str] = {}
+    last_tick_by_attempt: dict[tuple[str, str], int] = {}
+    opportunity_seen: set[str] = set()
+
+    for line in lines:
+        fields = _overmind_fields(line)
+        if not fields or fields.get("v") != "1" or fields.get("kind") != "operation":
+            continue
+        tick = _nonnegative_integer(fields.get("tick"))
+        army = _nonnegative_integer(fields.get("army"))
+        operation = fields.get("operation")
+        phase = fields.get("phase")
+        if army != our_slot:
+            continue
+        if _has_duplicate_fields(line, OVERMIND_PREFIX):
+            reason = reason or "malformed-operation-event"
+            continue
+        if (
+            tick is None
+            or not operation
+            or "|" in operation
+            or phase not in _OPERATION_PHASES
+        ):
+            reason = reason or "malformed-operation-event"
+            continue
+        extra = {
+            name: _typed_operation_value(value)
+            for name, value in fields.items()
+            if name not in {"v", "kind", "army", "tick", "operation", "phase"}
+        }
+        numeric_fields = {
+            name: value
+            for name, value in fields.items()
+            if name.endswith("_ticks")
+            or name.endswith("_age")
+            or name in {"attempt", "blocked_count"}
+        }
+        invalid_numeric = any(
+            _finite_nonnegative(value) is None
+            for value in numeric_fields.values()
+        )
+        if (
+            invalid_numeric
+            or (
+                "attempt" in numeric_fields
+                and _nonnegative_integer(numeric_fields["attempt"]) is None
+            )
+        ):
+            reason = reason or "malformed-operation-event"
+            continue
+        event = OperationEvent(
+            tick=tick,
+            army=army,
+            operation=operation,
+            phase=phase,
+            fields=extra,
+        )
+        events.append(event)
+
+        attempt_value = extra.get("attempt", 0)
+        attempt = str(attempt_value)
+        key = (operation, attempt)
+        if phase == "opportunity":
+            if operation in opportunity_seen:
+                reason = reason or f"duplicate-operation-phase:{operation}:opportunity"
+            opportunity_seen.add(operation)
+            continue
+        previous = state.get(key)
+        if previous is None and phase == "selected" and operation in opportunity_seen:
+            allowed = True
+        else:
+            allowed = phase in _OPERATION_TRANSITIONS.get(previous, frozenset())
+        prior_tick = last_tick_by_attempt.get(key)
+        if prior_tick is not None and tick < prior_tick:
+            reason = reason or f"out-of-order-operation:{operation}"
+        elif not allowed:
+            reason = reason or f"impossible-operation-transition:{operation}"
+        state[key] = phase
+        last_tick_by_attempt[key] = tick
+
+    return tuple(events), reason
+
+
 def _number(value: str | None) -> float | None:
     try:
         number = float(value) if value is not None else None
@@ -276,6 +607,12 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
     brain_terminal_results: list[str] = []
     engine_diagnostics_with_lines: list[tuple[int, str]] = []
     lines = text.splitlines()
+    benchmark_checkpoints, benchmark_integrity_reason = _parse_benchmark_stream(
+        lines, run_id
+    )
+    operation_events, operation_integrity_reason = _parse_operation_stream(
+        lines, our_slot
+    )
     stock_warning_ranges = _stock_platoon_warning_ranges(lines)
     stock_warning_headers = {start for start, _ in stock_warning_ranges}
 
@@ -484,6 +821,10 @@ def parse_log(text: str, run_id: str, our_slot: int) -> LogTelemetry:
         result_integrity_reason=result_integrity_reason,
         harness_failure_reason=harness_failure_reason,
         warning_details=warning_details,
+        benchmark_checkpoints=benchmark_checkpoints,
+        benchmark_integrity_reason=benchmark_integrity_reason,
+        operation_events=operation_events,
+        operation_integrity_reason=operation_integrity_reason,
     )
 
 
@@ -620,4 +961,8 @@ def classify_outcome(telemetry: LogTelemetry, process: ProcessObservation) -> Ou
         lifecycle=telemetry.lifecycle,
         warnings=warnings,
         warning_details=telemetry.warning_details,
+        benchmark_checkpoints=telemetry.benchmark_checkpoints,
+        benchmark_integrity_reason=telemetry.benchmark_integrity_reason,
+        operation_events=telemetry.operation_events,
+        operation_integrity_reason=telemetry.operation_integrity_reason,
     )

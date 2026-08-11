@@ -5,6 +5,7 @@ local MapUtils = import('/lua/ui/maputil.lua')
 local Mods = import('/lua/mods.lua')
 local Lobby = import('/lua/ui/lobby/lobbycomm.lua')
 local GameColors = import('/lua/gamecolors.lua').GameColors
+local Overmind4Benchmark = import('/lua/Overmind4Benchmark.lua').Overmind4Benchmark
 
 local ModUid = '0d46fbb2-beeb-4bde-b3c6-8bac28232a4b'
 
@@ -140,6 +141,23 @@ local function StartSpeedAndTimeoutThread(runId, speed, maxGameTime)
     end)
 end
 
+local function StartBenchmarkThread(runId, specs)
+    ForkThread(function()
+        while not WorldIsPlaying() do
+            coroutine.yield(1)
+        end
+
+        local observer = Overmind4Benchmark.Create(runId, {
+            specs[1].Spawn,
+            specs[2].Spawn,
+        }, LOG)
+        while true do
+            Overmind4Benchmark.Step(observer, GetGameTick())
+            coroutine.yield(30)
+        end
+    end)
+end
+
 function StartCommandLineSession(mapName, isPerfTest)
     local runId = RequiredArg('/om4runid', 'unknown')
     if not SafeIdentifier(runId) then
@@ -269,5 +287,6 @@ function StartCommandLineSession(mapName, isPerfTest)
         'ais=' .. Safe(aiText),
     })
     StartSpeedAndTimeoutThread(runId, speed, maxGameTime)
+    StartBenchmarkThread(runId, specs)
     LaunchSinglePlayerSession(sessionInfo)
 end

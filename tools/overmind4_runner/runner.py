@@ -23,7 +23,7 @@ from .model import FAF_BUILD, FAF_COMMIT, MOD_UID, RunConfig
 from .parsing import Outcome, ProcessObservation, classify_outcome, parse_log
 from .plan import ArtifactPaths, build_argv
 from .process import Monitor, ProcessHandle, spawn_owned
-from .reporting import render_json, render_markdown
+from .reporting import evaluate_parity, render_json, render_markdown
 
 
 Spawn = Callable[[list[str], Path], ProcessHandle]
@@ -171,14 +171,25 @@ def fingerprint_map(map_id: str, roots: tuple[Path, ...]) -> dict[str, object]:
             f"map folder {map_directory} must contain exactly one scenario file; "
             f"found {len(scenarios)}"
         )
+    scenario_source = scenarios[0].read_text("utf-8")
     match = re.search(
         r"(?m)^\s*version\s*=\s*(\d+)\s*$",
-        scenarios[0].read_text("utf-8"),
+        scenario_source,
     )
     if not match:
         raise MapDiscoveryError(f"map scenario does not declare a numeric version: {scenarios[0]}")
     version = int(match.group(1))
-    return {"version": version, "sha256": _hash_files(files, map_directory)}
+    fingerprint: dict[str, object] = {
+        "version": version,
+        "sha256": _hash_files(files, map_directory),
+    }
+    size_match = re.search(
+        r"\bsize\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*\}", scenario_source
+    )
+    if size_match:
+        width, height = (int(value) for value in size_match.groups())
+        fingerprint["size_km"] = int(round(max(width, height) / 51.2))
+    return fingerprint
 
 
 @dataclass(frozen=True)
@@ -300,6 +311,7 @@ class Runner:
         with paths.prefs_path.open("x", encoding="utf-8", newline="") as handle:
             handle.write(ISOLATED_PREFS)
         created_at = deps.utc_now()
+        overmind_content_sha256 = deps.content_hash(self.repository)
         manifest = {
             "schema_version": 1,
             "run_id": run_id,
@@ -316,7 +328,7 @@ class Runner:
             "overmind4": {
                 "uid": MOD_UID,
                 "git_commit": deps.git_commit(self.repository),
-                "content_sha256": deps.content_hash(self.repository),
+                "content_sha256": overmind_content_sha256,
             },
             "config": config.document(),
             "config_sha256": _config_hash(config),
@@ -408,6 +420,23 @@ class Runner:
         )
         telemetry = parse_log(log_text, run_id, config.our_slot)
         outcome = classify_outcome(telemetry, observation)
+        parity_result = None
+        if config.opponent_ai.lower() == "adaptive":
+            parity_result = evaluate_parity(
+                telemetry,
+                our_army=config.our_slot,
+                opponent_army=config.opponent_slot,
+                map_size_km=map_data.get("size_km", 0),
+                official_result=telemetry.official_result,
+                operational_failure=outcome.failure_reason,
+                seed=config.seed,
+                spawn=(
+                    "normal"
+                    if config.our_slot < config.opponent_slot
+                    else "swapped"
+                ),
+                benchmark_config=overmind_content_sha256,
+            )
         completed_at = deps.utc_now()
         artifacts_present = {
             "log": paths.log_path.is_file(),
@@ -419,11 +448,14 @@ class Runner:
                 run_id,
                 completed_at=completed_at,
                 artifacts_present=artifacts_present,
+                parity_result=parity_result,
             ),
             encoding="utf-8",
             newline="",
         )
         paths.report_markdown_path.write_text(
-            render_markdown(outcome, run_id), encoding="utf-8", newline=""
+            render_markdown(outcome, run_id, parity_result=parity_result),
+            encoding="utf-8",
+            newline="",
         )
         return RunnerResult(run_id, False, paths, argv, outcome)
