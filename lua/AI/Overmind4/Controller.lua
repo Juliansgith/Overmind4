@@ -9063,6 +9063,7 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
                             siteKey = mission.siteKey,
                             position = CopyPosition(mission.dropPosition),
                             completedTick = observation.tick,
+                            clearanceOrdered = mission.deliveryClearanceQueued == true,
                         }
                     end
                     local transportRecord = records[mission.transportToken]
@@ -11459,6 +11460,21 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
     -- clearance move abandons, making the mex footprint unbuildable. The
     -- delivery state issues the build from a detached, observed engineer.
     local buildQueued = false
+    local clearanceQueued = false
+    if cargoActor and buildPosition and unloadPosition then
+        local dx = unloadPosition[1] - buildPosition[1]
+        local dz = unloadPosition[3] - buildPosition[3]
+        local length = math.sqrt(dx * dx + dz * dz)
+        if length > 0.01 then
+            local clearancePosition = TerrainPosition({
+                buildPosition[1] + dx * 20 / length,
+                0,
+                buildPosition[3] + dz * 20 / length,
+            })
+            clearanceQueued = clearancePosition ~= nil
+                and pcall(function() IssueMove({ cargoActor }, clearancePosition) end)
+        end
+    end
     Emit(controller, 'airlift_build_queue', {
         actor = cargoToken or 'none',
         actor_live = cargoActor ~= nil,
@@ -11473,6 +11489,7 @@ ESCALATION.ExecuteTransportUnload = function(controller, intent, records, usedAc
         { kind = 'unload_ordered', tick = CurrentTick(controller) }
     ) or mission
     mission.deliveryBuildQueued = buildQueued == true
+    mission.deliveryClearanceQueued = clearanceQueued == true
     controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
     usedActors[intent.transportToken] = true
     return true
