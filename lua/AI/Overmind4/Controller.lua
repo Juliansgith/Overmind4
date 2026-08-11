@@ -9146,6 +9146,7 @@ ESCALATION.RecordExpansionDenials = function(controller, denials)
                 reason = denial.reason or 'planner_denied',
                 site = denial.siteKey,
                 actor = denial.actorToken,
+                blocked_count = tonumber(denial.blockedCount),
             }
             ESCALATION.EmitOperationPhase(controller, id, 'opportunity')
             ESCALATION.EmitOperationPhase(controller, id, 'selected')

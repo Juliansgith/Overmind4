@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
+from itertools import permutations
 from typing import Any
 
 import pytest
@@ -682,10 +683,10 @@ class TestRegionalMacro:
         assert result["jobs"][0]["actorToken"] == "eng-z"
         assert result["jobs"][0]["siteKey"] == "site"
 
-    def test_site_quarantine_pairing_is_stable_under_all_input_orders(self) -> None:
+    def test_site_quarantine_maximizes_cardinality_under_all_input_orders(self) -> None:
         engineers = [
             {"token": "72:2", "position": [11, 0, 20], "available": True},
-            {"token": "73:1", "position": [13, 0, 20], "available": True},
+            {"token": "73:1", "position": [39, 0, 40], "available": True},
         ]
         sites = [
             mass_site("near", 12, 20, region="near-region"),
@@ -717,6 +718,439 @@ class TestRegionalMacro:
                     "near": "73:1",
                     "far": "72:2",
                 }
+
+    def test_three_way_constraints_maximize_cardinality_under_all_permutations(
+        self,
+    ) -> None:
+        engineers = [
+            {"token": "eng-a", "position": [150, 0, 0], "available": True},
+            {"token": "eng-b", "position": [101, 0, 0], "available": True},
+            {"token": "eng-c", "position": [200, 0, 0], "available": True},
+        ]
+        sites = [
+            mass_site("site-a", 0, 0, region="region-a"),
+            mass_site("site-b", 100, 0, region="region-b"),
+            mass_site("site-c", 200, 0, region="region-c"),
+        ]
+        blocked = {
+            "site-a": {"eng-a": True, "eng-b": True},
+            "site-b": {"eng-a": True},
+        }
+
+        for engineer_order in permutations(engineers):
+            for site_order in permutations(sites):
+                jobs = invoke(
+                    MODULE,
+                    GLOBAL,
+                    "PlanExpansion",
+                    {
+                        "fundedExpansionSlots": 3,
+                        "engineers": copy.deepcopy(engineer_order),
+                        "sites": copy.deepcopy(site_order),
+                        "regions": [],
+                        "blockedActorTokensBySite": blocked,
+                    },
+                )["jobs"]
+
+                assert {job["siteKey"]: job["actorToken"] for job in jobs} == {
+                    "site-a": "eng-c",
+                    "site-b": "eng-b",
+                    "site-c": "eng-a",
+                }
+
+    @pytest.mark.parametrize(
+        ("engineer_count", "sites", "expected"),
+        (
+            (0, [mass_site("a", 10, 0)], 0),
+            (2, [], 0),
+            (1, [mass_site("a", 10, 0), mass_site("b", 20, 0)], 1),
+            (
+                2,
+                [
+                    mass_site("a", 10, 0),
+                    mass_site("b", 20, 0),
+                    mass_site("c", 30, 0),
+                ],
+                2,
+            ),
+            (3, [mass_site("a", 10, 0)], 1),
+            (
+                3,
+                [
+                    mass_site("a", 10, 0, region="shared"),
+                    mass_site("b", 20, 0, region="shared"),
+                ],
+                1,
+            ),
+        ),
+    )
+    def test_expansion_matching_is_bounded_by_actors_sites_and_regions(
+        self,
+        engineer_count: int,
+        sites: list[dict[str, Any]],
+        expected: int,
+    ) -> None:
+        jobs = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 4,
+                "engineers": [
+                    {
+                        "token": f"eng-{index}",
+                        "position": [0, 0, 0],
+                        "available": True,
+                    }
+                    for index in range(engineer_count)
+                ],
+                "sites": sites,
+                "regions": [],
+            },
+        )["jobs"]
+
+        assert len(jobs) == expected
+
+    def test_equal_cost_matching_has_one_stable_actor_site_assignment(self) -> None:
+        engineers = [
+            {"token": "eng-a", "position": [0, 0, 0], "available": True},
+            {"token": "eng-b", "position": [0, 0, 0], "available": True},
+        ]
+        sites = [
+            mass_site("site-a", 10, 0, region="region-a"),
+            mass_site("site-b", 0, 10, region="region-b"),
+        ]
+        observed = []
+
+        for engineer_order in permutations(engineers):
+            for site_order in permutations(sites):
+                jobs = invoke(
+                    MODULE,
+                    GLOBAL,
+                    "PlanExpansion",
+                    {
+                        "fundedExpansionSlots": 2,
+                        "engineers": copy.deepcopy(engineer_order),
+                        "sites": copy.deepcopy(site_order),
+                        "regions": [],
+                    },
+                )["jobs"]
+                observed.append(
+                    {job["siteKey"]: job["actorToken"] for job in jobs}
+                )
+
+        assert observed == [observed[0]] * len(observed)
+        assert observed[0] == {"site-a": "eng-a", "site-b": "eng-b"}
+
+    def test_maximum_cardinality_then_minimizes_global_total_distance(self) -> None:
+        engineers = [
+            {"token": "eng-a", "position": [0, 0, 0], "available": True},
+            {"token": "eng-b", "position": [10, 0, 0], "available": True},
+        ]
+        sites = [
+            mass_site("site-x", 9, 0, region="region-x"),
+            mass_site("site-y", 20, 0, region="region-y"),
+        ]
+
+        for engineer_order in permutations(engineers):
+            for site_order in permutations(sites):
+                jobs = invoke(
+                    MODULE,
+                    GLOBAL,
+                    "PlanExpansion",
+                    {
+                        "fundedExpansionSlots": 2,
+                        "engineers": copy.deepcopy(engineer_order),
+                        "sites": copy.deepcopy(site_order),
+                        "regions": [],
+                    },
+                )["jobs"]
+
+                assert {job["siteKey"]: job["actorToken"] for job in jobs} == {
+                    "site-x": "eng-a",
+                    "site-y": "eng-b",
+                }
+
+    def test_four_slot_kernel_retains_required_fourth_ranked_edge(self) -> None:
+        engineers = [
+            {"token": token, "position": [0, 0, 0], "available": True}
+            for token in ("eng-a", "eng-b", "eng-c", "eng-d")
+        ]
+        sites = [
+            mass_site(f"site-{index}", index, 0, region=f"region-{index}")
+            for index in range(1, 7)
+        ]
+        blocked = {
+            "site-1": {"eng-c": True, "eng-d": True},
+            "site-2": {"eng-b": True, "eng-d": True},
+            "site-3": {"eng-b": True, "eng-c": True},
+        }
+        for site in ("site-4", "site-5", "site-6"):
+            blocked[site] = {"eng-b": True, "eng-c": True, "eng-d": True}
+
+        jobs = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 4,
+                "engineers": engineers,
+                "sites": sites,
+                "regions": [],
+                "blockedActorTokensBySite": blocked,
+            },
+        )["jobs"]
+
+        assert len(jobs) == 4
+        assert {job["actorToken"] for job in jobs} == {
+            "eng-a",
+            "eng-b",
+            "eng-c",
+            "eng-d",
+        }
+        assert next(job for job in jobs if job["actorToken"] == "eng-a")[
+            "siteKey"
+        ] == "site-4"
+
+    def test_lost_mex_priority_survives_remote_escort_feasibility(self) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 1,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng", "position": [0, 0, 0], "available": True}
+                ],
+                "sites": [
+                    mass_site("new", 1, 0, region="new"),
+                    mass_site("lost", 100, 0, region="lost", lost=True),
+                ],
+                "regions": [],
+                "escorts": [
+                    {"token": "aa", "role": "anti_air", "available": True},
+                    {"token": "tank", "role": "tank", "available": True},
+                ],
+            },
+        )
+
+        assert len(result["jobs"]) == 1
+        assert result["jobs"][0]["siteKey"] == "lost"
+        assert result["jobs"][0]["kind"] == "rebuild_mex"
+        assert result["jobs"][0]["escortTokens"] == ["aa", "tank"]
+
+    def test_same_region_local_fallback_survives_remote_candidate_quota(self) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 1,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng", "position": [0, 0, 0], "available": True}
+                ],
+                "sites": [
+                    mass_site("local", 1, 0, region="shared"),
+                    mass_site("lost-remote", 100, 0, region="shared", lost=True),
+                ],
+                "regions": [],
+                "escorts": [],
+            },
+        )
+
+        assert len(result["jobs"]) == 1
+        assert result["jobs"][0]["siteKey"] == "local"
+        assert result["jobs"][0]["requiresEscort"] is False
+        assert result["denials"] == {}
+
+    @pytest.mark.parametrize("duplicate_kind", ("engineer", "site"))
+    def test_duplicate_actor_or_site_identity_cannot_create_two_jobs(
+        self, duplicate_kind: str
+    ) -> None:
+        engineers = [
+            {"token": "eng-a", "position": [0, 0, 0], "available": True},
+            {"token": "eng-b", "position": [5, 0, 0], "available": True},
+        ]
+        sites = [
+            mass_site("site-a", 10, 0, region="region-a"),
+            mass_site("site-b", 20, 0, region="region-b"),
+        ]
+        if duplicate_kind == "engineer":
+            engineers[1] = {
+                "token": "eng-a",
+                "position": [5, 0, 0],
+                "available": True,
+            }
+        else:
+            sites[1] = mass_site("site-a", 20, 0, region="other-region")
+
+        observed = []
+        for reverse_engineers in (False, True):
+            for reverse_sites in (False, True):
+                ordered_engineers = copy.deepcopy(engineers)
+                ordered_sites = copy.deepcopy(sites)
+                if reverse_engineers:
+                    ordered_engineers.reverse()
+                if reverse_sites:
+                    ordered_sites.reverse()
+                observed.append(
+                    invoke(
+                        MODULE,
+                        GLOBAL,
+                        "PlanExpansion",
+                        {
+                            "fundedExpansionSlots": 2,
+                            "engineers": ordered_engineers,
+                            "sites": ordered_sites,
+                            "regions": [],
+                        },
+                    )["jobs"]
+                )
+
+        assert observed == [{}] * len(observed)
+
+    @pytest.mark.parametrize("duplicate_kind", ("engineer", "site"))
+    def test_exact_duplicate_actor_or_site_identity_deduplicates_stably(
+        self, duplicate_kind: str
+    ) -> None:
+        engineer = {
+            "token": "eng",
+            "position": [0, 0, 0],
+            "available": True,
+        }
+        site = mass_site("site", 10, 0, region="region")
+        engineers = [copy.deepcopy(engineer)]
+        sites = [copy.deepcopy(site)]
+        if duplicate_kind == "engineer":
+            engineers.append(copy.deepcopy(engineer))
+        else:
+            sites.append(copy.deepcopy(site))
+
+        observed = []
+        for reverse_engineers in (False, True):
+            for reverse_sites in (False, True):
+                ordered_engineers = copy.deepcopy(engineers)
+                ordered_sites = copy.deepcopy(sites)
+                if reverse_engineers:
+                    ordered_engineers.reverse()
+                if reverse_sites:
+                    ordered_sites.reverse()
+                observed.append(
+                    invoke(
+                        MODULE,
+                        GLOBAL,
+                        "PlanExpansion",
+                        {
+                            "fundedExpansionSlots": 2,
+                            "engineers": ordered_engineers,
+                            "sites": ordered_sites,
+                            "regions": [],
+                        },
+                    )["jobs"]
+                )
+
+        assert observed == [observed[0]] * len(observed)
+        assert len(observed[0]) == 1
+        assert observed[0][0]["actorToken"] == "eng"
+        assert observed[0][0]["siteKey"] == "site"
+
+    @pytest.mark.parametrize("malformed_side", ("engineer", "site"))
+    def test_matching_rejects_malformed_positions_without_throwing(
+        self, malformed_side: str
+    ) -> None:
+        engineer = {
+            "token": "eng",
+            "position": [0, 0, 0],
+            "available": True,
+        }
+        site = mass_site("site", 10, 0, region="region")
+        if malformed_side == "engineer":
+            engineer["position"] = [float("nan"), 0, 0]
+        else:
+            site["position"] = [10, 0]
+
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 1,
+                "engineers": [engineer],
+                "sites": [site],
+                "regions": [],
+            },
+        )
+
+        assert result == {"jobs": {}, "denials": {}}
+
+    def test_matching_ignores_reserved_unreachable_and_disconnected_sites(self) -> None:
+        reserved = mass_site("reserved", 1, 0, region="reserved-region")
+        reserved["reserved"] = True
+        unreachable = mass_site("unreachable", 2, 0, region="unreachable-region")
+        unreachable["reachable"] = False
+        unbuildable = mass_site("unbuildable", 4, 0, region="unbuildable-region")
+        unbuildable["buildable"] = False
+        owned = mass_site("owned", 5, 0, region="owned-region", owned=True)
+        jobs = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 2,
+                "engineers": [
+                    {"token": "eng-a", "position": [0, 0, 0], "available": True},
+                    {"token": "eng-b", "position": [5, 0, 0], "available": True},
+                ],
+                "sites": [
+                    reserved,
+                    unreachable,
+                    unbuildable,
+                    owned,
+                    mass_site("valid-a", 10, 0, region="valid-a"),
+                    mass_site("valid-b", 20, 0, region="valid-b"),
+                    mass_site("disconnected", 3, 0, region="disconnected"),
+                    mass_site("suspended", 6, 0, region="suspended"),
+                ],
+                "regions": [
+                    {"key": "disconnected", "connected": False},
+                    {"key": "suspended", "state": "suspended"},
+                ],
+            },
+        )["jobs"]
+
+        assert {job["siteKey"] for job in jobs} == {"valid-a", "valid-b"}
+
+    def test_matching_filters_incomplete_dead_unowned_and_unavailable_actors(self) -> None:
+        actor_template = {
+            "position": [0, 0, 0],
+            "available": True,
+            "complete": True,
+            "live": True,
+            "owned": True,
+        }
+        engineers = [
+            {**actor_template, "token": "incomplete", "complete": False},
+            {**actor_template, "token": "dead", "live": False},
+            {**actor_template, "token": "captured", "owned": False},
+            {**actor_template, "token": "busy", "available": False},
+            {**actor_template, "token": "valid", "position": [50, 0, 0]},
+        ]
+
+        jobs = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 1,
+                "engineers": engineers,
+                "sites": [mass_site("site", 1, 0)],
+                "regions": [],
+            },
+        )["jobs"]
+
+        assert [job["actorToken"] for job in jobs] == ["valid"]
 
     def test_multiple_funded_slots_choose_distinct_sites_and_regions(self) -> None:
         snapshot = {
@@ -776,6 +1210,228 @@ class TestRegionalMacro:
         assert len(jobs) == 2
         assert set(jobs[0]["escortTokens"]).isdisjoint(jobs[1]["escortTokens"])
         assert len({token for job in jobs for token in job["escortTokens"]}) == 4
+
+    def test_remote_actor_site_and_escort_pairing_is_permutation_stable(self) -> None:
+        engineers = [
+            {"token": "eng-a", "position": [0, 0, 0], "available": True},
+            {"token": "eng-b", "position": [10, 0, 0], "available": True},
+        ]
+        sites = [
+            mass_site("site-a", 300, 0, region="region-a"),
+            mass_site("site-b", 400, 0, region="region-b"),
+        ]
+        escorts = [
+            {"token": "aa-a", "role": "anti_air", "available": True},
+            {"token": "aa-b", "role": "anti_air", "available": True},
+            {"token": "tank-a", "role": "tank", "available": True},
+            {"token": "tank-b", "role": "tank", "available": True},
+        ]
+        observed = []
+
+        for reverse_engineers in (False, True):
+            for reverse_sites in (False, True):
+                for reverse_escorts in (False, True):
+                    ordered_engineers = copy.deepcopy(engineers)
+                    ordered_sites = copy.deepcopy(sites)
+                    ordered_escorts = copy.deepcopy(escorts)
+                    if reverse_engineers:
+                        ordered_engineers.reverse()
+                    if reverse_sites:
+                        ordered_sites.reverse()
+                    if reverse_escorts:
+                        ordered_escorts.reverse()
+                    jobs = invoke(
+                        MODULE,
+                        GLOBAL,
+                        "PlanExpansion",
+                        {
+                            "fundedExpansionSlots": 2,
+                            "controlledRadius": 60,
+                            "engineers": ordered_engineers,
+                            "sites": ordered_sites,
+                            "regions": [],
+                            "escorts": ordered_escorts,
+                        },
+                    )["jobs"]
+                    observed.append(
+                        sorted(
+                            (
+                                job["siteKey"],
+                                job["actorToken"],
+                                tuple(job["escortTokens"]),
+                            )
+                            for job in jobs
+                        )
+                    )
+
+        assert observed == [observed[0]] * len(observed)
+        assert len({token for job in observed[0] for token in job[2]}) == 4
+
+    def test_remote_matching_is_bounded_by_disjoint_complete_escort_pairs(self) -> None:
+        jobs = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 3,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng-a", "position": [0, 0, 0], "available": True},
+                    {"token": "eng-b", "position": [5, 0, 0], "available": True},
+                    {"token": "eng-c", "position": [10, 0, 0], "available": True},
+                ],
+                "sites": [
+                    mass_site("site-a", 300, 0, region="region-a"),
+                    mass_site("site-b", 400, 0, region="region-b"),
+                    mass_site("site-c", 500, 0, region="region-c"),
+                ],
+                "regions": [],
+                "escorts": [
+                    {"token": "aa-a", "role": "anti_air", "available": True},
+                    {"token": "aa-b", "role": "anti_air", "available": True},
+                    {"token": "tank-a", "role": "tank", "available": True},
+                    {"token": "tank-b", "role": "tank", "available": True},
+                    {"token": "tank-extra", "role": "tank", "available": True},
+                ],
+            },
+        )["jobs"]
+
+        assert len(jobs) == 2
+        escort_tokens = [token for job in jobs for token in job["escortTokens"]]
+        assert len(escort_tokens) == 4
+        assert len(set(escort_tokens)) == 4
+
+    def test_one_escort_identity_cannot_fill_both_roles_or_multiple_pairs(self) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 2,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng-a", "position": [0, 0, 0], "available": True},
+                    {"token": "eng-b", "position": [5, 0, 0], "available": True},
+                ],
+                "sites": [
+                    mass_site("site-a", 300, 0, region="region-a"),
+                    mass_site("site-b", 400, 0, region="region-b"),
+                ],
+                "regions": [],
+                "escorts": [
+                    {"token": "shared", "role": "anti_air", "available": True},
+                    {"token": "shared", "role": "tank", "available": True},
+                    {"token": "tank", "role": "tank", "available": True},
+                ],
+            },
+        )
+
+        assert result["jobs"] == {}
+        assert len(result["denials"]) == 2
+
+    def test_remote_capacity_denials_never_conflict_with_issued_jobs(self) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 3,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng-a", "position": [0, 0, 0], "available": True},
+                    {"token": "eng-b", "position": [5, 0, 0], "available": True},
+                    {"token": "eng-c", "position": [10, 0, 0], "available": True},
+                ],
+                "sites": [
+                    mass_site("site-a", 300, 0, region="region-a"),
+                    mass_site("site-b", 400, 0, region="region-b"),
+                    mass_site("site-c", 500, 0, region="region-c"),
+                ],
+                "regions": [],
+                "escorts": [
+                    {"token": "aa", "role": "anti_air", "available": True},
+                    {"token": "tank", "role": "tank", "available": True},
+                ],
+            },
+        )
+
+        assert len(result["jobs"]) == 1
+        assert len(result["denials"]) == 2
+        assert {job["siteKey"] for job in result["jobs"]}.isdisjoint(
+            denial["siteKey"] for denial in result["denials"]
+        )
+        assert len({denial["siteKey"] for denial in result["denials"]}) == 2
+        assert {denial["reason"] for denial in result["denials"]} == {
+            "escort_not_ready"
+        }
+
+    def test_remote_denial_survives_augmenting_actor_reassignment(self) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 2,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng-a", "position": [0, 0, 0], "available": True},
+                    {"token": "eng-b", "position": [0, 0, 0], "available": True},
+                ],
+                "sites": [
+                    mass_site("local", 0, 0, region="local"),
+                    mass_site("remote", 100, 0, region="remote"),
+                ],
+                "regions": [],
+                "blockedActorTokensBySite": {"remote": {"eng-b": True}},
+                "escorts": [],
+            },
+        )
+
+        assert len(result["jobs"]) == 1
+        assert result["jobs"][0]["siteKey"] == "local"
+        assert len(result["denials"]) == 1
+        assert result["denials"][0]["siteKey"] == "remote"
+        assert result["denials"][0]["actorToken"] == "eng-a"
+
+    def test_nonrepresentable_remote_gap_emits_one_truthful_aggregate_denial(
+        self,
+    ) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 3,
+                "controlledRadius": 5,
+                "engineers": [
+                    {"token": "e0", "position": [5, 0, 0], "available": True},
+                    {"token": "e1", "position": [0, 0, 0], "available": True},
+                    {"token": "e2", "position": [10, 0, 0], "available": True},
+                    {"token": "e3", "position": [14, 0, 0], "available": True},
+                ],
+                "sites": [
+                    mass_site("s0", 2, 0, region="r0"),
+                    mass_site("s1", 10, 0, region="r1"),
+                    mass_site("s2", 1, 0, region="r2"),
+                ],
+                "regions": [],
+                "blockedActorTokensBySite": {
+                    "s0": {"e1": True},
+                    "s1": {"e1": True, "e2": True, "e3": True},
+                    "s2": {"e2": True},
+                },
+                "escorts": [],
+            },
+        )
+
+        assert len(result["jobs"]) == 2
+        assert result["denials"] == [
+            {
+                "id": "expansion:escort-capacity",
+                "reason": "escort_capacity_limited",
+                "blockedCount": 1,
+            }
+        ]
 
     def test_active_region_package_persists_factory_radar_defenses_and_garrison(self) -> None:
         plan = invoke(

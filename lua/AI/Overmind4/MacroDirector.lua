@@ -328,12 +328,54 @@ local function RegionEligible(region)
     return region.state ~= 'suspended'
 end
 
+local function NormalizedPosition(position)
+    if type(position) ~= 'table' then return nil end
+    local x = Number(position[1], nil)
+    local z = Number(position[3], nil)
+    if x == nil or z == nil then return nil end
+    return { x, SignedNumber(position[2], 0) or 0, z }
+end
+
+local function SamePosition(left, right)
+    if not left or not right then return left == right end
+    return left[1] == right[1] and left[2] == right[2] and left[3] == right[3]
+end
+
+local function EngineerRecord(engineer)
+    local position = NormalizedPosition(engineer.position)
+    local eligible = engineer.available == true and engineer.complete ~= false
+        and engineer.live ~= false and engineer.owned ~= false
+    return {
+        token = engineer.token,
+        position = position,
+        eligible = eligible and position ~= nil,
+    }
+end
+
+local function SameEngineerRecord(left, right)
+    return left.eligible == right.eligible
+        and SamePosition(left.position, right.position)
+end
+
 local function AvailableEngineers(engineers)
+    local byToken = {}
+    local conflicted = {}
     local result = {}
     for _, engineer in ipairs(engineers or {}) do
-        if type(engineer.token) == 'string' and engineer.available == true
-            and engineer.live ~= false and engineer.owned ~= false
+        if type(engineer) == 'table' and type(engineer.token) == 'string'
+            and engineer.token ~= ''
         then
+            local normalized = EngineerRecord(engineer)
+            local existing = byToken[engineer.token]
+            if existing and not SameEngineerRecord(existing, normalized) then
+                conflicted[engineer.token] = true
+            elseif not existing then
+                byToken[engineer.token] = normalized
+            end
+        end
+    end
+    for token, engineer in pairs(byToken) do
+        if not conflicted[token] and engineer.eligible then
             table.insert(result, engineer)
         end
     end
@@ -341,16 +383,69 @@ local function AvailableEngineers(engineers)
     return result
 end
 
+local function RegionEligibility(regions)
+    local result = {}
+    local conflicted = {}
+    for _, region in ipairs(regions or {}) do
+        if type(region) == 'table' and type(region.key) == 'string' then
+            local eligible = RegionEligible(region)
+            if result[region.key] ~= nil and result[region.key] ~= eligible then
+                conflicted[region.key] = true
+            else
+                result[region.key] = eligible
+            end
+        end
+    end
+    for key in pairs(conflicted) do result[key] = false end
+    return result
+end
+
+local function SiteRecord(site, regionEligibility)
+    local regionKey = type(site.regionKey) == 'string'
+        and site.regionKey or site.key
+    local position = NormalizedPosition(site.position)
+    local regionEligible = regionEligibility[regionKey]
+    if regionEligible == nil then regionEligible = true end
+    local eligible = site.reachable ~= false and site.buildable ~= false
+        and site.reserved ~= true and site.owned ~= true and regionEligible
+    return {
+        key = site.key,
+        regionKey = regionKey,
+        position = position,
+        lost = site.lost == true,
+        value = Number(site.value, 0) or 0,
+        eligible = eligible and position ~= nil,
+    }
+end
+
+local function SameSiteRecord(left, right)
+    return left.regionKey == right.regionKey
+        and left.lost == right.lost
+        and left.value == right.value
+        and left.eligible == right.eligible
+        and SamePosition(left.position, right.position)
+end
+
 local function EligibleSites(snapshot)
-    local regions = IndexBy(snapshot.regions or {}, 'key')
+    local regionEligibility = RegionEligibility(snapshot.regions)
+    local byKey = {}
+    local conflicted = {}
     local result = {}
     for _, site in ipairs(snapshot.sites or {}) do
-        if type(site.key) == 'string' and site.reachable ~= false
-            and site.buildable ~= false and site.reserved ~= true
-            and site.owned ~= true and RegionEligible(regions[site.regionKey])
+        if type(site) == 'table' and type(site.key) == 'string'
+            and site.key ~= ''
         then
-            table.insert(result, site)
+            local normalized = SiteRecord(site, regionEligibility)
+            local existing = byKey[site.key]
+            if existing and not SameSiteRecord(existing, normalized) then
+                conflicted[site.key] = true
+            elseif not existing then
+                byKey[site.key] = normalized
+            end
         end
+    end
+    for key, site in pairs(byKey) do
+        if not conflicted[key] and site.eligible then table.insert(result, site) end
     end
     table.sort(result, function(a, b)
         if (a.lost == true) ~= (b.lost == true) then return a.lost == true end
@@ -361,16 +456,32 @@ local function EligibleSites(snapshot)
 end
 
 local function EscortTokens(escorts, claimed)
+    local seen = {}
+    local conflicted = {}
     local aa = {}
     local land = {}
     for _, escort in ipairs(escorts or {}) do
-        if escort.available == true and escort.live ~= false and escort.owned ~= false
-            and type(escort.token) == 'string' and not (claimed or {})[escort.token]
+        if type(escort) == 'table' and type(escort.token) == 'string'
+            and escort.token ~= ''
         then
-            if escort.role == 'anti_air' or escort.role == 't2_anti_air' then
-                table.insert(aa, escort.token)
+            local eligible = escort.available == true and escort.complete ~= false
+                and escort.live ~= false and escort.owned ~= false
+            local role = (escort.role == 'anti_air' or escort.role == 't2_anti_air')
+                and 'anti_air' or 'land'
+            local existing = seen[escort.token]
+            if existing and (existing.eligible ~= eligible or existing.role ~= role) then
+                conflicted[escort.token] = true
+            elseif not existing then
+                seen[escort.token] = { eligible = eligible, role = role }
+            end
+        end
+    end
+    for token, escort in pairs(seen) do
+        if escort.eligible and not conflicted[token] and not (claimed or {})[token] then
+            if escort.role == 'anti_air' then
+                table.insert(aa, token)
             else
-                table.insert(land, escort.token)
+                table.insert(land, token)
             end
         end
     end
@@ -382,6 +493,431 @@ local function EscortTokens(escorts, claimed)
     return result
 end
 
+local function MatchCostZero()
+    return { 0, 0, 0, 0 }
+end
+
+local function MatchCostAddAssignment(left, assignment)
+    return {
+        left[1] + (assignment.site.lost == true and 0 or 1),
+        left[2] + (assignment.remote == true and 1 or 0),
+        left[3] - (Number(assignment.site.value, 0) or 0),
+        left[4] + assignment.distance,
+    }
+end
+
+local function MatchCostAdd(left, right)
+    return {
+        left[1] + right[1], left[2] + right[2],
+        left[3] + right[3], left[4] + right[4],
+    }
+end
+
+local function MatchCostNegate(cost)
+    return { -cost[1], -cost[2], -cost[3], -cost[4] }
+end
+
+local function MatchCostLess(left, right)
+    if not right then return true end
+    for index = 1, 4 do
+        if left[index] ~= right[index] then
+            return left[index] < right[index]
+        end
+    end
+    return false
+end
+
+local function AssignmentPreferred(left, right)
+    if not right then return true end
+    if (left.site.lost == true) ~= (right.site.lost == true) then
+        return left.site.lost == true
+    end
+    if left.remote ~= right.remote then return left.remote ~= true end
+    local leftValue = Number(left.site.value, 0) or 0
+    local rightValue = Number(right.site.value, 0) or 0
+    if leftValue ~= rightValue then return leftValue > rightValue end
+    if left.distance ~= right.distance then return left.distance < right.distance end
+    if tostring(left.regionKey) ~= tostring(right.regionKey) then
+        return tostring(left.regionKey) < tostring(right.regionKey)
+    end
+    if tostring(left.site.key) ~= tostring(right.site.key) then
+        return tostring(left.site.key) < tostring(right.site.key)
+    end
+    return left.engineer.token < right.engineer.token
+end
+
+local function ExpansionCandidates(engineers, sites, blockedBySite, controlledRadius,
+    remoteOnly)
+    local result = {}
+    for engineerIndex, engineer in ipairs(engineers) do
+        local byRegion = {}
+        for _, site in ipairs(sites) do
+            local blockedActors = type(blockedBySite[site.key]) == 'table'
+                and blockedBySite[site.key] or {}
+            if blockedActors[engineer.token] ~= true then
+                local distance = Distance(engineer.position, site.position)
+                local regionKey = site.regionKey or site.key
+                local candidate = {
+                    engineer = engineer,
+                    engineerIndex = engineerIndex,
+                    site = site,
+                    regionKey = regionKey,
+                    distance = distance,
+                    remote = controlledRadius ~= nil and distance > controlledRadius,
+                }
+                local regionCandidates = byRegion[regionKey]
+                if not regionCandidates then
+                    regionCandidates = {}
+                    byRegion[regionKey] = regionCandidates
+                end
+                local classKey = candidate.remote and 'remote' or 'local'
+                if (not remoteOnly or candidate.remote == true)
+                    and AssignmentPreferred(candidate, regionCandidates[classKey])
+                then
+                    regionCandidates[classKey] = candidate
+                end
+            end
+        end
+        local regionKeys = {}
+        for regionKey in pairs(byRegion) do table.insert(regionKeys, regionKey) end
+        table.sort(regionKeys, function(a, b) return tostring(a) < tostring(b) end)
+        for _, regionKey in ipairs(regionKeys) do
+            if byRegion[regionKey]['local'] then
+                table.insert(result, byRegion[regionKey]['local'])
+            end
+            if byRegion[regionKey].remote then
+                table.insert(result, byRegion[regionKey].remote)
+            end
+        end
+    end
+    return result
+end
+
+local function CandidateClass(candidate)
+    return candidate.remote and 'remote' or 'local'
+end
+
+local function CandidateGroups(candidates, keyName)
+    local result = {}
+    for _, candidate in ipairs(candidates) do
+        local identity = tostring(candidate[keyName])
+        local key = tostring(string.len(identity)) .. ':' .. identity
+            .. ':' .. CandidateClass(candidate)
+        if not result[key] then result[key] = {} end
+        table.insert(result[key], candidate)
+    end
+    return result
+end
+
+local function KeepBestCandidatesPerGroup(candidates, keyName, limit)
+    local result = {}
+    local groups = CandidateGroups(candidates, keyName)
+    local keys = {}
+    for key in pairs(groups) do table.insert(keys, key) end
+    table.sort(keys)
+    for _, key in ipairs(keys) do
+        table.sort(groups[key], AssignmentPreferred)
+        for index = 1, math.min(limit, Count(groups[key])) do
+            table.insert(result, groups[key][index])
+        end
+    end
+    return result
+end
+
+local function BoundedExpansionCandidates(candidates, slots)
+    -- A size-K matching cannot need an edge below the K best same-class
+    -- choices at either endpoint: at most K-1 better endpoints can be occupied.
+    local byEngineer = KeepBestCandidatesPerGroup(
+        candidates, 'engineerIndex', slots
+    )
+    local byRegion = KeepBestCandidatesPerGroup(byEngineer, 'regionKey', slots)
+    table.sort(byRegion, AssignmentPreferred)
+    return byRegion
+end
+
+local function PlanSignature(assignments)
+    local parts = {}
+    for _, assignment in ipairs(assignments or {}) do
+        table.insert(parts, tostring(assignment.regionKey) .. ':'
+            .. tostring(assignment.site.key) .. ':'
+            .. tostring(assignment.engineer.token))
+    end
+    table.sort(parts)
+    return table.concat(parts, '|')
+end
+
+local function StatePreferred(left, right)
+    if not right then return true end
+    if left.count ~= right.count then return left.count > right.count end
+    if MatchCostLess(left.cost, right.cost) then return true end
+    if MatchCostLess(right.cost, left.cost) then return false end
+    return left.signature < right.signature
+end
+
+local function CopyIndexSet(source)
+    local result = {}
+    for index in pairs(source or {}) do result[index] = true end
+    return result
+end
+
+local function StateKey(used, size, remoteCount)
+    local parts = {}
+    for index = 1, size do
+        if used[index] then table.insert(parts, tostring(index)) end
+    end
+    return table.concat(parts, ',') .. ':' .. tostring(remoteCount)
+end
+
+local function ExtendedState(state, candidate, usedIndex, usedSize)
+    local assignments = {}
+    for _, assignment in ipairs(state.assignments) do
+        table.insert(assignments, assignment)
+    end
+    table.insert(assignments, candidate)
+    local used = CopyIndexSet(state.used)
+    used[usedIndex] = true
+    return {
+        assignments = assignments,
+        used = used,
+        count = state.count + 1,
+        remoteCount = state.remoteCount + (candidate.remote and 1 or 0),
+        cost = MatchCostAddAssignment(state.cost, candidate),
+        signature = PlanSignature(assignments),
+        key = StateKey(
+            used, usedSize,
+            state.remoteCount + (candidate.remote and 1 or 0)
+        ),
+    }
+end
+
+local function StorePreferredState(statesByKey, state)
+    if StatePreferred(state, statesByKey[state.key]) then
+        statesByKey[state.key] = state
+    end
+end
+
+local function SortedStates(statesByKey)
+    local keys = {}
+    for key in pairs(statesByKey) do table.insert(keys, key) end
+    table.sort(keys)
+    local result = {}
+    for _, key in ipairs(keys) do table.insert(result, statesByKey[key]) end
+    return result
+end
+
+local function AddMatchEdge(graph, fromNode, toNode, cost, assignment)
+    local forwardIndex = Count(graph[fromNode]) + 1
+    local reverseIndex = Count(graph[toNode]) + 1
+    local forward = {
+        to = toNode, reverse = reverseIndex, capacity = 1,
+        cost = cost, assignment = assignment,
+    }
+    local reverse = {
+        to = fromNode, reverse = forwardIndex, capacity = 0,
+        cost = MatchCostNegate(cost),
+    }
+    table.insert(graph[fromNode], forward)
+    table.insert(graph[toNode], reverse)
+    return forward
+end
+
+local function MinimumCostCandidatePlan(engineers, candidates, slots)
+    local regionSet = {}
+    for _, candidate in ipairs(candidates) do regionSet[candidate.regionKey] = true end
+    local regionKeys = {}
+    for regionKey in pairs(regionSet) do table.insert(regionKeys, regionKey) end
+    table.sort(regionKeys, function(a, b) return tostring(a) < tostring(b) end)
+    local regionIndex = {}
+    for index, regionKey in ipairs(regionKeys) do regionIndex[regionKey] = index end
+
+    local sourceNode = 1
+    local engineerStart = 2
+    local regionStart = engineerStart + Count(engineers)
+    local sinkNode = regionStart + Count(regionKeys)
+    local graph = {}
+    for node = 1, sinkNode do graph[node] = {} end
+    for engineerIndex = 1, Count(engineers) do
+        AddMatchEdge(
+            graph, sourceNode, engineerStart + engineerIndex - 1,
+            MatchCostZero(), nil
+        )
+    end
+    local assignmentEdges = {}
+    for _, candidate in ipairs(candidates) do
+        local edge = AddMatchEdge(
+            graph,
+            engineerStart + candidate.engineerIndex - 1,
+            regionStart + regionIndex[candidate.regionKey] - 1,
+            MatchCostAddAssignment(MatchCostZero(), candidate),
+            candidate
+        )
+        table.insert(assignmentEdges, edge)
+    end
+    for index = 1, Count(regionKeys) do
+        AddMatchEdge(
+            graph, regionStart + index - 1, sinkNode, MatchCostZero(), nil
+        )
+    end
+
+    for _ = 1, slots do
+        local distance = {}
+        local previousNode = {}
+        local previousEdge = {}
+        distance[sourceNode] = MatchCostZero()
+        for _ = 1, sinkNode - 1 do
+            local changed = false
+            for fromNode = 1, sinkNode do
+                if distance[fromNode] then
+                    for edgeIndex, edge in ipairs(graph[fromNode]) do
+                        if edge.capacity > 0 then
+                            local alternate = MatchCostAdd(
+                                distance[fromNode], edge.cost
+                            )
+                            if MatchCostLess(alternate, distance[edge.to]) then
+                                distance[edge.to] = alternate
+                                previousNode[edge.to] = fromNode
+                                previousEdge[edge.to] = edgeIndex
+                                changed = true
+                            end
+                        end
+                    end
+                end
+            end
+            if not changed then break end
+        end
+        if not distance[sinkNode] then break end
+        local node = sinkNode
+        while node ~= sourceNode do
+            local fromNode = previousNode[node]
+            local edge = graph[fromNode][previousEdge[node]]
+            edge.capacity = edge.capacity - 1
+            graph[node][edge.reverse].capacity =
+                graph[node][edge.reverse].capacity + 1
+            node = fromNode
+        end
+    end
+
+    local result = {}
+    for _, edge in ipairs(assignmentEdges) do
+        if edge.capacity == 0 then table.insert(result, edge.assignment) end
+    end
+    table.sort(result, AssignmentPreferred)
+    return result
+end
+
+local function CandidateRemoteCount(candidates)
+    local remote = 0
+    local localCount = 0
+    for _, candidate in ipairs(candidates) do
+        if candidate.remote then remote = remote + 1 else localCount = localCount + 1 end
+    end
+    return remote, localCount
+end
+
+local function AssignmentRemoteCount(assignments)
+    local result = 0
+    for _, assignment in ipairs(assignments or {}) do
+        if assignment.remote then result = result + 1 end
+    end
+    return result
+end
+
+local function BoundedExpansionPlan(engineers, sites, blockedBySite, slots,
+    controlledRadius, remoteLimit, remoteOnly)
+    if slots <= 0 then return {} end
+    local candidates = ExpansionCandidates(
+        engineers, sites, blockedBySite, controlledRadius, remoteOnly
+    )
+    candidates = BoundedExpansionCandidates(candidates, slots)
+    local remoteCandidates, localCandidates = CandidateRemoteCount(candidates)
+    if remoteLimit <= 0 then
+        local filtered = {}
+        for _, candidate in ipairs(candidates) do
+            if not candidate.remote then table.insert(filtered, candidate) end
+        end
+        return MinimumCostCandidatePlan(engineers, filtered, slots)
+    end
+    if localCandidates == 0 then
+        return MinimumCostCandidatePlan(
+            engineers, candidates, math.min(slots, remoteLimit)
+        )
+    end
+    local unconstrained = MinimumCostCandidatePlan(engineers, candidates, slots)
+    if remoteCandidates == 0 or remoteLimit >= slots
+        or AssignmentRemoteCount(unconstrained) <= remoteLimit
+    then
+        return unconstrained
+    end
+    local regionSet = {}
+    for _, candidate in ipairs(candidates) do
+        regionSet[candidate.regionKey] = true
+    end
+    local regionKeys = {}
+    for regionKey in pairs(regionSet) do table.insert(regionKeys, regionKey) end
+    table.sort(regionKeys, function(a, b) return tostring(a) < tostring(b) end)
+    local regionIndex = {}
+    for index, regionKey in ipairs(regionKeys) do regionIndex[regionKey] = index end
+    local trackEngineers = Count(engineers) <= Count(regionKeys)
+    local groupCount = trackEngineers and Count(regionKeys) or Count(engineers)
+    local usedSize = trackEngineers and Count(engineers) or Count(regionKeys)
+    local groups = {}
+    for index = 1, groupCount do groups[index] = {} end
+    for _, candidate in ipairs(candidates) do
+        candidate.regionIndex = regionIndex[candidate.regionKey]
+        local groupIndex = trackEngineers
+            and candidate.regionIndex or candidate.engineerIndex
+        table.insert(groups[groupIndex], candidate)
+    end
+    for _, group in ipairs(groups) do table.sort(group, AssignmentPreferred) end
+
+    local initial = {
+        assignments = {}, used = {}, count = 0, remoteCount = 0,
+        cost = MatchCostZero(), signature = '', key = ':0',
+    }
+    local states = { initial }
+    for _, group in ipairs(groups) do
+        local nextByKey = {}
+        for _, state in ipairs(states) do
+            StorePreferredState(nextByKey, state)
+            if state.count < slots then
+                for _, candidate in ipairs(group) do
+                    local usedIndex = trackEngineers
+                        and candidate.engineerIndex or candidate.regionIndex
+                    local nextRemote = state.remoteCount
+                        + (candidate.remote and 1 or 0)
+                    if not state.used[usedIndex] and nextRemote <= remoteLimit then
+                        StorePreferredState(
+                            nextByKey,
+                            ExtendedState(state, candidate, usedIndex, usedSize)
+                        )
+                    end
+                end
+            end
+        end
+        states = SortedStates(nextByKey)
+    end
+
+    local best = nil
+    for _, state in ipairs(states) do
+        if StatePreferred(state, best) then best = state end
+    end
+    local result = best and best.assignments or {}
+    table.sort(result, AssignmentPreferred)
+    return result
+end
+
+local function ExpansionEscortPairs(escorts, slots)
+    local result = {}
+    local claimed = {}
+    for _ = 1, slots do
+        local tokens = EscortTokens(escorts, claimed)
+        if not tokens then break end
+        table.insert(result, tokens)
+        for _, token in ipairs(tokens) do claimed[token] = true end
+    end
+    return result
+end
+
 MacroDirector.PlanExpansion = function(snapshot)
     snapshot = snapshot or {}
     local result = { jobs = {}, denials = {} }
@@ -390,79 +926,72 @@ MacroDirector.PlanExpansion = function(snapshot)
     local sites = EligibleSites(snapshot)
     local blockedBySite = type(snapshot.blockedActorTokensBySite) == 'table'
         and snapshot.blockedActorTokensBySite or {}
-    local usedEngineers = {}
-    local usedSites = {}
-    local usedRegions = {}
-    local usedEscorts = {}
-    for slot = 1, slots do
-        local best = nil
+    local controlledRadius = Number(snapshot.controlledRadius, nil)
+    local escortPairs = ExpansionEscortPairs(snapshot.escorts, slots)
+    local unconstrained = BoundedExpansionPlan(
+        engineers, sites, blockedBySite, slots, controlledRadius, slots, false
+    )
+    local selected = BoundedExpansionPlan(
+        engineers, sites, blockedBySite, slots, controlledRadius,
+        Count(escortPairs), false
+    )
+    local maximumFlow = Count(unconstrained)
+
+    local remoteIndex = 0
+    local selectedRegions = {}
+    for _, assignment in ipairs(selected) do
+        local site = assignment.site
+        local regionKey = assignment.regionKey
+        local job = {
+            id = 'mex:' .. tostring(regionKey) .. ':' .. tostring(site.key),
+            kind = site.lost == true and 'rebuild_mex' or 'build_mex',
+            actorToken = assignment.engineer.token,
+            targetKey = site.key,
+            siteKey = site.key,
+            regionKey = regionKey,
+            position = Copy(site.position),
+            estimatedTravelTicks = Ceil(assignment.distance * 3),
+            requiresEscort = assignment.remote,
+        }
+        if assignment.remote then
+            remoteIndex = remoteIndex + 1
+            job.escortTokens = Copy(escortPairs[remoteIndex])
+        end
+        table.insert(result.jobs, job)
+        selectedRegions[regionKey] = true
+    end
+
+    if maximumFlow > Count(selected) then
+        local deniedLimit = maximumFlow - Count(selected)
+        local remainingSites = {}
         for _, site in ipairs(sites) do
-            if not usedSites[site.key] and not usedRegions[site.regionKey or site.key] then
-                local blockedActors = type(blockedBySite[site.key]) == 'table'
-                    and blockedBySite[site.key] or {}
-                for _, engineer in ipairs(engineers) do
-                    if not usedEngineers[engineer.token]
-                        and blockedActors[engineer.token] ~= true
-                    then
-                        local distance = Distance(engineer.position, site.position)
-                        local candidate = {
-                            engineer = engineer,
-                            site = site,
-                            distance = distance,
-                        }
-                        if not best
-                            or (site.lost == true and best.site.lost ~= true)
-                            or ((site.lost == true) == (best.site.lost == true)
-                                and (distance < best.distance
-                                    or (distance == best.distance
-                                        and (tostring(site.key) < tostring(best.site.key)
-                                            or (site.key == best.site.key
-                                                and engineer.token < best.engineer.token)))))
-                        then
-                            best = candidate
-                        end
-                    end
-                end
+            if not selectedRegions[site.regionKey or site.key] then
+                table.insert(remainingSites, site)
             end
         end
-        if not best then break end
-        local controlledRadius = Number(snapshot.controlledRadius, nil)
-        local remote = controlledRadius ~= nil and best.distance > controlledRadius
-        local escorts = nil
-        if remote then
-            escorts = EscortTokens(snapshot.escorts, usedEscorts)
-            if not escorts then
-                local regionKey = best.site.regionKey or best.site.key
+        local deniedPlan = BoundedExpansionPlan(
+            engineers, remainingSites, blockedBySite, deniedLimit,
+            controlledRadius, deniedLimit, true
+        )
+        for _, assignment in ipairs(deniedPlan) do
+            if assignment.remote == true and Count(result.denials) < deniedLimit then
                 table.insert(result.denials, {
-                    id = 'mex:' .. tostring(regionKey) .. ':' .. tostring(best.site.key),
-                    actorToken = best.engineer.token,
-                    siteKey = best.site.key,
-                    regionKey = regionKey,
+                    id = 'mex:' .. tostring(assignment.regionKey)
+                        .. ':' .. tostring(assignment.site.key),
+                    actorToken = assignment.engineer.token,
+                    siteKey = assignment.site.key,
+                    regionKey = assignment.regionKey,
                     reason = 'escort_not_ready',
                 })
-                usedSites[best.site.key] = true
             end
         end
-        if not remote or escorts then
-            local regionKey = best.site.regionKey or best.site.key
-            local kind = best.site.lost == true and 'rebuild_mex' or 'build_mex'
-            local job = {
-                id = 'mex:' .. tostring(regionKey) .. ':' .. tostring(best.site.key),
-                kind = kind,
-                actorToken = best.engineer.token,
-                targetKey = best.site.key,
-                siteKey = best.site.key,
-                regionKey = regionKey,
-                position = Copy(best.site.position),
-                estimatedTravelTicks = Ceil(best.distance * 3),
-                requiresEscort = remote,
-            }
-            if escorts then job.escortTokens = escorts end
-            table.insert(result.jobs, job)
-            usedEngineers[best.engineer.token] = true
-            usedSites[best.site.key] = true
-            usedRegions[regionKey] = true
-            for _, token in ipairs(escorts or {}) do usedEscorts[token] = true end
+        local unresolved = deniedLimit - Count(result.denials)
+        if unresolved > 0 then
+            table.insert(result.denials, {
+                id = 'expansion:escort-capacity',
+                reason = 'escort_capacity_limited',
+                blockedCount = unresolved,
+            })
         end
     end
     return result

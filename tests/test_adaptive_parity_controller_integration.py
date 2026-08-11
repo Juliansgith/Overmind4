@@ -2240,7 +2240,7 @@ def test_real_expansion_recycled_identity_stays_quarantined_when_same_job_return
     assert still_quarantined["actorToken"] == "72:1"
 
 
-def test_real_expansion_planner_skips_quarantined_identity_per_site() -> None:
+def test_real_expansion_planner_maximizes_jobs_after_site_quarantine() -> None:
     permutations = (
         ((72, 73), False),
         ((73, 72), False),
@@ -2299,7 +2299,7 @@ def test_real_expansion_planner_skips_quarantined_identity_per_site() -> None:
         fresh = harness.unit(
             entityId=73,
             blueprintId="uel0105",
-            position=[13, 2, 20],
+            position=[39, 2, 40],
             canBuild={"ueb1103": True},
         )
         units = {72: recycled, 73: fresh}
@@ -2840,6 +2840,43 @@ def test_unescorted_expansion_denial_reports_causal_denied_lifecycle() -> None:
         "denied",
     ]
     assert events[-1]["reason"] == "escort_not_ready"
+
+
+def test_aggregate_escort_capacity_denial_reports_blocked_job_count() -> None:
+    harness = make_harness()
+    denial = {
+        "id": "expansion:escort-capacity",
+        "reason": "escort_capacity_limited",
+        "blockedCount": 2,
+    }
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 2,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness, "expansionPlan", {"jobs": [], "denials": [denial]}
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    events = [
+        fields
+        for line in harness.logs
+        if (fields := parsing.overmind_marker_fields(line)) is not None
+        and fields.get("kind") == "operation"
+        and fields.get("operation") == denial["id"]
+    ]
+    assert events[-1]["phase"] == "denied"
+    assert events[-1]["reason"] == "escort_capacity_limited"
+    assert events[-1]["blocked_count"] == "2"
 
 
 def test_step_adapts_a_current_visual_bomber_target_into_one_live_raid() -> None:
