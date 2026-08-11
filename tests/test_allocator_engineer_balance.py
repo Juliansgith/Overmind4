@@ -512,6 +512,34 @@ def test_tick5815_bank_and_forecast_fund_combat_when_generic_factory_slots_are_z
     assert ("tank", "continuous_land_production") in _factory_orders(snapshot)
 
 
+def test_full_storage_converts_overflow_through_four_idle_land_factories() -> None:
+    snapshot = _policy_allocator_snapshot("land_factory", "land_factory")
+    snapshot["economy"].update(
+        massStoredRatio=1,
+        energyStoredRatio=1,
+    )
+    snapshot["macro"].update(
+        engineerTarget=1,
+        engineerDemand=1,
+        unlockingEngineerNeeded=False,
+        expansionOpportunityCount=47,
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+        rollingMassStoredRatio=1,
+        rollingEnergyStoredRatio=1,
+    )
+
+    orders = _factory_orders(snapshot)
+
+    assert len(orders) == 4
+    assert all(reason == "continuous_land_production" for _, reason in orders)
+
+
 def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:
     snapshot = _policy_allocator_snapshot()
     snapshot["macro"].update(

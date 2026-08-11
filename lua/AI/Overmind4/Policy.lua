@@ -2469,6 +2469,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
         math.floor(tonumber(macro.factoryFundedCount) or 0))
     local factoryAccepted = 0
     local protectedCombatAccepted = false
+    local overflowCombatAccepted = 0
     local actors = {}
     local completedLandFactories = 0
     local completedEngineers = 0
@@ -2483,6 +2484,17 @@ Policy.ApplyAllocator = function(snapshot, intents)
     local reserveLandCombat = completedLandFactories >= 1
         and (completedEngineers >= MIN_RECOVERY_ENGINEERS
             or (completedLandFactories >= 2 and completedEngineers >= 1))
+    local overflowFactorySlots = 0
+    local rollingMassStoredRatio = tonumber(macro.rollingMassStoredRatio)
+    local rollingEnergyStoredRatio = tonumber(macro.rollingEnergyStoredRatio)
+    if macro.economyLedgerValid == true
+        and FiniteNumber(rollingMassStoredRatio)
+        and FiniteNumber(rollingEnergyStoredRatio)
+        and rollingMassStoredRatio >= 0.95
+        and rollingEnergyStoredRatio >= 0.95
+    then
+        overflowFactorySlots = math.min(4, completedLandFactories)
+    end
     local landCombatRoles = {
         anti_air = true,
         artillery = true,
@@ -2642,9 +2654,14 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local protectedAirScout = intent.kind == 'factory_build'
                 and intent.reason == 'initial_frontier_air_scout'
             local concurrentUnlock = intent == concurrentUnlockIntent
+            local overflowCombat = intent.kind == 'factory_build'
+                and intent.reason == 'continuous_land_production'
+                and landCombatRoles[intent.buildRole] == true
+                and overflowCombatAccepted < overflowFactorySlots
             local protectedFactoryLane = protectedCombat
                 or protectedAirScreen
                 or protectedAirScout
+                or overflowCombat
                 or (concurrentUnlock and protectedCombatAccepted)
             local protectedUsesBank = false
             if allowed and structureRequest then
@@ -2699,14 +2716,18 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 local massFit = bankMass + fitTolerance >= massGap
                 local energyFit = bankEnergy + fitTolerance >= energyGap
                 if protectedFactoryLane then
-                    local recurringFit = availableMass + fitTolerance
-                            >= requestMassDrain
-                        and availableEnergy + fitTolerance
-                            >= requestEnergyDrain
-                    local bankFit = bankMass + fitTolerance >= request.massCost
-                        and bankEnergy + fitTolerance >= request.energyCost
-                    allowed = recurringFit or bankFit
-                    protectedUsesBank = not recurringFit and bankFit
+                    if overflowCombat then
+                        allowed = true
+                    else
+                        local recurringFit = availableMass + fitTolerance
+                                >= requestMassDrain
+                            and availableEnergy + fitTolerance
+                                >= requestEnergyDrain
+                        local bankFit = bankMass + fitTolerance >= request.massCost
+                            and bankEnergy + fitTolerance >= request.energyCost
+                        allowed = recurringFit or bankFit
+                        protectedUsesBank = not recurringFit and bankFit
+                    end
                 elseif intent.kind == 'factory_build'
                     and intent.reason ~= 'recovery_engineer_floor'
                 then
@@ -2720,7 +2741,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     energyFit = availableEnergy + fitTolerance >= requestEnergyDrain
                         and energyFit
                 end
-                allowed = massFit and energyFit
+                allowed = overflowCombat or (massFit and energyFit)
             end
             if allowed then
                 local expansionRequest = structureRequest
@@ -2754,6 +2775,9 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 end
                 if intent.kind == 'factory_build' then
                     factoryAccepted = factoryAccepted + 1
+                end
+                if overflowCombat then
+                    overflowCombatAccepted = overflowCombatAccepted + 1
                 end
                 if protectedCombat then protectedCombatAccepted = true end
                 TableInsert(accepted, intent)
