@@ -7872,7 +7872,8 @@ Controller.Execute = function(controller, intents, observation)
                 observation
             )
         elseif intent.kind == 'frontier_screen'
-            and controller.fieldCampaignEnabled ~= true
+            and (controller.fieldCampaignEnabled ~= true
+                or controller.fieldCampaign == nil)
         then
             ExecuteFrontierScreen(controller, intent, records, usedActors)
         elseif intent.kind == 'mobilize_commander'

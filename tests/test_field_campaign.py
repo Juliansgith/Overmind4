@@ -2081,7 +2081,8 @@ def test_static_live_runtime_defaults_to_campaign_and_gates_every_legacy_screen_
     policy_source = source("lua/AI/Overmind4/Policy.lua")
 
     assert "fieldCampaignEnabled = true" in controller_source
-    assert "intent.kind == 'frontier_screen'\n            and controller.fieldCampaignEnabled ~= true" in controller_source
+    assert "intent.kind == 'frontier_screen'" in controller_source
+    assert "or controller.fieldCampaign == nil" in controller_source
     assert "snapshot.macro.campaignEnabled == true" in policy_source
     assert "FieldCampaignDecision(snapshot, intents)" in policy_source
 

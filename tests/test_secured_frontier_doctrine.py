@@ -1437,6 +1437,75 @@ def install_pending_frontier_operation(
     )
 
 
+def test_enabled_idle_campaign_policy_screen_executes_clear_guard_and_creates_mission() -> None:
+    harness = make_harness()
+    harness.controller.fieldCampaignEnabled = True
+    engineer = harness.unit(entityId=1, blueprintId="uel0105")
+    combat = [harness.unit(entityId=2, blueprintId="uel0104")]
+    combat.extend(
+        harness.unit(entityId=entity_id, blueprintId="uel0201")
+        for entity_id in range(3, 10)
+    )
+    harness.brain.units = harness.lua.table_from([engineer, *combat])
+    harness.observe()
+    install_pending_frontier_operation(harness)
+    observation = harness.observe()
+    macro = plain(observation.macro)
+    assert macro["campaignKind"] == "none"
+    assert macro["campaignState"] == "idle"
+
+    screen = intents_of(_controller_policy_intents(harness, observation), "frontier_screen")
+    assert len(screen) == 1
+    assert len(screen[0]["actorTokens"]) == 4
+
+    execute_intents(harness, screen, observation)
+
+    assert plain(harness.calls.sequence) == ["clear", "guard"]
+    assert _call_actor_ids(harness.calls.clear[1]) == [2, 3, 4, 5]
+    assert _call_actor_ids(harness.calls.guard[1]) == [2, 3, 4, 5]
+    assert harness.calls.guard[1].target.options.entityId == 1
+    mission = plain(harness.controller.frontierMission)
+    assert mission["engineerToken"] == "1:1"
+    assert mission["clusterKey"] == "cluster-a"
+    assert mission["escortTokens"] == ["2:1", "3:1", "4:1", "5:1"]
+
+
+@pytest.mark.parametrize(
+    "campaign",
+    [
+        {"kind": "pressure_front", "state": "awaiting_order"},
+        {"kind": "pressure_front", "state": "mobilizing"},
+        {"kind": "pressure_front", "state": "active"},
+        {"kind": "pressure_front", "state": "recalled"},
+        {"kind": "pressure_front"},
+        "malformed",
+    ],
+)
+def test_enabled_campaign_executor_rejects_stale_screen_when_campaign_is_live_or_malformed(
+    campaign: Any,
+) -> None:
+    harness = make_harness()
+    harness.controller.fieldCampaignEnabled = True
+    engineer = harness.unit(entityId=1, blueprintId="uel0105")
+    combat = [harness.unit(entityId=2, blueprintId="uel0104")]
+    combat.extend(
+        harness.unit(entityId=entity_id, blueprintId="uel0201")
+        for entity_id in range(3, 10)
+    )
+    harness.brain.units = harness.lua.table_from([engineer, *combat])
+    harness.observe()
+    install_pending_frontier_operation(harness)
+    observation = harness.observe()
+    screen = intents_of(_controller_policy_intents(harness, observation), "frontier_screen")
+    assert len(screen) == 1
+    harness.controller.fieldCampaign = lua_value(harness.lua, campaign)
+
+    execute_intents(harness, screen, observation)
+
+    assert not plain(harness.calls.sequence)
+    assert harness.controller.frontierMission is None
+
+
 def test_frontier_screen_executes_exact_clear_then_guard_and_persists_ownership() -> None:
     harness = make_harness()
     engineer = harness.unit(entityId=1, blueprintId="uel0105")
