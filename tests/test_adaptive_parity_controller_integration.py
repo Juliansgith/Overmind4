@@ -2564,6 +2564,16 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
         if call.units[1].options.entityId == 31
     ]
     assert len(transport_moves) == 1
+    assert not [
+        call
+        for call in harness.calls.buildMobile.values()
+        if call.blueprintId == "ueb1103"
+    ]
+
+    cargo.options.position = lua_value(harness.lua, cargo_move_position)
+    harness.brain.tick = harness.brain.tick + 9
+    harness.lua.globals().Controller.Step(harness.controller)
+
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()
@@ -2721,6 +2731,16 @@ def test_airlift_delivery_builds_the_prevalidated_mex_despite_its_own_footprint(
     harness.lua.execute("Policy.Decide = function() return {} end")
     harness.lua.execute("brain.canBuildAt = function() return false end")
 
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 0
+    cargo_move = next(
+        call
+        for call in harness.calls.move.values()
+        if call.units[1].options.entityId == 32
+    )
+    cargo.options.position = lua_value(harness.lua, plain(cargo_move.position))
+    harness.brain.tick = harness.brain.tick + 9
     harness.lua.globals().Controller.Step(harness.controller)
 
     mex_orders = [

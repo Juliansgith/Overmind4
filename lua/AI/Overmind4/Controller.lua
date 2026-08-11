@@ -3317,34 +3317,9 @@ local function ExecuteStructure(controller, intent, record)
 
     intent.position = position
     RecordPending(controller, intent, record)
-    local ok = false
-    if intent.reason == 'airlift_mex' then
-        local actorPosition = CopyPosition(record.position) or CopyPosition(position)
-        local dx = actorPosition[1] - position[1]
-        local dz = actorPosition[3] - position[3]
-        local length = math.sqrt(dx * dx + dz * dz)
-        if length <= 0.01 then
-            dx = controller.basePosition[1] - position[1]
-            dz = controller.basePosition[3] - position[3]
-            length = math.sqrt(dx * dx + dz * dz)
-        end
-        if length <= 0.01 then dx = 1; dz = 0; length = 1 end
-        local stagingPosition = TerrainPosition({
-            position[1] + dx * 20 / length,
-            0,
-            position[3] + dz * 20 / length,
-        })
-        if stagingPosition then
-            ok = pcall(function()
-                IssueMove({ actor }, stagingPosition)
-                IssueBuildMobile({ actor }, position, blueprintId, {})
-            end)
-        end
-    else
-        ok = pcall(function()
-            IssueBuildMobile({ actor }, position, blueprintId, {})
-        end)
-    end
+    local ok = pcall(function()
+        IssueBuildMobile({ actor }, position, blueprintId, {})
+    end)
     if not ok then
         ReleaseOperation(controller, intent.actorToken, 'command_error')
         return false
@@ -10136,7 +10111,9 @@ ESCALATION.AdaptTransportIntent = function(
                 controller.transportDeliveries[siteKey] = nil
             elseif controller.pending[delivery.actorToken] or record.idle ~= true then
                 return
-            else
+            elseif delivery.clearanceOrdered == true
+                and Distance(record.position, site.position) >= 10
+            then
                 ESCALATION.AppendDirectorIntent(intents, {
                     kind = 'build_structure',
                     actorToken = delivery.actorToken,
@@ -10145,6 +10122,28 @@ ESCALATION.AdaptTransportIntent = function(
                     position = CopyPosition(site.position),
                     operationId = 'mex:airlift:' .. siteKey,
                     reason = 'airlift_mex',
+                    priority = 1,
+                })
+                return
+            else
+                local dx = record.position[1] - site.position[1]
+                local dz = record.position[3] - site.position[3]
+                local length = math.sqrt(dx * dx + dz * dz)
+                if length <= 0.01 then
+                    dx = controller.basePosition[1] - site.position[1]
+                    dz = controller.basePosition[3] - site.position[3]
+                    length = math.sqrt(dx * dx + dz * dz)
+                end
+                if length <= 0.01 then dx = 1; dz = 0; length = 1 end
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'airlift_clear',
+                    actorToken = delivery.actorToken,
+                    siteKey = siteKey,
+                    position = TerrainPosition({
+                        site.position[1] + dx * 20 / length,
+                        0,
+                        site.position[3] + dz * 20 / length,
+                    }),
                     priority = 1,
                 })
                 return
@@ -11199,6 +11198,37 @@ ESCALATION.ExecuteBomberRaid = function(controller, intent, records, usedActors,
     return true
 end
 
+ESCALATION.ExecuteAirliftClear = function(controller, intent, records, usedActors)
+    local delivery = type(intent.siteKey) == 'string'
+        and controller.transportDeliveries[intent.siteKey]
+        or nil
+    local position = CopyPosition(intent.position)
+    if not delivery or delivery.actorToken ~= intent.actorToken
+        or not position or usedActors[intent.actorToken]
+        or controller.pending[intent.actorToken]
+        or Distance(position, delivery.position) < 10
+        or Distance(position, delivery.position) > 30
+    then
+        return false
+    end
+    local record = records[intent.actorToken]
+    local actor = record and record.role == 'engineer' and record.complete == true
+        and record.idle == true
+        and LiveOwnedActor(controller, intent.actorToken, record, 'engineer')
+        or nil
+    if not actor or not pcall(function() IssueMove({ actor }, position) end) then
+        return false
+    end
+    delivery.clearanceOrdered = true
+    usedActors[intent.actorToken] = true
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'airlift_clear',
+        site = intent.siteKey,
+    })
+    return true
+end
+
 ESCALATION.ExecuteTransportLoad = function(controller, intent, records, usedActors)
     if type(intent.missionId) ~= 'string' or controller.transportMissions[intent.missionId]
         or type(intent.transportToken) ~= 'string'
@@ -11576,7 +11606,11 @@ Controller.Execute = function(controller, intents, observation)
         local issued = false
         local failureReason = 'command_rejected'
         if grant ~= false then
-            if intent.kind == 'escorted_expansion' then
+            if intent.kind == 'airlift_clear' then
+                issued = ESCALATION.ExecuteAirliftClear(
+                    controller, intent, records, usedActors
+                )
+            elseif intent.kind == 'escorted_expansion' then
                 issued = ESCALATION.ExecuteEscortedExpansion(
                     controller, intent, records, usedActors
                 )
