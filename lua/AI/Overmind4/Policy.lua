@@ -2703,7 +2703,8 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local strategicHydro = structureRequest and role == 'hydrocarbon'
             local strategicPower = structureRequest
                 and role == 'power_generator'
-                and intent.reason == 'factory_adjacency_power'
+                and (intent.reason == 'factory_adjacency_power'
+                    or intent.reason == 'opening_air_power')
             local protectedCombat = intent == protectedCombatIntent
             local protectedAirScreen = intent.kind == 'factory_build'
                 and intent.reason == 'persistent_air_screen'
