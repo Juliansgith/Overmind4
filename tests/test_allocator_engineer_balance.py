@@ -605,6 +605,38 @@ def test_first_hydro_is_not_starved_by_future_commitment_reservations() -> None:
     assert hydro[0]["reason"] == "first_hydro"
 
 
+def test_factory_count_scales_adjacency_power_before_air_stalls() -> None:
+    snapshot = _policy_allocator_snapshot(
+        "land_factory",
+        "land_factory",
+        "land_factory",
+        "air_factory",
+        "air_factory",
+        "power_generator",
+        "power_generator",
+        "mass_extractor",
+        "mass_extractor",
+    )
+    snapshot["macro"].update(
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+        factoryFundedCount=0,
+    )
+
+    power = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("buildRole") == "power_generator"
+    ]
+
+    assert len(power) == 1
+    assert power[0]["reason"] == "factory_adjacency_power"
+
+
 def test_two_factories_with_one_engineer_keep_combat_and_recovery_actors_disjoint() -> None:
     snapshot = _policy_allocator_snapshot()
     snapshot["macro"].update(

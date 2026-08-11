@@ -1131,6 +1131,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local completedMex = 0
     local completedLand = 0
     local completedHydro = 0
+    local completedFactories = 0
     for _, unit in ipairs(units or {}) do
         if unit.complete == true then
             if (unit.roleFamily or unit.role) == 'mass_extractor' then
@@ -1138,6 +1139,14 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             end
             if unit.role == 'land_factory' or unit.role == 'land_factory_t2' then
                 completedLand = completedLand + 1
+            end
+            if unit.role == 'land_factory'
+                or unit.role == 'land_factory_t2'
+                or unit.role == 'land_factory_t2_support'
+                or unit.role == 'land_factory_t3'
+                or unit.role == 'air_factory'
+            then
+                completedFactories = completedFactories + 1
             end
             if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
         end
@@ -1222,6 +1231,25 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             plannedFactory = true
             placementIndex.land_factory = placementIndex.land_factory + 1
             counts.land_factory = (counts.land_factory or 0) + 1
+        end
+    end
+
+    local adjacencyPowerTarget = math.min(10,
+        math.max(4, completedFactories * 2))
+    if not underContact
+        and completedMex >= 6
+        and (counts.power_generator or 0) < adjacencyPowerTarget
+        and not plannedPower
+    then
+        if AssignPlacement(
+            'power_generator',
+            placementIndex.power_generator,
+            19,
+            'factory_adjacency_power'
+        ) then
+            plannedPower = true
+            placementIndex.power_generator = placementIndex.power_generator + 1
+            counts.power_generator = (counts.power_generator or 0) + 1
         end
     end
 
@@ -2670,6 +2698,9 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local structureRequest = intent.kind == 'build_structure'
                 or intent.kind == 'assist_structure'
             local strategicHydro = structureRequest and role == 'hydrocarbon'
+            local strategicPower = structureRequest
+                and role == 'power_generator'
+                and intent.reason == 'factory_adjacency_power'
             local protectedCombat = intent == protectedCombatIntent
             local protectedAirScreen = intent.kind == 'factory_build'
                 and intent.reason == 'persistent_air_screen'
@@ -2769,7 +2800,8 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     energyFit = availableEnergy + fitTolerance >= requestEnergyDrain
                         and energyFit
                 end
-                allowed = strategicHydro or overflowCombat or sustainedCombat
+                allowed = strategicHydro or strategicPower
+                    or overflowCombat or sustainedCombat
                     or (massFit and energyFit)
             end
             if allowed then
