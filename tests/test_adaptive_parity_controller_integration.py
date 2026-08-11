@@ -2553,10 +2553,11 @@ def test_completed_airlift_orders_its_engineer_to_build_the_exact_drop_mex() -> 
     ]
     assert len(cargo_moves) == 1
     cargo_move_position = plain(cargo_moves[0].position)
-    assert (
+    cargo_clearance = (
         (cargo_move_position[0] - 300) ** 2
         + (cargo_move_position[2] - 300) ** 2
-    ) ** 0.5 >= 16
+    ) ** 0.5
+    assert 4 <= cargo_clearance <= 6
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()

@@ -3330,9 +3330,9 @@ local function ExecuteStructure(controller, intent, record)
         end
         if length <= 0.01 then dx = 1; dz = 0; length = 1 end
         local stagingPosition = TerrainPosition({
-            position[1] + dx * 20 / length,
+            position[1] + dx * 5 / length,
             0,
-            position[3] + dz * 20 / length,
+            position[3] + dz * 5 / length,
         })
         if stagingPosition then
             ok = pcall(function()
