@@ -1531,9 +1531,10 @@ def test_enabled_precampaign_frontier_mission_survives_repeated_reconcile_withou
     expected_mission = plain(harness.controller.frontierMission)
     expected_assignments = plain(harness.controller.frontierAssignments)
 
-    for tick in (10, 19, 28):
+    for tick, selected_cluster in ((10, "cluster-b"), (19, "cluster-c"), (28, "cluster-b")):
         harness.brain.tick = tick
         current = harness.observe()
+        harness.controller.selectedFrontierCluster = selected_cluster
         harness.lua.globals().Controller.Reconcile(harness.controller, current)
         assert harness.controller.fieldCampaign is None
         assert plain(harness.controller.frontierMission) == expected_mission
@@ -1542,7 +1543,10 @@ def test_enabled_precampaign_frontier_mission_survives_repeated_reconcile_withou
     assert plain(harness.calls.sequence) == ["clear", "guard"]
 
 
-@pytest.mark.parametrize("invalid", ["missing_operation", "dead_engineer"])
+@pytest.mark.parametrize(
+    "invalid",
+    ["missing_operation", "cluster_mutation", "dead_engineer"],
+)
 def test_enabled_precampaign_frontier_mission_clears_when_operation_becomes_invalid(
     invalid: str,
 ) -> None:
@@ -1569,6 +1573,8 @@ def test_enabled_precampaign_frontier_mission_clears_when_operation_becomes_inva
     execute_intents(harness, screen, observation)
     if invalid == "missing_operation":
         harness.controller.pending["1:1"] = None
+    elif invalid == "cluster_mutation":
+        harness.controller.pending["1:1"].clusterKey = "different-cluster"
     else:
         engineer.options.destroyed = True
     harness.brain.tick = 10

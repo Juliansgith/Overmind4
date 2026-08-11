@@ -7815,9 +7815,7 @@ Controller.Reconcile = function(controller, observation)
             or engineer.role ~= 'engineer'
             or not operation
             or operation.reason ~= 'frontier_expansion'
-            or (mission.clusterKey
-                and controller.selectedFrontierCluster
-                and mission.clusterKey ~= controller.selectedFrontierCluster)
+            or operation.clusterKey ~= mission.clusterKey
         then
             ClearFrontierMission(controller)
         else
