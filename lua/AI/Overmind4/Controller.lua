@@ -2864,6 +2864,18 @@ local function CampaignSite(controller, siteKey)
     return nil
 end
 
+local function CampaignSiteSupportsPosition(controller, siteKey, position)
+    if type(siteKey) ~= 'string' or not IsCampaignPosition(position) then
+        return false
+    end
+    local site = CampaignSite(controller, siteKey)
+    return site ~= nil
+        and site.engineerReachable == true
+        and site.landReachable == true
+        and IsCampaignPosition(site.position)
+        and DistanceSquared(site.position, position) <= 0.01
+end
+
 local function CampaignOperationRecord(observation, operation)
     if not operation or type(operation.actorToken) ~= 'string' then return nil end
     for _, record in ipairs(observation.units or {}) do
@@ -2877,7 +2889,7 @@ local function CampaignOperationRecord(observation, operation)
     return nil
 end
 
-local function ValidCampaignOperation(controller, observation, operation, creation)
+local function ValidCampaignOperation(controller, observation, operation)
     if not StructureOperation(operation)
         or operation.buildRole ~= 'mass_extractor'
         or (operation.reason ~= 'frontier_expansion'
@@ -2887,17 +2899,13 @@ local function ValidCampaignOperation(controller, observation, operation, creati
         or operation.phase == 'cancelling'
         or operation.cancelReason ~= nil
         or not CampaignOperationRecord(observation, operation)
+        or not CampaignSiteSupportsPosition(
+            controller,
+            operation.siteKey,
+            operation.position
+        )
     then
         return false
-    end
-    if creation then
-        local site = CampaignSite(controller, operation.siteKey)
-        if not site
-            or site.engineerReachable ~= true
-            or site.landReachable ~= true
-        then
-            return false
-        end
     end
     return true
 end
@@ -2906,7 +2914,7 @@ local function CampaignCandidate(controller, observation)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
         if operation.reason == 'rebuild_mex'
-            and ValidCampaignOperation(controller, observation, operation, true)
+            and ValidCampaignOperation(controller, observation, operation)
         then
             return operation
         end
@@ -2914,7 +2922,7 @@ local function CampaignCandidate(controller, observation)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
         if operation.reason == 'frontier_expansion'
-            and ValidCampaignOperation(controller, observation, operation, true)
+            and ValidCampaignOperation(controller, observation, operation)
         then
             return operation
         end
@@ -3147,7 +3155,7 @@ local function RelevantCampaignOperation(controller, observation, campaign)
         local operation = controller.pending[token]
         if operation.reason == 'rebuild_mex'
             and ArrayContains(campaign.memberKeys, operation.siteKey)
-            and ValidCampaignOperation(controller, observation, operation, false)
+            and ValidCampaignOperation(controller, observation, operation)
         then
             return operation
         end
@@ -3155,14 +3163,14 @@ local function RelevantCampaignOperation(controller, observation, campaign)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
         if operation.reason == 'rebuild_mex'
-            and ValidCampaignOperation(controller, observation, operation, false)
+            and ValidCampaignOperation(controller, observation, operation)
         then
             return operation
         end
     end
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
-        if ValidCampaignOperation(controller, observation, operation, false)
+        if ValidCampaignOperation(controller, observation, operation)
             and (operation.siteKey == campaign.objectiveKey
                 or (operation.reason == 'frontier_expansion'
                     and (operation.clusterKey == campaign.clusterKey
@@ -3184,11 +3192,7 @@ local function CampaignClusterComplete(controller, campaign)
 end
 
 local function CampaignTargetInvalid(controller, siteKey, position)
-    if not IsCampaignPosition(position) then return true end
-    local site = CampaignSite(controller, siteKey)
-    return not site
-        or site.engineerReachable ~= true
-        or site.landReachable ~= true
+    return not CampaignSiteSupportsPosition(controller, siteKey, position)
 end
 
 local function CampaignObjectiveInvalid(controller, campaign)
@@ -3253,6 +3257,7 @@ local function PendingCampaignOperationValid(controller, campaign)
         and mode ~= 'retarget'
         and mode ~= 'transition'
         and mode ~= 'recover'
+        and mode ~= 'resume'
     then
         return true
     end
@@ -3269,6 +3274,7 @@ local function PendingCampaignOperationValid(controller, campaign)
         and IsCampaignPosition(operation.position)
         and IsCampaignPosition(position)
         and DistanceSquared(operation.position, position) <= 0.01
+        and CampaignSiteSupportsPosition(controller, siteKey, position)
         and operation.phase ~= 'cancelling'
         and operation.cancelReason == nil
 end
@@ -3631,6 +3637,11 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
                 or operation.reason ~= expectedReason
                 or not IsCampaignPosition(operation.position)
                 or DistanceSquared(operation.position, expectedPosition) > 0.01
+                or not CampaignSiteSupportsPosition(
+                    controller,
+                    expectedKey,
+                    expectedPosition
+                )
                 or operation.phase == 'cancelling'
                 or operation.cancelReason ~= nil
             then

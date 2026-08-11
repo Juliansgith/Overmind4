@@ -237,12 +237,19 @@ local function FirstLostSite(sites, virtualReserved, localOnly)
     return nil
 end
 
-local function FirstFrontierSite(sites, virtualReserved, selectedKey)
+local function SiteSupportsLandCampaign(site)
+    return type(site) == 'table'
+        and site.engineerReachable == true
+        and site.landReachable == true
+end
+
+local function FirstFrontierSite(sites, virtualReserved, selectedKey, requireLand)
     if type(selectedKey) == 'string' then
         for _, site in ipairs(sites or {}) do
             if site.key == selectedKey
                 and site.frontierSelected == true
                 and site.lost ~= true
+                and (requireLand ~= true or SiteSupportsLandCampaign(site))
                 and SiteIsAvailable(site, virtualReserved, false)
             then
                 return site
@@ -252,6 +259,7 @@ local function FirstFrontierSite(sites, virtualReserved, selectedKey)
     for _, site in ipairs(SortSites(sites)) do
         if site.frontierSelected == true
             and site.lost ~= true
+            and (requireLand ~= true or SiteSupportsLandCampaign(site))
             and SiteIsAvailable(site, virtualReserved, false)
         then
             return site
@@ -272,6 +280,7 @@ local function FirstCampaignSite(sites, virtualReserved, memberKeys, lostOnly)
         if KeyInArray(memberKeys, site.key)
             and (not lostOnly or site.lost == true)
             and site.complete ~= true
+            and SiteSupportsLandCampaign(site)
             and SiteIsAvailable(site, virtualReserved, false)
         then
             return site
@@ -280,14 +289,35 @@ local function FirstCampaignSite(sites, virtualReserved, memberKeys, lostOnly)
     return nil
 end
 
-local function CampaignHasConnectedJob(snapshot, macro)
+local function FirstCampaignLostSite(sites, virtualReserved)
+    for _, site in ipairs(SortSites(sites)) do
+        if site.lost == true
+            and SiteSupportsLandCampaign(site)
+            and SiteIsAvailable(site, virtualReserved, false)
+        then
+            return site
+        end
+    end
+    return nil
+end
+
+local function CampaignSiteByKey(sites, siteKey)
+    for _, site in ipairs(sites or {}) do
+        if site.key == siteKey then return site end
+    end
+    return nil
+end
+
+local function CampaignHasConnectedJob(snapshot, macro, massSites)
     for _, operation in ipairs(snapshot.pending or {}) do
         if operation.kind == 'build_structure'
                 or operation.kind == 'assist_structure'
         then
-            if KeyInArray(macro.campaignMemberKeys, operation.siteKey)
+            local site = CampaignSiteByKey(massSites, operation.siteKey)
+            if SiteSupportsLandCampaign(site)
+                and (KeyInArray(macro.campaignMemberKeys, operation.siteKey)
                 or (operation.reason == 'frontier_expansion'
-                    and operation.clusterKey == macro.campaignCluster)
+                    and operation.clusterKey == macro.campaignCluster))
             then
                 return true
             end
@@ -681,7 +711,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and macro.campaignEnabled == true
         and macro.campaignState ~= 'idle'
     local campaignJobPlanned = campaignActive
-        and CampaignHasConnectedJob(snapshot, macro)
+        and CampaignHasConnectedJob(snapshot, macro, massSites)
         or false
 
     for _, engineer in ipairs(engineers) do
@@ -720,7 +750,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and not underContact
             and CanBuild(engineer, 'mass_extractor')
         then
-            local lost = FirstLostSite(massSites, virtualReserved, false)
+            local lost = FirstCampaignLostSite(massSites, virtualReserved)
             if lost then
                 virtualReserved[lost.key] = true
                 counts.mass_extractor = (counts.mass_extractor or 0) + 1
@@ -776,7 +806,8 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             local nextSite = FirstFrontierSite(
                 massSites,
                 virtualReserved,
-                macro.selectedFrontierSite
+                macro.selectedFrontierSite,
+                true
             )
             if nextSite then
                 virtualReserved[nextSite.key] = true
@@ -805,6 +836,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 intent = BuildAtSite(engineer, 'mass_extractor', site, 18, 'rebuild_mex')
                 if campaignActive
                     and KeyInArray(macro.campaignMemberKeys, site.key)
+                    and SiteSupportsLandCampaign(site)
                 then
                     intent.clusterKey = macro.campaignCluster
                     campaignJobPlanned = true
@@ -904,7 +936,8 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                     site = FirstFrontierSite(
                         massSites,
                         virtualReserved,
-                        macro.selectedFrontierSite
+                        macro.selectedFrontierSite,
+                        true
                     )
                 elseif not campaignJobPlanned
                     and macro.campaignState == 'active'

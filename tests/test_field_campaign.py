@@ -125,6 +125,28 @@ def start_campaign(
     return harness, acu, engineer, combat, reconcile(harness)
 
 
+def layered_marker(
+    key: str,
+    x: float,
+    z: float,
+    *,
+    engineer_reachable: bool = True,
+    land_reachable: bool = True,
+) -> dict[str, Any]:
+    value = marker(key, x, z, reachable=engineer_reachable)
+    value["engineerReachable"] = engineer_reachable
+    value["landReachable"] = land_reachable
+    return value
+
+
+def controller_marker(harness: Any, key: str) -> Any:
+    for index in range(1, len(harness.controller.markers.mass) + 1):
+        candidate = harness.controller.markers.mass[index]
+        if candidate.key == key:
+            return candidate
+    raise AssertionError(f"missing marker {key}")
+
+
 def activate_campaign(harness: Any, observation: Any) -> tuple[dict[str, Any], Any]:
     intents = campaign_intents(harness, observation)
     assert len(intents) == 1
@@ -574,6 +596,13 @@ def test_rebuild_retargets_the_existing_campaign_atomically_without_cluster_chur
 ) -> None:
     harness, acu, original_engineer, combat, observation = start_campaign()
     activate_campaign(harness, observation)
+    install_markers(
+        harness,
+        [
+            layered_marker("cluster-a", 80, 20),
+            layered_marker("lost-home", 35, 20),
+        ],
+    )
     rebuild_engineer = harness.unit(
         entityId=3,
         blueprintId="uel0105",
@@ -1577,6 +1606,13 @@ def test_cancelled_activation_without_replacement_stops_stale_orders_and_replans
 def test_stale_retarget_guard_adopts_replacement_operation_and_retries_atomically() -> None:
     harness, acu, engineer, combat, observation = start_campaign()
     activate_campaign(harness, observation)
+    install_markers(
+        harness,
+        [
+            layered_marker("cluster-a", 80, 20),
+            layered_marker("lost-home", 35, 20),
+        ],
+    )
     first = harness.unit(entityId=3, blueprintId="uel0105", position=[20, 2, 20])
     first.options.idleState = False
     first.options.states = lua_value(harness.lua, {"Moving": True})
@@ -1993,6 +2029,13 @@ def test_full_gate_preserves_awaiting_objective_after_the_cluster_hold() -> None
 def test_full_gate_preserves_an_atomic_pending_rebuild_retarget() -> None:
     harness, acu, original_engineer, combat, observation = start_campaign(total=23, aa=2)
     activate_campaign(harness, observation)
+    install_markers(
+        harness,
+        [
+            layered_marker("cluster-a", 80, 20),
+            layered_marker("lost-home", 35, 20),
+        ],
+    )
     rebuild_engineer = harness.unit(
         entityId=3,
         blueprintId="uel0105",
@@ -2316,3 +2359,244 @@ def test_invalid_recalled_cluster_replaced_by_rebuild_has_coherent_completion_st
     harness.brain.tick = 321
     completed = reconcile(harness)
     assert plain(completed)["macro"].get("campaignState") == "holding"
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_amphibious_only_rebuild_stays_noncampaign_while_next_land_rebuild_is_adopted(
+    seed: int,
+) -> None:
+    amphib = layered_marker(
+        "cached-amphib",
+        90,
+        20,
+        engineer_reachable=True,
+        land_reachable=True,
+    )
+    valid = layered_marker("valid-lost", 140, 20)
+    extra_markers = [amphib, valid]
+    random.Random(seed).shuffle(extra_markers)
+    harness, acu, campaign_engineer, combat, observation = start_campaign(
+        seed=seed,
+        extra_markers=extra_markers,
+    )
+    activate_campaign(harness, observation)
+    amphib_mex = harness.unit(entityId=50, blueprintId="ueb1103", position=[90, 2, 20])
+    valid_mex = harness.unit(entityId=51, blueprintId="ueb1103", position=[140, 2, 20])
+    first = harness.unit(
+        entityId=3,
+        blueprintId="uel0105",
+        position=[15, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    second = harness.unit(
+        entityId=4,
+        blueprintId="uel0105",
+        position=[16, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    owned_units = [
+        acu,
+        campaign_engineer,
+        first,
+        second,
+        amphib_mex,
+        valid_mex,
+        *combat,
+    ]
+    random.Random(seed + 20).shuffle(owned_units)
+    harness.brain.units = harness.lua.table_from(owned_units)
+    harness.brain.tick = 20
+    reconcile(harness)
+    controller_marker(harness, "cached-amphib").landReachable = False
+    lost_units = [acu, campaign_engineer, first, second, *combat]
+    random.Random(seed + 40).shuffle(lost_units)
+    harness.brain.units = harness.lua.table_from(lost_units)
+    harness.brain.tick = 21
+    lost = reconcile(harness)
+    rebuilds = [
+        intent for intent in policy_intents(harness, lost)
+        if intent.get("kind") in {"build_structure", "assist_structure"}
+            and intent.get("reason") == "rebuild_mex"
+            and intent.get("actorToken") in {"3:1", "4:1"}
+    ]
+
+    assert [(intent.get("actorToken"), intent.get("siteKey")) for intent in rebuilds] == [
+        ("3:1", "cached-amphib"),
+        ("4:1", "valid-lost"),
+    ]
+    amphib_intent = rebuilds[0]
+    assert amphib_intent.get("clusterKey") != plain(
+        harness.controller.fieldCampaign
+    ).get("clusterKey")
+    execute_intents(harness, rebuilds, lost)
+    first.options.idleState = False
+    first.options.states = lua_value(harness.lua, {"Moving": True})
+    second.options.idleState = False
+    second.options.states = lua_value(harness.lua, {"Moving": True})
+    assert harness.controller.pending["3:1"] is not None
+    assert harness.controller.pending["4:1"] is not None
+    clear_before = len(harness.calls.clear)
+    guard_before = len(harness.calls.guard)
+    harness.brain.tick = 22
+    current = reconcile(harness)
+    retarget = campaign_intents(harness, current)
+
+    assert len(retarget) == 1
+    assert retarget[0].get("mode") == "retarget"
+    assert retarget[0].get("engineerToken") == "4:1"
+    assert retarget[0].get("objectiveKey") == "valid-lost"
+    execute_intents(harness, retarget, current)
+    assert len(harness.calls.clear) == clear_before + 1
+    assert len(harness.calls.guard) == guard_before + 1
+    assert harness.calls.guard[len(harness.calls.guard)].target.options.entityId == 4
+    assert harness.controller.fieldCampaign.objectiveKey == "valid-lost"
+    assert harness.controller.fieldCampaign.engineerToken == "4:1"
+    assert harness.controller.pending["3:1"] is not None
+
+
+def prepare_reachability_sensitive_campaign_intent(mode: str) -> tuple[Any, Any, dict[str, Any], str]:
+    if mode == "activate":
+        harness, _, _, _, observation = start_campaign()
+        intent = campaign_intents(harness, observation)[0]
+        return harness, observation, intent, "cluster-a"
+    if mode == "retarget":
+        target = layered_marker("lost-home", 35, 20)
+        harness, acu, engineer, combat, observation = start_campaign(extra_markers=[target])
+        activate_campaign(harness, observation)
+        next_engineer = harness.unit(
+            entityId=3,
+            blueprintId="uel0105",
+            position=[20, 2, 20],
+            idleState=False,
+            states=lua_value(harness.lua, {"Moving": True}),
+        )
+        harness.brain.units = harness.lua.table_from([acu, engineer, next_engineer, *combat])
+        harness.brain.tick = 20
+        harness.observe()
+        inject_structure_operation(
+            harness,
+            actor_token="3:1",
+            site_key="lost-home",
+            position=[35, 2, 20],
+            reason="rebuild_mex",
+        )
+        current = reconcile(harness)
+        intent = campaign_intents(harness, current)[0]
+        assert intent.get("mode") == "retarget"
+        return harness, current, intent, "lost-home"
+    if mode == "transition":
+        target = layered_marker("cluster-b", 140, 20)
+        harness, acu, engineer, combat, observation = start_campaign(extra_markers=[target])
+        activate_campaign(harness, observation)
+        mex = harness.unit(entityId=50, blueprintId="ueb1103", position=[80, 2, 20])
+        engineer.options.idleState = True
+        engineer.options.states = lua_value(harness.lua, {})
+        harness.brain.units = harness.lua.table_from([acu, engineer, mex, *combat])
+        harness.brain.tick = 100
+        reconcile(harness)
+        harness.brain.tick = 250
+        reconcile(harness)
+        next_engineer = harness.unit(
+            entityId=3,
+            blueprintId="uel0105",
+            position=[20, 2, 20],
+            idleState=False,
+            states=lua_value(harness.lua, {"Moving": True}),
+        )
+        harness.brain.units = harness.lua.table_from(
+            [acu, engineer, next_engineer, mex, *combat]
+        )
+        harness.brain.tick = 251
+        harness.observe()
+        inject_structure_operation(
+            harness,
+            actor_token="3:1",
+            site_key="cluster-b",
+            cluster_key="cluster-b",
+            position=[140, 2, 20],
+            reason="frontier_expansion",
+        )
+        current = reconcile(harness)
+        intent = campaign_intents(harness, current)[0]
+        assert intent.get("mode") == "transition"
+        return harness, current, intent, "cluster-b"
+    harness, acu, _, _, observation = start_campaign()
+    activate_campaign(harness, observation)
+    if mode == "recover":
+        harness.brain.tick = 300
+        current = reconcile(harness)
+        intent = campaign_intents(harness, current)[0]
+        assert intent.get("mode") == "recover"
+        return harness, current, intent, "cluster-a"
+    assert mode == "resume"
+    acu.options.health = 69
+    harness.brain.tick = 10
+    low = reconcile(harness)
+    execute_intents(harness, campaign_intents(harness, low), low)
+    acu.options.health = 75
+    harness.brain.tick = 20
+    reconcile(harness)
+    harness.brain.tick = 320
+    current = reconcile(harness)
+    intent = campaign_intents(harness, current)[0]
+    assert intent.get("mode") == "resume"
+    return harness, current, intent, "cluster-a"
+
+
+@pytest.mark.parametrize("mode", ["activate", "retarget", "transition", "resume", "recover"])
+@pytest.mark.parametrize("mutation", ["engineer_reach", "land_reach", "site_position"])
+def test_every_full_field_operation_revalidates_exact_live_site_before_execute(
+    mode: str,
+    mutation: str,
+) -> None:
+    harness, stale_observation, intent, site_key = prepare_reachability_sensitive_campaign_intent(mode)
+    target = controller_marker(harness, site_key)
+    old_position = plain(target.position)
+    before = plain(harness.controller.fieldCampaign)
+    clear_before = len(harness.calls.clear)
+    guard_before = len(harness.calls.guard)
+    move_before = len(harness.calls.move)
+    if mutation == "engineer_reach":
+        target.engineerReachable = False
+    elif mutation == "land_reach":
+        target.landReachable = False
+    else:
+        target.position = lua_value(
+            harness.lua,
+            [old_position[0] + 5, old_position[1], old_position[2]],
+        )
+    harness.observe()
+
+    execute_intents(harness, [intent], stale_observation)
+
+    assert len(harness.calls.clear) == clear_before
+    assert len(harness.calls.guard) == guard_before
+    assert len(harness.calls.move) == move_before
+    assert plain(harness.controller.fieldCampaign) == before
+    target.engineerReachable = True
+    target.landReachable = True
+    target.position = lua_value(harness.lua, old_position)
+    harness.observe()
+    harness.brain.tick += 1
+    retry_observation = reconcile(harness)
+    retry = campaign_intents(harness, retry_observation)
+    assert len(retry) == 1 and retry[0].get("mode") == mode
+    execute_intents(harness, retry, retry_observation)
+    if mode == "recall":
+        assert len(harness.calls.move) == move_before + 1
+    else:
+        assert len(harness.calls.guard) == guard_before + 1
+
+
+def test_transient_rebuild_backoff_does_not_block_exact_land_retarget_execute() -> None:
+    harness, observation, retarget, site_key = prepare_reachability_sensitive_campaign_intent(
+        "retarget"
+    )
+    harness.controller.blockedSites[site_key] = harness.brain.tick + 1000
+    harness.observe()
+    guard_before = len(harness.calls.guard)
+
+    execute_intents(harness, [retarget], observation)
+
+    assert len(harness.calls.guard) == guard_before + 1
+    assert harness.controller.fieldCampaign.objectiveKey == site_key
