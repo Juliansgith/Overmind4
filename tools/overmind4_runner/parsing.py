@@ -327,16 +327,15 @@ def _benchmark_fields(line: str) -> dict[str, str] | None:
     return _fields_at_prefix(line, BENCHMARK_PREFIX)
 
 
-def _has_duplicate_fields(line: str, prefix: str) -> bool:
+def _has_invalid_field_encoding(line: str, prefix: str) -> bool:
     log_prefix = _LOG_PREFIX.match(line)
     marker_at = log_prefix.end() if log_prefix else 0
     if not line.startswith(prefix, marker_at):
         return False
-    names = [
-        token.split("=", 1)[0]
-        for token in line[marker_at:].strip().split("|")[1:]
-        if "=" in token
-    ]
+    tokens = line[marker_at:].strip().split("|")[1:]
+    if any("=" not in token or not token.split("=", 1)[0] for token in tokens):
+        return True
+    names = [token.split("=", 1)[0] for token in tokens]
     return len(names) != len(set(names))
 
 
@@ -381,7 +380,7 @@ def _parse_benchmark_stream(
         if fields.get("run") != run_id:
             wrong_run_seen = True
             continue
-        if _has_duplicate_fields(line, BENCHMARK_PREFIX):
+        if _has_invalid_field_encoding(line, BENCHMARK_PREFIX):
             invalid = True
             continue
         if fields.get("v") != "1":
@@ -505,7 +504,7 @@ def _parse_operation_stream(
         phase = fields.get("phase")
         if army != our_slot:
             continue
-        if _has_duplicate_fields(line, OVERMIND_PREFIX):
+        if _has_invalid_field_encoding(line, OVERMIND_PREFIX):
             reason = reason or "malformed-operation-event"
             continue
         if (

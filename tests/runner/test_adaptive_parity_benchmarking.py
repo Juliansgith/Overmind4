@@ -790,6 +790,7 @@ class TestBenchmarkParsing:
             benchmark_line(300, 1).replace("mass_income=10", "mass_income=-1"),
             benchmark_line(300, 1).replace("mass_income=10", "mass_income=bad"),
             benchmark_line(300, 1) + "|mass_income=999",
+            benchmark_line(300, 1) + "|unframed-token",
             benchmark_line(300, 1).replace(f"run={RUN_ID}", "run=other"),
         )
 
@@ -890,6 +891,7 @@ class TestBenchmarkParsing:
         (
             operation_line(100, "mex-1", "opportunity")
             + "|operation=mex-2",
+            operation_line(100, "mex-1", "opportunity") + "|unframed-token",
             operation_line(100, "mex-1", "opportunity", response_ticks=-1),
             operation_line(100, "mex-1", "opportunity", scout_coverage_age="nan"),
         ),
