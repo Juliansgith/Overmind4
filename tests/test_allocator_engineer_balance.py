@@ -1034,6 +1034,50 @@ def test_incomplete_or_malformed_mex_never_advances_the_engineer_target(
     assert observation.macro.engineerTarget == 4
 
 
+@pytest.mark.parametrize(("engineer_target", "expected"), [(7, 1), (8, 2)])
+def test_three_land_factories_fill_two_engineer_deficits_beside_active_combat(
+    engineer_target: int,
+    expected: int,
+) -> None:
+    snapshot = _policy_allocator_snapshot(
+        "engineer", "engineer", "engineer", "engineer", "engineer"
+    )
+    third = copy.deepcopy(
+        next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
+    )
+    third.update(token="99:1", idle=True, needsRally=False)
+    snapshot["units"].append(third)
+    snapshot["pending"] = [
+        {
+            "kind": "factory_build",
+            "actorToken": "10:1",
+            "buildRole": "tank",
+            "phase": "accepted",
+        }
+    ]
+    snapshot["macro"].update(
+        engineerTarget=engineer_target,
+        engineerDemand=engineer_target,
+        unlockingEngineerNeeded=True,
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=200,
+        oneTimeEnergyReserve=1000,
+    )
+
+    engineer_orders = [
+        intent
+        for intent in intents_of(decide(snapshot), "factory_build")
+        if intent["buildRole"] == "engineer"
+    ]
+
+    assert len(engineer_orders) == expected
+    assert len({intent["actorToken"] for intent in engineer_orders}) == expected
+
+
 @pytest.mark.parametrize(
     ("available_mass", "available_energy", "bank_mass", "bank_energy"),
     [

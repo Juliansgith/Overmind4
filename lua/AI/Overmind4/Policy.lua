@@ -1904,6 +1904,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
         or (tonumber(economy.massTrend) or 0) < 0
         or (tonumber(economy.massStoredRatio) or 0) < 0.1
     local plannedEngineer = false
+    local plannedEngineerCount = 0
     local protectedCombatOutstanding = false
     local plannedAirScreen = false
     local plannedAirScout = false
@@ -1919,6 +1920,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             and operation.buildRole == 'engineer'
         then
             plannedEngineer = true
+            plannedEngineerCount = plannedEngineerCount + 1
         elseif operation.kind == 'factory_build'
             and operation.buildRole == 'interceptor'
         then
@@ -2088,6 +2090,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     role = 'engineer'
                     reason = 'recovery_engineer_floor'
                     plannedEngineer = true
+                    plannedEngineerCount = plannedEngineerCount + 1
                     recoveryOutstanding = true
                 elseif protectLandCombat
                     and not plannedAllocatorCombat
@@ -2101,7 +2104,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                         plannedAllocatorCombat = true
                     end
                 elseif not recoveryMode
-                    and not plannedEngineer
+                    and plannedEngineerCount < 2
                     and macro
                     and macro.allocatorEnabled == true
                     and (macro.unlockingEngineerNeeded == true
@@ -2114,8 +2117,9 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     role = 'engineer'
                     reason = 'unlock_profitable_expansion'
                     plannedEngineer = true
+                    plannedEngineerCount = plannedEngineerCount + 1
                 elseif not recoveryMode
-                    and not plannedEngineer
+                    and plannedEngineerCount < 2
                     and not massStalled
                     and (counts.engineer or 0) < engineerDemand
                     and CanBuild(factory, 'engineer')
@@ -2123,6 +2127,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     role = 'engineer'
                     reason = macro and 'construction_capacity' or reason
                     plannedEngineer = true
+                    plannedEngineerCount = plannedEngineerCount + 1
                 elseif not recoveryMode
                     and (counts.scout or 0) < 1
                     and CanBuild(factory, 'scout')
@@ -2668,7 +2673,6 @@ Policy.ApplyAllocator = function(snapshot, intents)
     local leadingExpansion = nil
     local hasLandCombatRequest = false
     local protectedCombatIntent = nil
-    local concurrentUnlockIntent = nil
     for _, intent in ipairs(ordered) do
         if intent.kind == 'factory_build'
             and landCombatRoles[intent.buildRole] == true
@@ -2681,18 +2685,6 @@ Policy.ApplyAllocator = function(snapshot, intents)
             then
                 protectedCombatIntent = intent
             end
-        end
-        if reserveLandCombat
-            and completedLandFactories >= 2
-            and completedEngineers
-                < math.max(MIN_RECOVERY_ENGINEERS,
-                    math.floor(tonumber(macro.engineerTarget) or 0))
-            and intent.kind == 'factory_build'
-            and intent.reason == 'unlock_profitable_expansion'
-            and (not concurrentUnlockIntent
-                or IntentActorKey(intent) < IntentActorKey(concurrentUnlockIntent))
-        then
-            concurrentUnlockIntent = intent
         end
         if (intent.kind == 'build_structure'
                 or intent.kind == 'assist_structure')
@@ -2813,7 +2805,13 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 and intent.reason == 'persistent_air_screen'
             local protectedAirScout = intent.kind == 'factory_build'
                 and intent.reason == 'initial_frontier_air_scout'
-            local concurrentUnlock = intent == concurrentUnlockIntent
+            local concurrentUnlock = reserveLandCombat
+                and completedLandFactories >= 2
+                and completedEngineers
+                    < math.max(MIN_RECOVERY_ENGINEERS,
+                        math.floor(tonumber(macro.engineerTarget) or 0))
+                and intent.kind == 'factory_build'
+                and intent.reason == 'unlock_profitable_expansion'
             local overflowCombat = intent.kind == 'factory_build'
                 and intent.reason == 'continuous_land_production'
                 and landCombatRoles[intent.buildRole] == true
