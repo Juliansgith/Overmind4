@@ -8083,6 +8083,31 @@ local function CompleteCommanderRecovery(controller, records)
     return true
 end
 
+ESCALATION.TraceAirliftMexRejection = function(
+    controller, operation, record, records
+)
+    if operation.reason ~= 'airlift_mex' then return end
+    local delivery = controller.transportDeliveries[operation.siteKey]
+    local transportRecord = delivery and records[delivery.transportToken] or nil
+    local buildPosition = TerrainPosition(operation.position)
+    Emit(controller, 'airlift_mex_rejected', {
+        actor = operation.actorToken or 'none',
+        actor_distance = buildPosition
+            and Distance(record.position, buildPosition) or -1,
+        actor_x = (record.position or {})[1] or -1,
+        actor_z = (record.position or {})[3] or -1,
+        buildable = buildPosition
+            and SafeCall(false, controller.brain.CanBuildStructureAt,
+                controller.brain, Catalog.IdFor('mass_extractor'),
+                buildPosition) == true,
+        site = operation.siteKey or 'none',
+        transport_distance = transportRecord and buildPosition
+            and Distance(transportRecord.position, buildPosition) or -1,
+        transport_x = transportRecord and (transportRecord.position or {})[1] or -1,
+        transport_z = transportRecord and (transportRecord.position or {})[3] or -1,
+    })
+end
+
 Controller.Reconcile = function(controller, observation)
     local records = RecordByToken(observation.units)
     local tick = CurrentTick(controller)
@@ -8242,31 +8267,9 @@ Controller.Reconcile = function(controller, observation)
                 and record.idle == true
                 and (tonumber(operation.lastFraction) or 0) <= 0
             then
-                if operation.reason == 'airlift_mex' then
-                    local delivery = controller.transportDeliveries[operation.siteKey]
-                    local transportRecord = delivery
-                        and records[delivery.transportToken]
-                        or nil
-                    local buildPosition = TerrainPosition(operation.position)
-                    Emit(controller, 'airlift_mex_rejected', {
-                        actor = token,
-                        actor_distance = buildPosition
-                            and Distance(record.position, buildPosition) or -1,
-                        actor_x = (record.position or {})[1] or -1,
-                        actor_z = (record.position or {})[3] or -1,
-                        buildable = buildPosition
-                            and SafeCall(false, controller.brain.CanBuildStructureAt,
-                                controller.brain, Catalog.IdFor('mass_extractor'),
-                                buildPosition) == true,
-                        site = operation.siteKey or 'none',
-                        transport_distance = transportRecord and buildPosition
-                            and Distance(transportRecord.position, buildPosition) or -1,
-                        transport_x = transportRecord
-                            and (transportRecord.position or {})[1] or -1,
-                        transport_z = transportRecord
-                            and (transportRecord.position or {})[3] or -1,
-                    })
-                end
+                ESCALATION.TraceAirliftMexRejection(
+                    controller, operation, record, records
+                )
                 ReleaseOperation(controller, token, 'rejected')
             elseif operation.kind == 'reclaim'
                 and operation.accepted == true
