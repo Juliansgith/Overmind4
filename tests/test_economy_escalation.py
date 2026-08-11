@@ -409,6 +409,25 @@ def test_dynamic_placement_probes_beyond_legacy_thirteen_seeds_and_is_bounded() 
     assert len(harness.calls.canBuild) <= 96
 
 
+def test_power_generator_candidates_start_flush_against_factory_sides() -> None:
+    harness = make_harness()
+    factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0101",
+        position=[30, 2, 30],
+    )
+    harness.brain.units = harness.lua.table_from([factory])
+
+    placements = plain(harness.observe().placements)["power_generator"]
+
+    assert [(position[0], position[2]) for position in placements[:4]] == [
+        (25, 27),
+        (35, 27),
+        (27, 25),
+        (27, 35),
+    ]
+
+
 def test_dynamic_placement_probe_budget_is_global_not_multiplied_by_engineer_count() -> None:
     baseline = make_harness()
     baseline.brain.canBuildAt = False

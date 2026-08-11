@@ -2714,6 +2714,73 @@ local function PlacementSnapshot(controller, units)
     end)
     for _, role in ipairs({ 'power_generator', 'land_factory', 'air_factory' }) do
         roleProbeStart = probes
+        if role == 'power_generator' then
+            local generatorSpec = ESCALATION.FootprintSpec(
+                controller, 'power_generator'
+            )
+            local factories = {}
+            for _, unit in ipairs(units or {}) do
+                if unit.complete == true and (unit.role == 'land_factory'
+                    or unit.role == 'land_factory_t2'
+                    or unit.role == 'land_factory_t2_support'
+                    or unit.role == 'land_factory_t3'
+                    or unit.role == 'air_factory')
+                then
+                    TableInsert(factories, unit)
+                end
+            end
+            table.sort(factories, function(a, b)
+                return tostring(a.token or '') < tostring(b.token or '')
+            end)
+            local function PositionFromMinimum(minimumX, minimumZ)
+                return {
+                    minimumX + generatorSpec.footX * 0.5
+                        - generatorSpec.offsetX,
+                    0,
+                    minimumZ + generatorSpec.footZ * 0.5
+                        - generatorSpec.offsetZ,
+                }
+            end
+            if generatorSpec then
+                for _, factory in ipairs(factories) do
+                    local rect = ESCALATION.PlacementRect(
+                        controller, factory.role, factory.position
+                    )
+                    if rect then
+                        local segmentsX = math.floor(
+                            (rect[3] - rect[1]) / generatorSpec.skirtX
+                        )
+                        local segmentsZ = math.floor(
+                            (rect[4] - rect[2]) / generatorSpec.skirtZ
+                        )
+                        local segment = 0
+                        while segment < math.max(segmentsX, segmentsZ) do
+                            if segment < segmentsZ then
+                                local minimumZ = rect[2]
+                                    + segment * generatorSpec.skirtZ
+                                Consider('power_generator', PositionFromMinimum(
+                                    rect[1] - generatorSpec.skirtX, minimumZ
+                                ))
+                                Consider('power_generator', PositionFromMinimum(
+                                    rect[3], minimumZ
+                                ))
+                            end
+                            if segment < segmentsX then
+                                local minimumX = rect[1]
+                                    + segment * generatorSpec.skirtX
+                                Consider('power_generator', PositionFromMinimum(
+                                    minimumX, rect[2] - generatorSpec.skirtZ
+                                ))
+                                Consider('power_generator', PositionFromMinimum(
+                                    minimumX, rect[4]
+                                ))
+                            end
+                            segment = segment + 1
+                        end
+                    end
+                end
+            end
+        end
         for _, seed in ipairs(sortedSeeds) do
             Consider(role, seed)
         end
