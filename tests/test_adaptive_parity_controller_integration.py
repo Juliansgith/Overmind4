@@ -2631,6 +2631,72 @@ def test_airlift_unload_queues_the_exact_drop_mex_before_detach() -> None:
     )
 
 
+def test_airlift_skips_the_nearest_physically_unbuildable_mex() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute(
+        "IntelligenceStub.PlanTransport = Intelligence.PlanTransport"
+    )
+    engineer = harness.unit(
+        entityId=32,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    transport = harness.unit(
+        entityId=31,
+        blueprintId="uea0107",
+        position=[10, 20, 22],
+    )
+    harness.brain.units = harness.lua.table_from([transport, engineer])
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                "key": "blocked",
+                "name": "Blocked",
+                "kind": "mass",
+                "position": [200, 2, 200],
+                "distance": 250,
+                "reachable": True,
+                "engineerReachable": True,
+            },
+            {
+                "key": "usable",
+                "name": "Usable",
+                "kind": "mass",
+                "position": [220, 2, 200],
+                "distance": 270,
+                "reachable": True,
+                "engineerReachable": True,
+            },
+        ],
+    )
+    harness.lua.execute(
+        "brain.canBuildAt = function(blueprintId, position) "
+        "return blueprintId ~= 'ueb1103' or position[1] >= 220 end; "
+        "Policy.Decide = function() return {} end"
+    )
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"air_production": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.transportLoad) == 1
+    mission = plain(harness.controller.transportMissions["airlift:usable"])
+    assert mission["siteKey"] == "usable"
+    assert harness.controller.transportMissions["airlift:blocked"] is None
+
+
 @pytest.mark.parametrize("work_source", ["policy", "director"])
 def test_unloading_airlift_keeps_cargo_engineer_out_of_other_work(
     work_source: str,

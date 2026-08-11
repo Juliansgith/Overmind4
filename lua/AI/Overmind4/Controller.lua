@@ -10397,7 +10397,20 @@ ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
         if a.landEtaTicks == b.landEtaTicks then return a.key < b.key end
         return a.landEtaTicks < b.landEtaTicks
     end)
-    site = candidates[1]
+    local mexBlueprint = Catalog.IdFor('mass_extractor')
+    for index, candidate in ipairs(candidates) do
+        if index > 8 then break end
+        local position = TerrainPosition(candidate.position)
+        if mexBlueprint and position
+            and SafeCall(false, controller.brain.CanBuildStructureAt,
+                controller.brain, mexBlueprint, position) == true
+        then
+            candidate.position = position
+            site = candidate
+            break
+        end
+        BlockSite(controller, candidate.key, 'airlift_preflight')
+    end
     return {
         tick = observation.tick,
         engineer = engineer,
