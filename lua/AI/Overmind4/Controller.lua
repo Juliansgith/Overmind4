@@ -3330,9 +3330,9 @@ local function ExecuteStructure(controller, intent, record)
         end
         if length <= 0.01 then dx = 1; dz = 0; length = 1 end
         local stagingPosition = TerrainPosition({
-            position[1] + dx * 5 / length,
+            position[1] + dx * 20 / length,
             0,
-            position[3] + dz * 5 / length,
+            position[3] + dz * 20 / length,
         })
         if stagingPosition then
             ok = pcall(function()
@@ -9014,6 +9014,7 @@ ESCALATION.TransportEvent = function(controller, mission, observation)
 end
 
 ESCALATION.ReconcileDirectorMissions = function(controller, observation)
+    local records = RecordByToken(observation.units or {})
     for _, missionId in ipairs(SortedKeys(controller.transportMissions)) do
         local mission = controller.transportMissions[missionId]
         if mission and (mission.state == 'loading' or mission.state == 'loaded'
@@ -9041,6 +9042,18 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
                             position = CopyPosition(mission.dropPosition),
                             completedTick = observation.tick,
                         }
+                    end
+                    local transportRecord = records[mission.transportToken]
+                    local transportActor = transportRecord
+                        and LiveOwnedActor(
+                            controller, mission.transportToken,
+                            transportRecord, 'transport'
+                        )
+                        or nil
+                    if transportActor then
+                        pcall(function()
+                            IssueMove({ transportActor }, CopyPosition(controller.basePosition))
+                        end)
                     end
                     ESCALATION.CompleteOperation(controller, mission)
                 else
@@ -9075,7 +9088,6 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
             end
         end
     end
-    local records = RecordByToken(observation.units or {})
     for _, bomberToken in ipairs(SortedKeys(controller.bomberMissions)) do
         local mission = controller.bomberMissions[bomberToken]
         local record = records[bomberToken]
