@@ -2522,6 +2522,30 @@ def prepare_reachability_sensitive_campaign_intent(mode: str) -> tuple[Any, Any,
         return harness, current, intent, "cluster-b"
     harness, acu, _, _, observation = start_campaign()
     activate_campaign(harness, observation)
+    if mode == "reinforce":
+        first_new = harness.unit(
+            entityId=9000,
+            blueprintId="uel0201",
+            position=[10, 2, 20],
+        )
+        second_new = harness.unit(
+            entityId=9001,
+            blueprintId="uel0201",
+            position=[10, 2, 20],
+        )
+        current_units = list(harness.brain.units.values())
+        harness.brain.units = harness.lua.table_from([*current_units, first_new])
+        harness.brain.tick = 10
+        assert campaign_intents(harness, reconcile(harness)) == []
+        harness.brain.units = harness.lua.table_from(
+            [*current_units, first_new, second_new]
+        )
+        harness.brain.tick = 20
+        current = reconcile(harness)
+        intent = campaign_intents(harness, current)[0]
+        assert intent.get("mode") == "reinforce"
+        assert intent.get("actorTokens") == ["9001:1"]
+        return harness, current, intent, "cluster-a"
     if mode == "recover":
         harness.brain.tick = 300
         current = reconcile(harness)
@@ -2543,7 +2567,10 @@ def prepare_reachability_sensitive_campaign_intent(mode: str) -> tuple[Any, Any,
     return harness, current, intent, "cluster-a"
 
 
-@pytest.mark.parametrize("mode", ["activate", "retarget", "transition", "resume", "recover"])
+@pytest.mark.parametrize(
+    "mode",
+    ["activate", "retarget", "transition", "resume", "recover", "reinforce"],
+)
 @pytest.mark.parametrize("mutation", ["engineer_reach", "land_reach", "site_position"])
 def test_every_full_field_operation_revalidates_exact_live_site_before_execute(
     mode: str,

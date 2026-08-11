@@ -3619,34 +3619,27 @@ local function ExecuteFieldCampaign(controller, intent, recordByToken, usedActor
             guardRole
         )
         if not guard then return false end
-        if intent.mode == 'activate'
-            or intent.mode == 'retarget'
-            or intent.mode == 'transition'
-            or intent.mode == 'recover'
-            or intent.mode == 'resume'
+        local operation = controller.pending[guardToken]
+        local expectedKey = campaign.desiredObjectiveKey
+            or campaign.objectiveKey
+        local expectedReason = campaign.desiredObjectiveReason
+            or campaign.objectiveReason
+        if not StructureOperation(operation)
+            or operation.actorToken ~= guardToken
+            or operation.siteKey ~= expectedKey
+            or operation.buildRole ~= 'mass_extractor'
+            or operation.reason ~= expectedReason
+            or not IsCampaignPosition(operation.position)
+            or DistanceSquared(operation.position, expectedPosition) > 0.01
+            or not CampaignSiteSupportsPosition(
+                controller,
+                expectedKey,
+                expectedPosition
+            )
+            or operation.phase == 'cancelling'
+            or operation.cancelReason ~= nil
         then
-            local operation = controller.pending[guardToken]
-            local expectedKey = campaign.desiredObjectiveKey
-                or campaign.objectiveKey
-            local expectedReason = campaign.desiredObjectiveReason
-                or campaign.objectiveReason
-            if not StructureOperation(operation)
-                or operation.actorToken ~= guardToken
-                or operation.siteKey ~= expectedKey
-                or operation.buildRole ~= 'mass_extractor'
-                or operation.reason ~= expectedReason
-                or not IsCampaignPosition(operation.position)
-                or DistanceSquared(operation.position, expectedPosition) > 0.01
-                or not CampaignSiteSupportsPosition(
-                    controller,
-                    expectedKey,
-                    expectedPosition
-                )
-                or operation.phase == 'cancelling'
-                or operation.cancelReason ~= nil
-            then
-                return false
-            end
+            return false
         end
     end
 
