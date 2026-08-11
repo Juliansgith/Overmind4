@@ -1746,6 +1746,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
         or (tonumber(economy.massStoredRatio) or 0) < 0.1
     local plannedEngineer = false
     local protectedCombatOutstanding = false
+    local plannedAirScreen = false
     for _, operation in ipairs(snapshot.pending or {}) do
         if operation.kind == 'factory_build'
             and (operation.buildRole == 'tank'
@@ -1758,6 +1759,10 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             and operation.buildRole == 'engineer'
         then
             plannedEngineer = true
+        elseif operation.kind == 'factory_build'
+            and operation.buildRole == 'interceptor'
+        then
+            plannedAirScreen = true
         end
     end
     local completedEngineers = 0
@@ -1830,6 +1835,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             and factory.complete == true
             and factory.idle == true
             and not pendingActors[factory.token]
+            and not plannedAirScreen
             and (counts.interceptor or 0) < 4
             and CanBuild(factory, 'interceptor')
         then
@@ -1841,6 +1847,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                 reason = 'persistent_air_screen',
             })
             counts.interceptor = (counts.interceptor or 0) + 1
+            plannedAirScreen = true
         elseif factory.role == 'land_factory_t2'
             and factory.complete == true
             and factory.idle == true
@@ -2474,6 +2481,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
             and a.kind == 'factory_build'
             and landCombatRoles[a.buildRole] == true
         then ap = 31 end
+        if a.kind == 'factory_upgrade' then ap = 20.5 end
         if reserveLandCombat and hasLandCombatRequest and leadingExpansion
             and a ~= leadingExpansion
             and (a.kind == 'build_structure'
@@ -2484,7 +2492,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
         then ap = 33 end
         if a.kind == 'factory_build'
             and a.reason == 'persistent_air_screen'
-        then ap = 25 end
+        then ap = 21 end
         if b.kind == 'factory_build'
             and b.reason == 'unlock_profitable_expansion'
         then bp = reserveLandCombat and 32 or 17 end
@@ -2495,6 +2503,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
             and b.kind == 'factory_build'
             and landCombatRoles[b.buildRole] == true
         then bp = 31 end
+        if b.kind == 'factory_upgrade' then bp = 20.5 end
         if reserveLandCombat and hasLandCombatRequest and leadingExpansion
             and b ~= leadingExpansion
             and (b.kind == 'build_structure'
@@ -2505,7 +2514,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
         then bp = 33 end
         if b.kind == 'factory_build'
             and b.reason == 'persistent_air_screen'
-        then bp = 25 end
+        then bp = 21 end
         if ap == bp then
             local aRoi = tonumber(a.estimatedRoiTicks) or 1000000000
             local bRoi = tonumber(b.estimatedRoiTicks) or 1000000000
@@ -2536,8 +2545,10 @@ Policy.ApplyAllocator = function(snapshot, intents)
             local structureRequest = intent.kind == 'build_structure'
                 or intent.kind == 'assist_structure'
             local protectedCombat = intent == protectedCombatIntent
+            local protectedAirScreen = intent.kind == 'factory_build'
+                and intent.reason == 'persistent_air_screen'
             local concurrentUnlock = intent == concurrentUnlockIntent
-            local protectedFactoryLane = protectedCombat
+            local protectedFactoryLane = protectedCombat or protectedAirScreen
                 or (concurrentUnlock and protectedCombatAccepted)
             local protectedUsesBank = false
             if allowed and structureRequest then

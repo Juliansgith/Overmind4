@@ -677,24 +677,240 @@ def test_structure_admission_fails_closed_on_malformed_actor_build_rate(
     assert opening == []
 
 
+def _air_screen_allocator_snapshot(
+    *,
+    interceptors: int = 0,
+    air_factories: int = 1,
+) -> dict[str, Any]:
+    snapshot = _policy_allocator_snapshot(
+        *(["air_factory"] * air_factories),
+        *(["interceptor"] * interceptors),
+    )
+    snapshot["sites"]["mass"] = []
+    snapshot["sites"]["hydro"] = []
+    snapshot["macro"].update(
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+    )
+    return snapshot
+
+
 @pytest.mark.parametrize("available_energy, expected", [(8.999, 0), (9.0, 1)])
 def test_interceptor_admission_uses_exact_nine_energy_per_tick(
     available_energy: float,
     expected: int,
 ) -> None:
-    snapshot = _policy_allocator_snapshot("air_factory")
+    snapshot = _air_screen_allocator_snapshot()
     snapshot["macro"].update(
         availableRecurringMass=0.2,
         availableRecurringEnergy=available_energy,
-        oneTimeMassReserve=50,
-        oneTimeEnergyReserve=2250,
-        factoryFundedCount=1,
     )
     builds = [
         intent for intent in intents_of(decide(snapshot), "factory_build")
         if intent.get("buildRole") == "interceptor"
     ]
     assert len(builds) == expected
+
+
+def test_artifact_air_screen_is_bank_funded_when_generic_factory_slots_are_zero() -> None:
+    snapshot = _air_screen_allocator_snapshot()
+    snapshot["macro"].update(
+        availableRecurringMass=1.700 - 1.273,
+        availableRecurringEnergy=16 - 10.773,
+        oneTimeMassReserve=696,
+        oneTimeEnergyReserve=2654,
+    )
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+
+    assert [(intent["buildRole"], intent["reason"]) for intent in builds] == [
+        ("interceptor", "persistent_air_screen")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mass", "energy", "bank_mass", "bank_energy", "expected"),
+    [
+        (0.2, 9, 0, 0, 1),
+        (0.199, 9, 0, 0, 0),
+        (0.2, 8.999, 0, 0, 0),
+        (0, 0, 50, 2250, 1),
+        (0, 0, 49.999, 2250, 0),
+        (0, 0, 50, 2249.999, 0),
+    ],
+)
+def test_air_screen_protected_lane_requires_exact_recurring_or_full_unit_bank(
+    mass: float,
+    energy: float,
+    bank_mass: float,
+    bank_energy: float,
+    expected: int,
+) -> None:
+    snapshot = _air_screen_allocator_snapshot()
+    snapshot["macro"].update(
+        availableRecurringMass=mass,
+        availableRecurringEnergy=energy,
+        oneTimeMassReserve=bank_mass,
+        oneTimeEnergyReserve=bank_energy,
+    )
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+
+    assert len(builds) == expected
+
+
+def test_pending_interceptor_occupies_the_single_air_screen_lane() -> None:
+    snapshot = _air_screen_allocator_snapshot(air_factories=2)
+    factories = sorted(
+        (unit for unit in snapshot["units"] if unit["role"] == "air_factory"),
+        key=lambda unit: unit["token"],
+    )
+    snapshot["pending"].append({
+        "kind": "factory_build",
+        "actorToken": factories[0]["token"],
+        "buildRole": "interceptor",
+        "phase": "accepted",
+    })
+    snapshot["macro"].update(
+        oneTimeMassReserve=100,
+        oneTimeEnergyReserve=4500,
+    )
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+
+    assert builds == []
+
+
+@pytest.mark.parametrize(
+    ("completed", "expected"),
+    [(0, 1), (1, 1), (3, 1), (4, 0)],
+)
+def test_completed_interceptor_cycles_repeat_one_at_a_time_until_four(
+    completed: int,
+    expected: int,
+) -> None:
+    snapshot = _air_screen_allocator_snapshot(
+        interceptors=completed,
+        air_factories=2,
+    )
+    snapshot["macro"].update(
+        oneTimeMassReserve=50,
+        oneTimeEnergyReserve=2250,
+    )
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+
+    assert len(builds) == expected
+
+
+def test_air_screen_bank_is_reserved_before_speculative_mex() -> None:
+    snapshot = _air_screen_allocator_snapshot()
+    engineer = next(unit for unit in snapshot["units"] if unit["role"] == "engineer")
+    engineer["canBuild"]["mass_extractor"] = True
+    snapshot["sites"]["mass"] = [mass_site("speculative", 25, 20, frontier=True)]
+    snapshot["macro"].update(
+        expansionOpportunityCount=1,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=50,
+        oneTimeEnergyReserve=2250,
+    )
+
+    result = decide(snapshot)
+
+    assert [
+        intent["buildRole"] for intent in intents_of(result, "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ] == ["interceptor"]
+    assert not [
+        intent for intent in intents_of(result, "build_structure")
+        if intent.get("reason") == "frontier_expansion"
+    ]
+
+
+def test_funded_air_land_and_expansion_lanes_use_distinct_actors() -> None:
+    snapshot = _policy_allocator_snapshot(
+        "air_factory", "land_factory", "land_factory", "engineer",
+    )
+    snapshot["sites"]["hydro"] = []
+    snapshot["sites"]["mass"] = [mass_site("funded", 25, 20, frontier=True)]
+    snapshot["macro"].update(
+        factoryFundedCount=0,
+        expansionOpportunityCount=1,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        oneTimeMassReserve=150,
+        oneTimeEnergyReserve=3000,
+    )
+
+    result = decide(snapshot)
+    air = [
+        intent for intent in intents_of(result, "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+    land = [
+        intent for intent in intents_of(result, "factory_build")
+        if intent.get("buildRole") in {"tank", "artillery", "anti_air", "lab"}
+    ]
+    mex = [
+        intent for intent in intents_of(result, "build_structure")
+        if intent.get("reason") == "frontier_expansion"
+    ]
+
+    assert len(air) == len(land) == len(mex) == 1
+    assert len({air[0]["actorToken"], land[0]["actorToken"], mex[0]["actorToken"]}) == 3
+
+
+@pytest.mark.parametrize("contact", [False, True])
+def test_contact_does_not_disable_a_funded_air_screen_lane(contact: bool) -> None:
+    snapshot = _air_screen_allocator_snapshot()
+    snapshot["macro"].update(
+        oneTimeMassReserve=50,
+        oneTimeEnergyReserve=2250,
+    )
+    if contact:
+        snapshot["enemyContact"] = {"position": [12, 2, 12], "immediate": True}
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+
+    assert len(builds) == 1
+
+
+def test_air_screen_protected_lane_fails_closed_without_a_valid_economy_sample() -> None:
+    snapshot = _air_screen_allocator_snapshot()
+    snapshot["macro"].update(
+        economyLedgerValid=False,
+        economyInputValid=False,
+        oneTimeMassReserve=5000,
+        oneTimeEnergyReserve=50000,
+    )
+
+    builds = [
+        intent for intent in intents_of(decide(snapshot), "factory_build")
+        if intent.get("reason") == "persistent_air_screen"
+    ]
+
+    assert builds == []
 
 
 def test_positive_payback_mex_preempts_unfunded_combat_queue() -> None:
