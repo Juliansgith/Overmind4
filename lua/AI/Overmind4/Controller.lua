@@ -3316,6 +3316,7 @@ local function ExecuteStructure(controller, intent, record)
     end
 
     intent.position = position
+    ESCALATION.TraceAirliftMexOrder(controller, intent, record, position)
     RecordPending(controller, intent, record)
     local ok = pcall(function()
         IssueBuildMobile({ actor }, position, blueprintId, {})
@@ -8080,6 +8081,19 @@ ESCALATION.TraceAirliftMexRejection = function(
             and Distance(transportRecord.position, buildPosition) or -1,
         transport_x = transportRecord and (transportRecord.position or {})[1] or -1,
         transport_z = transportRecord and (transportRecord.position or {})[3] or -1,
+    })
+end
+
+ESCALATION.TraceAirliftMexOrder = function(controller, intent, record, position)
+    if intent.reason ~= 'airlift_mex' then return end
+    Emit(controller, 'airlift_mex_order', {
+        actor = intent.actorToken,
+        actor_distance = Distance(record.position, position),
+        actor_x = (record.position or {})[1] or -1,
+        actor_z = (record.position or {})[3] or -1,
+        buildable = SafeCall(false, controller.brain.CanBuildStructureAt,
+            controller.brain, Catalog.IdFor('mass_extractor'), position) == true,
+        site = intent.siteKey or 'none',
     })
 end
 
