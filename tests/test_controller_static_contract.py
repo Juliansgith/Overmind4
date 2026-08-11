@@ -6,13 +6,24 @@ from pathlib import Path
 from conftest import ROOT, source
 
 
-RUNTIME_MODULES = {
+BASE_RUNTIME_MODULES = {
     "Brain.lua",
     "Telemetry.lua",
     "Catalog.lua",
     "Policy.lua",
     "Controller.lua",
 }
+
+# The parity implementation is intentionally limited to three cohesive pure
+# directors.  Keeping this allow-list here prevents the new macro work from
+# turning the FAF-loaded mod into a development-tool payload or a collection of
+# one-off managers.
+DIRECTOR_MODULES = {
+    "MacroDirector.lua",
+    "Intelligence.lua",
+    "ForceDirector.lua",
+}
+EXPECTED_RUNTIME_MODULES = BASE_RUNTIME_MODULES | DIRECTOR_MODULES
 
 FORBIDDEN_TEXT = (
     "ArmyBrains",
@@ -43,16 +54,26 @@ ALLOWED_ISSUES = {
     "IssueClearCommands",
     "IssueUpgrade",
     "IssuePatrol",
+    "IssueTransportLoad",
+    "IssueTransportUnload",
 }
 
 
-def test_runtime_module_budget_is_exactly_three_new_modules() -> None:
+def _present_runtime_modules() -> set[str]:
     module_dir = ROOT / "lua" / "AI" / "Overmind4"
-    assert {path.name for path in module_dir.glob("*.lua")} == RUNTIME_MODULES
+    return {path.name for path in module_dir.glob("*.lua")}
+
+
+def test_runtime_module_budget_allows_only_base_or_integrated_director_set() -> None:
+    present = _present_runtime_modules()
+    assert BASE_RUNTIME_MODULES <= present <= EXPECTED_RUNTIME_MODULES
 
 
 def test_no_stock_decision_imports_managers_platoons_or_forbidden_intel_apis() -> None:
-    combined = "\n".join(source(f"lua/AI/Overmind4/{name}") for name in sorted(RUNTIME_MODULES))
+    combined = "\n".join(
+        source(f"lua/AI/Overmind4/{name}")
+        for name in sorted(_present_runtime_modules())
+    )
     lowered = combined.lower()
     assert "/lua/aibrains/base-ai.lua" not in lowered
     assert "/lua/aibrains/medium-ai.lua" not in lowered
