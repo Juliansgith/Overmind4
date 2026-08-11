@@ -559,6 +559,120 @@ class TestFundedPortfolio:
         ):
             assert intent_by_id(plan, lane_id)["admitted"] is True, lane_id
 
+    def test_one_exact_mex_budget_creates_one_consumable_grant_not_four_boolean_slots(self) -> None:
+        request = lane_request(
+            "mex_rebuild",
+            mass_drain=0.3,
+            energy_drain=3,
+            mass_cost=36,
+            energy_cost=360,
+            required=True,
+        )
+        snapshot = portfolio_snapshot(requests=[request])
+        snapshot["economy"].update(
+            {
+                "massIncome": 0,
+                "massRequested": 0,
+                "energyIncome": 0,
+                "energyRequested": 0,
+                "massStored": 36,
+                "energyStored": 360,
+            }
+        )
+        snapshot["opportunities"].update(
+            {"fundableBuilderJobs": 12, "lostMex": 4}
+        )
+
+        plan = build_portfolio(snapshot)
+
+        assert plan["fundedExpansionSlots"] == 1
+        assert [
+            (grant["requestId"], grant["lane"], grant["source"])
+            for grant in plan["grants"]
+        ] == [("mex_rebuild-1", "mex_rebuild", "bank")]
+        assert plan["fundingLedger"] == {
+            "recurringMass": 0,
+            "recurringEnergy": 0,
+            "bankMass": 0,
+            "bankEnergy": 0,
+        }
+
+    def test_preserved_lost_mex_lane_without_resources_creates_no_spendable_grant(self) -> None:
+        request = lane_request(
+            "mex_rebuild",
+            mass_drain=0.3,
+            energy_drain=3,
+            mass_cost=36,
+            energy_cost=360,
+            required=True,
+        )
+        snapshot = portfolio_snapshot(requests=[request])
+        snapshot["economy"].update(
+            {
+                "massIncome": 0,
+                "massRequested": 0,
+                "energyIncome": 0,
+                "energyRequested": 0,
+                "massStored": 0,
+                "energyStored": 0,
+            }
+        )
+        snapshot["opportunities"].update(
+            {"fundableBuilderJobs": 12, "lostMex": 1}
+        )
+
+        plan = build_portfolio(snapshot)
+
+        assert plan["lanes"]["mex_rebuild"]["preserved"] is True
+        assert len(plan["grants"]) == 0
+        assert plan["fundedExpansionSlots"] == 0
+
+    def test_recurring_and_bank_funds_produce_distinct_rolling_operation_grants(self) -> None:
+        requests = [
+            {
+                **lane_request(
+                    "mex_rebuild",
+                    mass_drain=0.3,
+                    energy_drain=3,
+                    mass_cost=36,
+                    energy_cost=360,
+                    required=True,
+                ),
+                "id": request_id,
+            }
+            for request_id in ("mex-a", "mex-b")
+        ]
+        snapshot = portfolio_snapshot(requests=requests)
+        snapshot["economy"].update(
+            {
+                "massIncome": 0.3,
+                "massRequested": 0,
+                "energyIncome": 3,
+                "energyRequested": 0,
+                "massStored": 36,
+                "energyStored": 360,
+            }
+        )
+        snapshot["opportunities"]["fundableBuilderJobs"] = 2
+
+        plan = build_portfolio(snapshot)
+
+        assert [grant["requestId"] for grant in plan["grants"]] == [
+            "mex-a",
+            "mex-b",
+        ]
+        assert [grant["source"] for grant in plan["grants"]] == [
+            "recurring",
+            "bank",
+        ]
+        assert plan["fundedExpansionSlots"] == 2
+        assert plan["fundingLedger"] == {
+            "recurringMass": 0,
+            "recurringEnergy": 0,
+            "bankMass": 0,
+            "bankEnergy": 0,
+        }
+
 
 def mass_site(
     key: str,
@@ -2152,6 +2266,137 @@ class TestRegionalMacro:
         assert job["failureReason"] == "actor_unavailable"
         assert job["retryCount"] == 1
 
+    def test_active_job_claim_reassigns_a_conflicting_new_job_to_an_exact_free_engineer(self) -> None:
+        ledger = {
+            "epoch": 1,
+            "jobs": {
+                "mex:a": {
+                    "id": "mex:a",
+                    "kind": "build_mex",
+                    "actorToken": "eng-1:1",
+                    "targetKey": "site-a",
+                    "phase": "travelling",
+                    "deadlineTick": 900,
+                    "lastProgressTick": 100,
+                    "remainingDistance": 100,
+                    "retryCount": 0,
+                }
+            },
+        }
+        incoming = {
+            "id": "mex:b",
+            "kind": "build_mex",
+            "actorToken": "eng-1:1",
+            "targetKey": "site-b",
+            "position": [200, 0, 0],
+            "estimatedTravelTicks": 300,
+        }
+        actors = [
+            {
+                "token": "eng-1:1",
+                "role": "engineer",
+                "complete": True,
+                "live": True,
+                "owned": True,
+                "available": True,
+                "canBuild": {"mass_extractor": True},
+                "position": [100, 0, 0],
+            },
+            {
+                "token": "eng-2:1",
+                "role": "engineer",
+                "complete": True,
+                "live": True,
+                "owned": True,
+                "available": True,
+                "canBuild": {"mass_extractor": True},
+                "position": [190, 0, 0],
+            },
+        ]
+        targets = [
+            {"key": "site-a", "live": True, "position": [0, 0, 0]},
+            {"key": "site-b", "live": True, "position": [200, 0, 0]},
+        ]
+
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            ledger,
+            {"tick": 200, "newJobs": [incoming], "actors": actors, "targets": targets},
+        )
+
+        active = [
+            job
+            for job in result["jobs"].values()
+            if job["phase"] not in {"completed", "retryable", "cancelled"}
+        ]
+        assert result["jobs"]["mex:a"]["actorToken"] == "eng-1:1"
+        assert result["jobs"]["mex:b"]["actorToken"] == "eng-2:1"
+        assert len({job["actorToken"] for job in active}) == len(active) == 2
+
+    def test_conflicting_new_job_without_free_exact_engineer_is_rejected_atomically(self) -> None:
+        incoming_jobs = [
+            {
+                "id": job_id,
+                "kind": "build_mex",
+                "actorToken": "eng-1:1",
+                "targetKey": site,
+                "position": position,
+                "estimatedTravelTicks": 300,
+            }
+            for job_id, site, position in (
+                ("mex:a", "site-a", [100, 0, 0]),
+                ("mex:b", "site-b", [200, 0, 0]),
+            )
+        ]
+        actor = {
+            "token": "eng-1:1",
+            "role": "engineer",
+            "complete": True,
+            "live": True,
+            "owned": True,
+            "available": True,
+            "canBuild": {"mass_extractor": True},
+            "position": [0, 0, 0],
+        }
+        targets = [
+            {"key": "site-a", "live": True, "position": [100, 0, 0]},
+            {"key": "site-b", "live": True, "position": [200, 0, 0]},
+        ]
+        results = []
+        for ordered in (incoming_jobs, list(reversed(incoming_jobs))):
+            results.append(
+                invoke(
+                    MODULE,
+                    GLOBAL,
+                    "UpdateJobLedger",
+                    {"jobs": {}},
+                    {
+                        "tick": 100,
+                        "newJobs": ordered,
+                        "actors": [actor],
+                        "targets": targets,
+                    },
+                )
+            )
+
+        assert results[0] == results[1]
+        active = [
+            job
+            for job in results[0]["jobs"].values()
+            if job["phase"] not in {"completed", "retryable", "cancelled"}
+        ]
+        rejected = [
+            job for job in results[0]["jobs"].values()
+            if job["phase"] == "retryable"
+        ]
+        assert [(job["id"], job["actorToken"]) for job in active] == [
+            ("mex:a", "eng-1:1")
+        ]
+        assert rejected[0]["id"] == "mex:b"
+        assert rejected[0]["failureReason"] == "actor_already_claimed"
+
     def test_t2_hq_milestone_has_no_hydro_dependency_and_keeps_one_t1_lane(self) -> None:
         ready = {
             "tick": 5700,
@@ -2267,6 +2512,34 @@ class TestRegionalMacro:
         assert plan["hqAction"] == "hold"
         assert plan["hqDenialReason"] == "preserve_final_t1_lane"
         assert plan["remainingT1ProductionLanes"] == 1
+
+    def test_funded_completed_t2_hq_admits_one_support_lane_without_consuming_final_t1_lane(self) -> None:
+        ready = {
+            "tick": 6200,
+            "economyHealthy": True,
+            "techFunded": True,
+            "t2HqComplete": True,
+            "t2SupportFactoryCount": 0,
+            "landFactories": [
+                {"token": "land-a", "tier": 1, "idle": True},
+                {"token": "land-b", "tier": 1, "idle": True},
+                {"token": "hq", "tier": 2, "idle": True, "hq": True},
+            ],
+            "mex": [],
+        }
+
+        plan = invoke(MODULE, GLOBAL, "PlanTech", ready)
+
+        assert plan["supportAction"] == "start_t2_support"
+        assert plan["supportSourceToken"] == "land-a"
+        assert plan["supportUpgradeRole"] == "land_factory_t2_support"
+        assert plan["remainingT1ProductionLanes"] == 1
+
+        one_t1 = copy.deepcopy(ready)
+        one_t1["landFactories"] = one_t1["landFactories"][1:]
+        blocked = invoke(MODULE, GLOBAL, "PlanTech", one_t1)
+        assert blocked["supportAction"] == "hold"
+        assert blocked["supportDenialReason"] == "preserve_final_t1_lane"
 
     @pytest.mark.parametrize(
         ("healthy", "t3_action"),

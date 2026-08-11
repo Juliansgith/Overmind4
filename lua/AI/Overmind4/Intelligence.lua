@@ -30,6 +30,10 @@ local function DistanceSquared(a, b)
     return dx * dx + dz * dz
 end
 
+local MAX_SCOUT_OBJECTIVES = 32
+local MAX_MEMORY_CONTACTS = 64
+local RADAR_COALESCE_DISTANCE_SQUARED = 64 * 64
+
 local function ExactTokens(expected, observed)
     if Count(expected) ~= Count(observed) then return false end
     local found = {}
@@ -99,6 +103,27 @@ Intelligence.PlanScoutRoute = function(snapshot)
         end
     end
     SortByKey(objectives, 'key')
+    local ranked = {}
+    for _, objective in ipairs(objectives) do
+        local last = Number(covered[objective.key], 0) or 0
+        table.insert(ranked, {
+            objective = objective,
+            age = math.max(0, tick - last),
+        })
+    end
+    table.sort(ranked, function(a, b)
+        if a.age == b.age then
+            return tostring(a.objective.key) < tostring(b.objective.key)
+        end
+        return a.age > b.age
+    end)
+    objectives = {}
+    local index = 1
+    while index <= Count(ranked) and index <= MAX_SCOUT_OBJECTIVES do
+        table.insert(objectives, ranked[index].objective)
+        index = index + 1
+    end
+    SortByKey(objectives, 'key')
     local result = { objectiveKeys = {}, waypoints = {}, coverageAgeTicks = {} }
     local nextAge = -1
     for _, objective in ipairs(objectives) do
@@ -128,12 +153,38 @@ Intelligence.UpdateMemory = function(previous, observation)
             contacts[token].currentlyVisual = false
         end
     end
-    for _, contact in ipairs(observation.observations or {}) do
+    local observations = Copy(observation.observations or {})
+    table.sort(observations, function(a, b)
+        local aSource = tostring(a.source or '')
+        local bSource = tostring(b.source or '')
+        if aSource == bSource then return tostring(a.token or '') < tostring(b.token or '') end
+        return aSource < bSource
+    end)
+    local radarClaims = {}
+    for _, contact in ipairs(observations) do
         if type(contact.token) == 'string' and contact.current == true
             and (contact.source == 'vision' or contact.source == 'radar')
         then
-            contacts[contact.token] = {
-                token = contact.token,
+            local memoryToken = contact.token
+            if contact.source == 'radar' and type(contact.position) == 'table' then
+                local bestToken = nil
+                local bestDistance = nil
+                for token, existing in pairs(contacts) do
+                    local distance = DistanceSquared(existing.position, contact.position)
+                    if existing.source == 'radar' and not radarClaims[token]
+                        and distance <= RADAR_COALESCE_DISTANCE_SQUARED
+                        and (bestDistance == nil or distance < bestDistance
+                            or (distance == bestDistance and token < bestToken))
+                    then
+                        bestToken = token
+                        bestDistance = distance
+                    end
+                end
+                if bestToken then memoryToken = bestToken end
+                radarClaims[memoryToken] = true
+            end
+            contacts[memoryToken] = {
+                token = memoryToken,
                 role = contact.source == 'radar' and 'unknown_mobile' or contact.role,
                 position = Copy(contact.position),
                 source = contact.source,
@@ -142,6 +193,25 @@ Intelligence.UpdateMemory = function(previous, observation)
                 lastSeenTick = tick,
             }
         end
+    end
+    local ranked = {}
+    for token, contact in pairs(contacts) do
+        table.insert(ranked, { token = token, contact = contact })
+    end
+    table.sort(ranked, function(a, b)
+        local aTick = Number(a.contact.lastSeenTick, -1000000) or -1000000
+        local bTick = Number(b.contact.lastSeenTick, -1000000) or -1000000
+        if aTick ~= bTick then return aTick > bTick end
+        local aVisual = a.contact.source == 'vision'
+        local bVisual = b.contact.source == 'vision'
+        if aVisual ~= bVisual then return aVisual end
+        return a.token < b.token
+    end)
+    contacts = {}
+    local index = 1
+    while index <= Count(ranked) and index <= MAX_MEMORY_CONTACTS do
+        contacts[ranked[index].token] = ranked[index].contact
+        index = index + 1
     end
     return {
         epoch = (Number(previous.epoch, 0) or 0) + 1,

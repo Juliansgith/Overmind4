@@ -82,6 +82,13 @@ def make_harness() -> ControllerHarness:
                 Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
                 Economy = { BuildTime = 2300, BuildCostMass = 1410, BuildCostEnergy = 11200, BuildRate = 40, DifferentialUpgradeCostCalculation = true },
             },
+            zeb9501 = {
+                BlueprintId = 'zeb9501',
+                General = { UpgradesFrom = 'ueb0101' },
+                Footprint = { SizeX = 5, SizeZ = 5 },
+                Physics = { SkirtSizeX = 8, SkirtSizeZ = 8, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
+                Economy = { BuildTime = 1200, BuildCostMass = 580, BuildCostEnergy = 4800, BuildRate = 40, DifferentialUpgradeCostCalculation = true },
+            },
             ueb1101 = {
                 BlueprintId = 'ueb1101',
                 Footprint = { SizeX = 1, SizeZ = 1 },
@@ -390,7 +397,9 @@ def make_harness() -> ControllerHarness:
                 blueprintId = blueprintId,
             })
             table.insert(calls.buildMobile, { units = units, position = position, blueprintId = blueprintId, alternatives = alternatives, argc = 4 })
-            if calls.failBuildMobile then error('build mobile failed') end
+            if calls.failBuildMobile
+                or tonumber(calls.failBuildMobileAt) == table.getn(calls.buildMobile)
+            then error('build mobile failed') end
             return { kind = 'build-mobile' }
         end
         function IssueBuildFactory(units, blueprintId, count)
@@ -502,7 +511,9 @@ def make_harness() -> ControllerHarness:
         function IssueReclaim(units, target)
             table.insert(calls.sequence, 'reclaim')
             table.insert(calls.reclaim, { units = units, target = target })
-            if calls.failReclaim then error('reclaim failed') end
+            if calls.failReclaim
+                or tonumber(calls.failReclaimAt) == table.getn(calls.reclaim)
+            then error('reclaim failed') end
             return { kind = 'reclaim' }
         end
         MacroDirectorStub = {

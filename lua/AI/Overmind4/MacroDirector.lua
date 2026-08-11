@@ -120,6 +120,13 @@ MacroDirector.BuildPortfolio = function(snapshot)
         committedMassDrain = 0,
         committedEnergyDrain = 0,
         fundedExpansionSlots = 0,
+        grants = {},
+        fundingLedger = {
+            recurringMass = 0,
+            recurringEnergy = 0,
+            bankMass = 0,
+            bankEnergy = 0,
+        },
         engineerTarget = 1,
         landFactoryTarget = 1,
         airFactoryTarget = 1,
@@ -180,6 +187,7 @@ MacroDirector.BuildPortfolio = function(snapshot)
             local bankFits = bankMass >= massCost and bankEnergy >= energyCost
             local optionalBlocked = plan.stalled and request.optional == true
             if (recurringFits or bankFits) and not optionalBlocked then
+                local source = recurringFits and 'recurring' or 'bank'
                 lane.admitted = true
                 lane.admittedCount = lane.admittedCount + 1
                 committedMass = committedMass + massDrain
@@ -191,6 +199,16 @@ MacroDirector.BuildPortfolio = function(snapshot)
                     bankMass = bankMass - massCost
                     bankEnergy = bankEnergy - energyCost
                 end
+                table.insert(plan.grants, {
+                    requestId = request.id,
+                    lane = request.lane,
+                    source = source,
+                    massDrain = massDrain,
+                    energyDrain = energyDrain,
+                    massCost = massCost,
+                    energyCost = energyCost,
+                    durationTicks = Number(request.durationTicks, 0) or 0,
+                })
             end
             if request.required == true and request.lane == 'land_production' then
                 lane.preserved = true
@@ -214,11 +232,11 @@ MacroDirector.BuildPortfolio = function(snapshot)
         plan.lanes.mex_rebuild.preserved = true
     end
 
-    if plan.lanes.mex_rebuild.admitted == true
-        or plan.lanes.mex_rebuild.preserved == true
-    then
-        plan.fundedExpansionSlots = Clamp(Ceil(builderJobs / 3), 0, 4)
+    local fundedMex = 0
+    for _, grant in ipairs(plan.grants) do
+        if grant.lane == 'mex_rebuild' then fundedMex = fundedMex + 1 end
     end
+    plan.fundedExpansionSlots = Clamp(fundedMex, 0, 4)
     plan.engineerTarget = Clamp(2 + Ceil(builderJobs / 3) + Ceil(constructionBacklog / 4), 1, 32)
     plan.landFactoryTarget = Clamp(1 + Ceil(landBacklog / 3), 1, 12)
     plan.airFactoryTarget = Clamp(1 + Ceil(airBacklog / 3), 1, 4)
@@ -230,6 +248,12 @@ MacroDirector.BuildPortfolio = function(snapshot)
     plan.availableRecurringEnergy = math.max(0, economy.energyIncome - economy.energyRequested)
     plan.committedMassDrain = committedMass
     plan.committedEnergyDrain = committedEnergy
+    plan.fundingLedger = {
+        recurringMass = recurringMass,
+        recurringEnergy = recurringEnergy,
+        bankMass = bankMass,
+        bankEnergy = bankEnergy,
+    }
     return plan
 end
 
@@ -1185,6 +1209,42 @@ local function NearestReplacement(actors, target, claimed, replacedToken, actorL
     return best
 end
 
+local function ClearJobOrder(job)
+    job.ordered = nil
+    job.orderedActorToken = nil
+    job.orderedAttempt = nil
+end
+
+local function AssignJobReplacement(job, replacement, target, tick, actorLineage)
+    job.actorToken = replacement.token
+    actorLineage[TokenIdentity(replacement.token)] = replacement.token
+    job.actorLineage = actorLineage
+    ClearJobOrder(job)
+    job.phase = 'travelling'
+    job.failureReason = nil
+    job.lastProgressTick = tick
+    job.remainingDistance = Distance(replacement.position, target and target.position)
+    job.deadlineTick = tick + math.max(500, Ceil(job.remainingDistance * 3))
+end
+
+local function ResolveActorClaim(job, actors, target, claimed, tick, reason)
+    local oldToken = job.actorToken
+    local actorLineage = ActorLineage(job)
+    local replacement = actorLineage and NearestReplacement(
+        actors, target, claimed, oldToken, actorLineage
+    ) or nil
+    if replacement then
+        AssignJobReplacement(job, replacement, target, tick, actorLineage)
+        claimed[replacement.token] = job.id
+        return true
+    end
+    job.phase = 'retryable'
+    job.failureReason = reason
+    job.retryCount = (Number(job.retryCount, 0) or 0) + 1
+    ClearJobOrder(job)
+    return false
+end
+
 MacroDirector.UpdateJobLedger = function(ledger, snapshot)
     ledger = ledger or {}
     snapshot = snapshot or {}
@@ -1194,22 +1254,51 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
         jobs = Copy(ledger.jobs or {}),
         releasedActorTokens = {},
     }
+    local actors = IndexBy(snapshot.actors or {}, 'token')
+    local targets = IndexBy(snapshot.targets or {}, 'key')
+    local claimed = {}
+
+    local existingIds = {}
+    for id in pairs(result.jobs) do table.insert(existingIds, id) end
+    table.sort(existingIds)
+    for _, id in ipairs(existingIds) do
+        local job = result.jobs[id]
+        if IsActiveJob(job) and ExactGenerationToken(job.actorToken) then
+            if claimed[job.actorToken] then
+                ResolveActorClaim(
+                    job, snapshot.actors or {}, targets[job.targetKey], claimed,
+                    tick, 'actor_already_claimed'
+                )
+            else
+                claimed[job.actorToken] = id
+            end
+        end
+    end
+
+    local incomingJobs = {}
     for _, incoming in ipairs(snapshot.newJobs or {}) do
-        if type(incoming.id) == 'string' and not IsActiveJob(result.jobs[incoming.id]) then
+        if type(incoming) == 'table' and type(incoming.id) == 'string' then
+            table.insert(incomingJobs, incoming)
+        end
+    end
+    SortByKey(incomingJobs, 'id')
+    for _, incoming in ipairs(incomingJobs) do
+        if not IsActiveJob(result.jobs[incoming.id]) then
             local job = Copy(incoming)
             job.phase = job.phase or 'travelling'
             job.lastProgressTick = tick
             job.retryCount = Number(job.retryCount, 0) or 0
             job.deadlineTick = tick + math.max(500, Number(job.estimatedTravelTicks, 0) or 0)
+            if ExactGenerationToken(job.actorToken) and claimed[job.actorToken] then
+                ResolveActorClaim(
+                    job, snapshot.actors or {}, targets[job.targetKey], claimed,
+                    tick, 'actor_already_claimed'
+                )
+            elseif ExactGenerationToken(job.actorToken) then
+                claimed[job.actorToken] = job.id
+            end
             result.jobs[job.id] = job
         end
-    end
-
-    local actors = IndexBy(snapshot.actors or {}, 'token')
-    local targets = IndexBy(snapshot.targets or {}, 'key')
-    local claimed = {}
-    for _, job in pairs(result.jobs) do
-        if IsActiveJob(job) and job.actorToken then claimed[job.actorToken] = true end
     end
 
     local ids = {}
@@ -1224,17 +1313,19 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
             job.failureReason = nil
             if active and job.actorToken then
                 table.insert(result.releasedActorTokens, job.actorToken)
+                if claimed[job.actorToken] == id then claimed[job.actorToken] = nil end
             end
         elseif active then
             local actor = actors[job.actorToken]
             if target and target.live == false then
                 ReleaseJob(job, result, 'target_gone')
+                if claimed[job.actorToken] == id then claimed[job.actorToken] = nil end
             elseif ExistingMexEngineerInvalid(actor) then
                 local oldToken = job.actorToken
                 local actorLineage = ActorLineage(job)
                 if actorLineage then job.actorLineage = actorLineage end
                 if oldToken then
-                    claimed[oldToken] = nil
+                    if claimed[oldToken] == id then claimed[oldToken] = nil end
                     table.insert(result.releasedActorTokens, oldToken)
                 end
                 local replacement = actorLineage and NearestReplacement(
@@ -1242,24 +1333,12 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                 ) or nil
                 job.retryCount = (Number(job.retryCount, 0) or 0) + 1
                 if replacement then
-                    job.actorToken = replacement.token
-                    actorLineage[TokenIdentity(replacement.token)] = replacement.token
-                    job.actorLineage = actorLineage
-                    job.ordered = nil
-                    job.orderedActorToken = nil
-                    job.orderedAttempt = nil
-                    claimed[replacement.token] = true
-                    job.phase = 'travelling'
-                    job.failureReason = nil
-                    job.lastProgressTick = tick
-                    job.remainingDistance = Distance(replacement.position, target and target.position)
-                    job.deadlineTick = tick + math.max(500, Ceil(job.remainingDistance * 3))
+                    AssignJobReplacement(job, replacement, target, tick, actorLineage)
+                    claimed[replacement.token] = id
                 else
                     job.phase = 'retryable'
                     job.failureReason = 'actor_unavailable'
-                    job.ordered = nil
-                    job.orderedActorToken = nil
-                    job.orderedAttempt = nil
+                    ClearJobOrder(job)
                 end
             elseif job.phase == 'building' then
                 local progressed = false
@@ -1280,6 +1359,7 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                     job.deadlineTick = tick + 400
                 elseif tick >= (Number(job.deadlineTick, tick) or tick) then
                     ReleaseJob(job, result, 'construction_stalled')
+                    if claimed[job.actorToken] == id then claimed[job.actorToken] = nil end
                 end
             else
                 local distance = Distance(actor.position, target and target.position)
@@ -1295,6 +1375,7 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
                     end
                 elseif tick >= (Number(job.deadlineTick, tick) or tick) then
                     ReleaseJob(job, result, 'travel_stalled')
+                    if claimed[job.actorToken] == id then claimed[job.actorToken] = nil end
                 end
             end
         end
@@ -1324,6 +1405,8 @@ MacroDirector.PlanTech = function(snapshot)
     local plan = {
         hqAction = 'hold',
         hqDenialReason = 'not_funded_or_healthy',
+        supportAction = 'hold',
+        supportDenialReason = 'not_funded_or_healthy',
         remainingT1ProductionLanes = Count(factories),
         t2ProductionRoles = { 't2_direct_fire', 't2_anti_air' },
         mexUpgradeSiteKeys = {},
@@ -1341,6 +1424,23 @@ MacroDirector.PlanTech = function(snapshot)
         else
             plan.hqDenialReason = 'preserve_final_t1_lane'
         end
+    end
+    if snapshot.t2HqComplete and healthy and funded
+        and (Number(snapshot.t2SupportFactoryCount, 0) or 0) < 1
+    then
+        if Count(factories) >= 2 and Count(idleFactories) >= 1 then
+            plan.supportAction = 'start_t2_support'
+            plan.supportSourceToken = idleFactories[1].token
+            plan.supportUpgradeRole = 'land_factory_t2_support'
+            plan.remainingT1ProductionLanes = Count(factories) - 1
+            plan.supportDenialReason = nil
+        elseif Count(factories) >= 2 then
+            plan.supportDenialReason = 'no_idle_t1_lane'
+        else
+            plan.supportDenialReason = 'preserve_final_t1_lane'
+        end
+    elseif snapshot.t2HqComplete and (Number(snapshot.t2SupportFactoryCount, 0) or 0) >= 1 then
+        plan.supportDenialReason = 'support_lane_complete'
     end
     if snapshot.t2HqComplete and healthy and funded
         and (Number(snapshot.t2MobileCount, 0) or 0) >= 35

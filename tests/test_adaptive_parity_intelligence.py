@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+import random
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ def test_catalog_pins_every_new_observation_and_executor_role() -> None:
         "transport": "uea0107",
         "mass_extractor_t2": "ueb1202",
         "mass_extractor_t3": "ueb1302",
+        "land_factory_t2_support": "zeb9501",
     }
 
     assert {role: catalog.IdFor(role) for role in expected} == expected
@@ -107,6 +109,40 @@ class TestFairIntel:
         assert plan["coverageAgeTicks"] == {"a": 100, "b": 2000, "c": 500}
         assert plan["nextObjectiveKey"] == "b"
 
+    def test_640_public_objectives_are_permutation_stable_and_bounded_to_32_waypoints(self) -> None:
+        objectives = [
+            {
+                "key": f"mass-{index:03d}",
+                "position": [index * 10, 0, index * 7],
+                "public": True,
+            }
+            for index in range(640)
+        ]
+        snapshot = {
+            "tick": 300,
+            "objectives": objectives,
+            "lastCoveredTicks": {},
+        }
+        expected = invoke(MODULE, GLOBAL, "PlanScoutRoute", snapshot)
+
+        assert len(expected["objectiveKeys"]) == 32
+        assert len(expected["waypoints"]) == 32
+        for seed in range(5):
+            permuted = copy.deepcopy(snapshot)
+            random.Random(seed).shuffle(permuted["objectives"])
+            assert invoke(MODULE, GLOBAL, "PlanScoutRoute", permuted) == expected
+
+        rotated = copy.deepcopy(snapshot)
+        rotated["tick"] = 600
+        rotated["lastCoveredTicks"] = {
+            key: 300 for key in expected["objectiveKeys"]
+        }
+        next_window = invoke(MODULE, GLOBAL, "PlanScoutRoute", rotated)
+        assert len(next_window["objectiveKeys"]) == 32
+        assert set(next_window["objectiveKeys"]).isdisjoint(
+            expected["objectiveKeys"]
+        )
+
     def test_enemy_memory_accepts_only_current_own_vision_or_radar_safe_observations(self) -> None:
         observations = [
             {"token": "vision", "role": "engineer", "position": [10, 0, 10], "source": "vision", "current": True},
@@ -127,6 +163,61 @@ class TestFairIntel:
         assert set(state["contacts"]) == {"radar", "vision"}
         assert state["contacts"]["vision"]["role"] == "engineer"
         assert state["contacts"]["radar"]["role"] == "unknown_mobile"
+
+    def test_moving_radar_contact_coalesces_position_tokens_instead_of_leaking_ghost_tracks(self) -> None:
+        state: dict[str, Any] = {"contacts": {}}
+        for tick in range(60):
+            state = invoke(
+                MODULE,
+                GLOBAL,
+                "UpdateMemory",
+                state,
+                {
+                    "tick": 1000 + tick,
+                    "observations": [
+                        {
+                            "token": f"radar:{tick}:0",
+                            "role": "unknown_mobile",
+                            "position": [tick, 0, 0],
+                            "source": "radar",
+                            "current": True,
+                        }
+                    ],
+                },
+            )
+
+        assert len(state["contacts"]) == 1
+        contact = next(iter(state["contacts"].values()))
+        assert contact["position"] == [59, 0, 0]
+        assert contact["lastSeenTick"] == 1059
+
+    def test_intel_memory_evicts_deterministically_at_64_tracks_under_640_contact_scale(self) -> None:
+        observations = [
+            {
+                "token": f"radar:{index:03d}",
+                "role": "unknown_mobile",
+                "position": [index * 100, 0, index * 100],
+                "source": "radar",
+                "current": True,
+            }
+            for index in range(640)
+        ]
+        snapshot = {"tick": 2000, "observations": observations}
+        expected = invoke(
+            MODULE, GLOBAL, "UpdateMemory", {"contacts": {}}, snapshot
+        )
+        reversed_snapshot = copy.deepcopy(snapshot)
+        reversed_snapshot["observations"].reverse()
+        reversed_result = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateMemory",
+            {"contacts": {}},
+            reversed_snapshot,
+        )
+
+        assert len(expected["contacts"]) == 64
+        assert reversed_result == expected
 
     @pytest.mark.parametrize(
         ("tick", "retained"),

@@ -114,6 +114,24 @@ def test_controller_has_exact_engine_observation_calls() -> None:
     assert re.search(r"GetUnitsAroundPoint\s*\(\s*categories\.MOBILE\s*,[^\n]+,[^\n]+,\s*'Enemy'\s*\)", controller)
 
 
+def test_observer_exports_are_runtime_write_only_copy_snapshots() -> None:
+    controller = source("lua/AI/Overmind4/Controller.lua")
+    executable = [
+        line.split("--", 1)[0].strip()
+        for line in controller.splitlines()
+    ]
+    for field in ("Overmind4ForcePlan", "Overmind4EntityGenerations"):
+        occurrences = [line for line in executable if f".{field}" in line]
+        assert len(occurrences) == 2, (field, occurrences)
+        assert all(
+            re.fullmatch(
+                rf"(?:brain|controller\.brain)\.{field}\s*=\s*[^=].*",
+                line,
+            )
+            for line in occurrences
+        ), (field, occurrences)
+
+
 def test_reclaim_observation_is_bounded_to_live_owned_engineer_vision_rectangles() -> None:
     controller = source("lua/AI/Overmind4/Controller.lua")
     assert "GetReclaimablesInRect" in controller

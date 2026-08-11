@@ -4,6 +4,7 @@ local IdByRole = {
     land_factory = 'ueb0101',
     air_factory = 'ueb0102',
     land_factory_t2 = 'ueb0201',
+    land_factory_t2_support = 'zeb9501',
     power_generator = 'ueb1101',
     hydrocarbon = 'ueb1102',
     mass_extractor = 'ueb1103',
@@ -38,6 +39,7 @@ local FamilyByRole = {
     mass_extractor_t3 = 'mass_extractor',
     land_factory = 'land_factory',
     land_factory_t2 = 'land_factory',
+    land_factory_t2_support = 'land_factory',
     land_factory_t3 = 'land_factory',
 }
 
