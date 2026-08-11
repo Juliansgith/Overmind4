@@ -37,16 +37,29 @@ def make_harness() -> ControllerHarness:
             guard = {}, move = {}, clear = {}, reclaim = {}, reclaimQuery = {},
             upgrade = {}, patrol = {}, transportLoad = {}, transportUnload = {},
             macroBuildPortfolio = {}, macroUpdateJobLedger = {},
+            macroPlanExpansion = {}, macroPlanRegionPackage = {},
+            macroPlanReclaim = {}, macroPlanTech = {},
             intelligenceUpdateMemory = {}, intelligencePlanRadar = {},
-            forceAssign = {}, forceReconcile = {}, policySnapshots = {},
+            intelligencePlanScoutRoute = {}, intelligencePlanAir = {},
+            intelligencePlanTransport = {},
+            forceAssign = {}, forceReconcile = {}, forceHandleHomeBreach = {},
+            policySnapshots = {},
             waits = {}, sequence = {}, unitReclaimInspections = 0,
         }
         directorResults = {
             macroPlan = { valid = true, lanes = {}, regions = {}, intents = {} },
             jobLedger = { jobs = {} },
+            expansionPlan = { jobs = {}, denials = {}, intents = {} },
+            regionPackagePlan = { requiredRoles = {}, intents = {} },
+            reclaimPlan = { jobs = {}, intents = {} },
+            techPlan = { intents = {} },
             intelState = { contacts = {}, threat = {}, expansionSafety = {} },
             radarIntents = {},
+            scoutPlan = { intents = {} },
+            airPlan = { orders = {}, intents = {} },
+            transportPlan = { mode = 'hold', intents = {} },
             forcePlan = { assignments = {}, ownershipByToken = {}, intents = {} },
+            homeBreachPlan = false,
         }
 
         BlueprintData = {
@@ -497,10 +510,25 @@ def make_harness() -> ControllerHarness:
             end,
             ClusterRegions = function() return {} end,
             AdvanceRegion = function(region) return region end,
-            PlanExpansion = function() return { jobs = {}, denials = {} } end,
-            PlanRegionPackage = function() return { requiredRoles = {} } end,
-            PlanReclaim = function() return { jobs = {} } end,
-            PlanTech = function() return {} end,
+            PlanExpansion = function(snapshot)
+                table.insert(calls.macroPlanExpansion, snapshot)
+                return directorResults.expansionPlan
+            end,
+            PlanRegionPackage = function(region, snapshot)
+                table.insert(calls.macroPlanRegionPackage, {
+                    region = region,
+                    snapshot = snapshot,
+                })
+                return directorResults.regionPackagePlan
+            end,
+            PlanReclaim = function(snapshot)
+                table.insert(calls.macroPlanReclaim, snapshot)
+                return directorResults.reclaimPlan
+            end,
+            PlanTech = function(snapshot)
+                table.insert(calls.macroPlanTech, snapshot)
+                return directorResults.techPlan
+            end,
         }
         IntelligenceStub = {
             UpdateMemory = function(previous, snapshot)
@@ -517,11 +545,20 @@ def make_harness() -> ControllerHarness:
                 })
                 return directorResults.radarIntents
             end,
-            PlanScoutRoute = function() return {} end,
-            PlanAir = function() return { orders = {} } end,
+            PlanScoutRoute = function(snapshot)
+                table.insert(calls.intelligencePlanScoutRoute, snapshot)
+                return directorResults.scoutPlan
+            end,
+            PlanAir = function(snapshot)
+                table.insert(calls.intelligencePlanAir, snapshot)
+                return directorResults.airPlan
+            end,
             SelectBomberTarget = function() return nil end,
             ValidateBomberIntent = function() return { valid = false } end,
-            PlanTransport = function() return { mode = 'hold' } end,
+            PlanTransport = function(snapshot)
+                table.insert(calls.intelligencePlanTransport, snapshot)
+                return directorResults.transportPlan
+            end,
             AdvanceTransport = function(mission) return mission end,
         }
         ForceDirectorStub = {
@@ -536,7 +573,16 @@ def make_harness() -> ControllerHarness:
                 })
                 return directorResults.forcePlan
             end,
-            HandleHomeBreach = function(_, plan) return plan end,
+            HandleHomeBreach = function(snapshot, plan)
+                table.insert(calls.forceHandleHomeBreach, {
+                    snapshot = snapshot,
+                    plan = plan,
+                })
+                if directorResults.homeBreachPlan then
+                    return directorResults.homeBreachPlan
+                end
+                return plan
+            end,
         }
         function WaitTicks(ticks) table.insert(calls.waits, ticks) end
         """

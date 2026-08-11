@@ -9,9 +9,12 @@ import re
 from typing import Any
 
 import pytest
+from lupa.lua51 import LuaError
 
 from adaptive_parity_helpers import lua_value
 from conftest import ROOT, runtime
+from test_lua_hooks import _runtime as hook_runtime
+from test_lua_hooks import _valid_args as hook_valid_args
 from tools.overmind4_runner import parsing, reporting
 
 
@@ -60,11 +63,13 @@ REQUIRED_METRICS = {
     "army_count_garrison",
     "army_count_field",
     "army_count_response",
+    "army_count_raider",
     "army_count_unassigned",
     "army_mass_home",
     "army_mass_garrison",
     "army_mass_field",
     "army_mass_response",
+    "army_mass_raider",
     "army_mass_unassigned",
     "mass_killed",
     "mass_lost",
@@ -102,10 +107,12 @@ def metric_values(**updates: float | int) -> dict[str, float | int]:
             "army_count_garrison": 4,
             "army_count_field": 15,
             "army_count_response": 5,
+            "army_count_raider": 2,
             "army_mass_home": 500,
             "army_mass_garrison": 200,
             "army_mass_field": 900,
             "army_mass_response": 300,
+            "army_mass_raider": 120,
             "mass_killed": 2500,
             "mass_lost": 1800,
         }
@@ -177,6 +184,8 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
     observer = OBSERVER_PATH.read_text(encoding="utf-8")
     assert "OM4BENCH" in observer
     assert "CHECKPOINT_TICKS = 300" in observer
+    assert "Overmind4Benchmark.SampleArmy" in observer
+    assert "GetArmyBrain" in observer
     assert "Controller" not in observer
     assert "Policy" not in observer
     assert "OM4BenchmarkLatest" not in observer
@@ -186,8 +195,10 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
         re.MULTILINE | re.DOTALL,
     )
     assert wait_loop is not None
-    assert "BenchmarkObserver.Create" not in wait_loop.group("body")
-    assert launch.find("BenchmarkObserver.Create") > wait_loop.end()
+    assert "Overmind4Benchmark.Create" not in wait_loop.group("body")
+    assert launch.find("Overmind4Benchmark.Create") > wait_loop.end()
+    assert "specs[1].Spawn" in launch
+    assert "specs[2].Spawn" in launch
     for forbidden in (
         r"\bIssue[A-Za-z0-9_]*\b",
         r"\bCreateUnit\b",
@@ -201,44 +212,431 @@ def test_autorun_installs_separate_observer_only_300_tick_benchmark_stream() -> 
         assert re.search(forbidden, observer) is None, forbidden
 
 
-@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
-def test_observer_import_is_inert_and_sampling_is_explicit_ordered_and_nonduplicating() -> None:
-    lua = runtime()
-    emitted: list[str] = []
-    reads: list[int] = []
-    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+def test_launch_hook_passes_nondefault_actual_army_slots_to_sampler_thread() -> None:
+    lua, _, _ = hook_runtime(
+        hook_valid_args(
+            **{
+                "/aitest": "4:overmind4:1:1,2:adaptive:1:2",
+            }
+        )
+    )
+    step_calls: list[tuple[Any, ...]] = []
 
-    assert emitted == []
-    assert reads == []
+    def stop_after_sample(*arguments: Any) -> None:
+        step_calls.append(arguments)
+        raise RuntimeError("observer-stop")
 
-    def reader(army: int) -> Any:
-        reads.append(army)
-        return lua_value(lua, metric_values())
-
-    lua.globals().observer_reader = reader
-    lua.globals().observer_logger = emitted.append
+    lua.globals().benchmark_stub.Step = stop_after_sample
+    lua.globals().GetGameTick = lambda: 300
+    lua.globals().coroutine.yield_ = lambda *_: None
+    lua.execute("coroutine.yield = coroutine.yield_")
     lua.execute(
-        "observer = BenchmarkObserver.Create('parity-run', {1, 2}, "
-        "observer_reader, observer_logger)"
+        (ROOT / "tools" / "autorun" / "schook" / "lua" / "SinglePlayerLaunch.lua").read_text(
+            encoding="utf-8"
+        )
+    )
+    lua.globals().StartCommandLineSession("SCMP_007", False)
+
+    for callback in list(lua.globals().harness_threads):
+        try:
+            callback()
+        except (LuaError, RuntimeError) as error:
+            assert "observer-stop" in str(error)
+
+    creates = list(lua.globals().benchmark_creates)
+    assert len(creates) == 1
+    assert len(creates[0]) == 3
+    assert creates[0][0] == "run-1"
+    assert [creates[0][1][index] for index in range(1, 3)] == [4, 2]
+    assert len(step_calls) == 1
+
+
+def _benchmark_lua_fixture(lua: Any) -> None:
+    lua.execute(
+        """
+        categories = {
+            ALLUNITS = 'ALLUNITS', ENGINEER = 'ENGINEER', COMMAND = 'COMMAND',
+            MASSEXTRACTION = 'MASSEXTRACTION',
+        }
+
+        function MakeBenchmarkUnit(options)
+            local unit = {
+                options = options,
+                Dead = options.dead == true,
+                Overmind4Token = options.token,
+            }
+            function unit:BeenDestroyed() return self.options.destroyed == true end
+            function unit:GetArmy() return self.options.army end
+            function unit:GetEntityId() return self.options.entityId end
+            function unit:GetFractionComplete() return self.options.fraction or 1 end
+            function unit:GetPosition() return self.options.position end
+            function unit:IsIdleState() return self.options.idle == true end
+            function unit:GetBlueprint()
+                return {
+                    BlueprintId = self.options.blueprintId,
+                    CategoriesHash = self.options.categories,
+                    Economy = { BuildCostMass = self.options.mass or 0 },
+                }
+            end
+            return unit
+        end
+
+        function MakeBenchmarkBrain(army)
+            local brain = {
+                Army = army,
+                units = {},
+                economy = {},
+                armyStats = {},
+                blueprintStats = {},
+                Overmind4ForcePlan = { assignments = {} },
+                Overmind4EntityGenerations = {},
+                calls = {},
+            }
+            function brain:GetListOfUnits(category, incomplete, dead)
+                table.insert(self.calls, { method = 'GetListOfUnits', category = category })
+                return self.units
+            end
+            function brain:GetEconomyIncome(resource)
+                return self.economy[string.lower(resource) .. 'Income'] or 0
+            end
+            function brain:GetEconomyStored(resource)
+                return self.economy[string.lower(resource) .. 'Stored'] or 0
+            end
+            function brain:GetEconomyStoredRatio(resource)
+                return self.economy[string.lower(resource) .. 'StoredRatio'] or 0
+            end
+            function brain:GetArmyStat(name, default)
+                return { Value = self.armyStats[name] or default or 0 }
+            end
+            function brain:GetBlueprintStat(name, category)
+                return self.blueprintStats[name .. ':' .. tostring(category)] or 0
+            end
+            return brain
+        end
+        """
     )
 
+
+def _benchmark_unit(lua: Any, **options: Any) -> Any:
+    options.setdefault("army", 1)
+    options.setdefault("fraction", 1)
+    options.setdefault("position", [0, 0, 0])
+    options.setdefault("categories", {})
+    return lua.globals().MakeBenchmarkUnit(lua_value(lua, options))
+
+
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+def test_sample_army_computes_complete_stateful_metrics_from_mock_engine_brain() -> None:
+    lua = runtime()
+    _benchmark_lua_fixture(lua)
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+    assert lua.globals().Overmind4Benchmark is not None
+
+    emitted: list[str] = []
+    lua.globals().observer_logger = emitted.append
+    observer = lua.globals().Overmind4Benchmark.Create(
+        RUN_ID, lua.table_from([1]), lua.globals().observer_logger
+    )
+    brain = lua.globals().MakeBenchmarkBrain(1)
+
+    engineer = _benchmark_unit(
+        lua,
+        entityId=1,
+        token="1:1",
+        blueprintId="uel0105",
+        categories={"ENGINEER": True, "MOBILE": True, "LAND": True, "TECH1": True},
+        mass=52,
+    )
+    commander = _benchmark_unit(
+        lua,
+        entityId=2,
+        token="2:1",
+        blueprintId="uel0001",
+        categories={"ENGINEER": True, "COMMAND": True, "MOBILE": True, "LAND": True},
+        mass=1000,
+    )
+    mex_a = _benchmark_unit(
+        lua,
+        entityId=10,
+        token="10:1",
+        blueprintId="ueb1103",
+        position=[20, 0, 20],
+        categories={"MASSEXTRACTION": True, "STRUCTURE": True, "TECH1": True},
+        mass=36,
+    )
+    mex_b_t1 = _benchmark_unit(
+        lua,
+        entityId=11,
+        token="11:1",
+        blueprintId="ueb1103",
+        position=[40, 0, 40],
+        categories={"MASSEXTRACTION": True, "STRUCTURE": True, "TECH1": True},
+        mass=36,
+    )
+    land_factory = _benchmark_unit(
+        lua,
+        entityId=20,
+        token="20:1",
+        blueprintId="ueb0101",
+        categories={"FACTORY": True, "STRUCTURE": True, "LAND": True, "TECH1": True},
+        idle=True,
+        mass=210,
+    )
+    air_factory = _benchmark_unit(
+        lua,
+        entityId=21,
+        token="21:1",
+        blueprintId="ueb0102",
+        categories={"FACTORY": True, "STRUCTURE": True, "AIR": True, "TECH1": True},
+        idle=False,
+        mass=210,
+    )
+    air_units = [
+        _benchmark_unit(
+            lua,
+            entityId=30 + index,
+            token=f"{30 + index}:1",
+            blueprintId=blueprint,
+            categories={"AIR": True, "MOBILE": True, category: True, "TECH1": True},
+            mass=mass,
+        )
+        for index, (blueprint, category, mass) in enumerate(
+            (
+                ("uea0101", "SCOUT", 40),
+                ("uea0102", "ANTIAIR", 50),
+                ("uea0103", "BOMBER", 60),
+                ("uea0107", "TRANSPORTATION", 100),
+                ("uea0203", "GROUNDATTACK", 240),
+            )
+        )
+    ]
+    bucket_units = []
+    buckets = ("home", "garrison", "field", "response", "raider", "unassigned")
+    for index, bucket in enumerate(buckets):
+        entity_id = 100 + index
+        tier = "TECH3" if bucket == "field" else "TECH2"
+        unit = _benchmark_unit(
+            lua,
+            entityId=entity_id,
+            token=f"{entity_id}:1",
+            blueprintId=f"uel9{index:03d}",
+            categories={"MOBILE": True, "LAND": True, tier: True},
+            mass=100 + index * 10,
+        )
+        bucket_units.append(unit)
+        brain.Overmind4EntityGenerations[entity_id] = lua_value(
+            lua, {"generation": 1}
+        )
+        brain.Overmind4EntityGenerations[entity_id].reference = unit
+        if bucket != "unassigned":
+            brain.Overmind4ForcePlan.assignments[bucket] = lua.table_from(
+                [f"{entity_id}:1"]
+            )
+
+    brain.units = lua.table_from(
+        [
+            engineer,
+            commander,
+            mex_a,
+            mex_b_t1,
+            land_factory,
+            air_factory,
+            *air_units,
+            *bucket_units,
+        ]
+    )
+    brain.economy = lua_value(
+        lua,
+        {
+            "massIncome": 1.2,
+            "energyIncome": 20,
+            "massStored": 500,
+            "energyStored": 5000,
+            "massStoredRatio": 1,
+            "energyStoredRatio": 1,
+        },
+    )
+    brain.armyStats = lua_value(
+        lua,
+        {
+            "Economy_TotalConsumed_Mass": 1000,
+            "Economy_TotalConsumed_Energy": 5000,
+            "Economy_Reclaimed_Mass": 200,
+            "Economy_Reclaimed_Energy": 300,
+            "Economy_AccumExcess_Mass": 10,
+            "Economy_AccumExcess_Energy": 20,
+            "Enemies_MassValue_Destroyed": 400,
+            "Units_MassValue_Lost": 250,
+        },
+    )
+    brain.blueprintStats = lua_value(
+        lua,
+        {
+            "Units_History:ENGINEER": 3,
+            "Units_History:COMMAND": 1,
+            "Units_Killed:ENGINEER": 0,
+            "Units_Killed:COMMAND": 0,
+            "Units_History:MASSEXTRACTION": 2,
+            "Units_Killed:MASSEXTRACTION": 0,
+        },
+    )
+
+    first = plain(
+        lua.globals().Overmind4Benchmark.SampleArmy(observer, brain, 1, 300)
+    )
+    assert first["factory_full_bank_idle_ticks"] == 0
+    assert first["mex_rebuilt"] == 0
+
+    mex_b_t2 = _benchmark_unit(
+        lua,
+        entityId=12,
+        token="12:1",
+        blueprintId="ueb1202",
+        position=[40, 0, 40],
+        categories={"MASSEXTRACTION": True, "STRUCTURE": True, "TECH2": True},
+        mass=900,
+    )
+    brain.units = lua.table_from(
+        [engineer, commander, mex_b_t2, land_factory, air_factory, *air_units, *bucket_units]
+    )
+    brain.blueprintStats["Units_Killed:MASSEXTRACTION"] = 1
+    second = plain(
+        lua.globals().Overmind4Benchmark.SampleArmy(observer, brain, 1, 600)
+    )
+    assert second["mex_lost"] == 1
+    assert second["mex_rebuilt"] == 0
+    assert second["factory_full_bank_idle_ticks"] == 300
+
+    rebuilt_mex_a = _benchmark_unit(
+        lua,
+        entityId=13,
+        token="13:1",
+        blueprintId="ueb1103",
+        position=[20, 0, 20],
+        categories={"MASSEXTRACTION": True, "STRUCTURE": True, "TECH1": True},
+        mass=36,
+    )
+    land_factory.options.idle = False
+    brain.units = lua.table_from(
+        [engineer, commander, rebuilt_mex_a, mex_b_t2, land_factory, air_factory, *air_units, *bucket_units]
+    )
+    brain.economy.massIncome = 2.5
+    brain.economy.energyIncome = 30
+    brain.armyStats.Economy_TotalConsumed_Mass = 5000
+    brain.armyStats.Economy_TotalConsumed_Energy = 25000
+    brain.armyStats.Economy_Reclaimed_Mass = 600
+    brain.armyStats.Economy_Reclaimed_Energy = 900
+    brain.armyStats.Economy_AccumExcess_Mass = 50
+    brain.armyStats.Economy_AccumExcess_Energy = 80
+    brain.armyStats.Enemies_MassValue_Destroyed = 1200
+    brain.armyStats.Units_MassValue_Lost = 700
+    brain.blueprintStats["Units_History:ENGINEER"] = 4
+    brain.blueprintStats["Units_Killed:ENGINEER"] = 1
+    brain.blueprintStats["Units_History:MASSEXTRACTION"] = 3
+    final = plain(
+        lua.globals().Overmind4Benchmark.SampleArmy(observer, brain, 1, 900)
+    )
+
+    assert final == {
+        **metric_values(),
+        "mass_income": 25,
+        "energy_income": 300,
+        "mass_spent": 5000,
+        "energy_spent": 25000,
+        "mass_reclaim": 600,
+        "energy_reclaim": 900,
+        "mass_stored": 500,
+        "energy_stored": 5000,
+        "mass_excess": 50,
+        "energy_excess": 80,
+        "engineers_alive": 1,
+        "engineers_built": 3,
+        "engineers_lost": 1,
+        "mex_t1": 1,
+        "mex_t2": 1,
+        "mex_t3": 0,
+        "mex_built": 3,
+        "mex_lost": 1,
+        "mex_rebuilt": 1,
+        "mex_survival": pytest.approx(2 / 3),
+        "land_factory_t1": 1,
+        "land_factory_t2": 0,
+        "land_factory_t3": 0,
+        "air_factory_t1": 1,
+        "air_factory_t2": 0,
+        "air_factory_t3": 0,
+        "factory_idle": 0,
+        "factory_utilization": 1,
+        "factory_full_bank_idle_ticks": 300,
+        "air_scout": 1,
+        "air_interceptor": 1,
+        "air_bomber": 1,
+        "air_transport": 1,
+        "air_other": 1,
+        "mobile_t2": 5,
+        "mobile_t3": 1,
+        "army_count_home": 1,
+        "army_count_garrison": 1,
+        "army_count_field": 1,
+        "army_count_response": 1,
+        "army_count_raider": 1,
+        "army_count_unassigned": 1,
+        "army_mass_home": 100,
+        "army_mass_garrison": 110,
+        "army_mass_field": 120,
+        "army_mass_response": 130,
+        "army_mass_raider": 140,
+        "army_mass_unassigned": 150,
+        "mass_killed": 1200,
+        "mass_lost": 700,
+    }
+
+
+@pytest.mark.skipif(not OBSERVER_PATH.is_file(), reason="benchmark observer RED module missing")
+def test_step_resolves_both_actual_army_brains_samples_and_never_duplicates_tick() -> None:
+    lua = runtime()
+    _benchmark_lua_fixture(lua)
+    lua.execute(OBSERVER_PATH.read_text(encoding="utf-8"))
+    emitted: list[str] = []
+    reads: list[int] = []
+    brains = {}
+    for army, income in ((4, 1.5), (2, 2.5)):
+        brain = lua.globals().MakeBenchmarkBrain(army)
+        brain.economy = lua_value(
+            lua,
+            {
+                "massIncome": income,
+                "energyIncome": 10,
+                "massStored": 0,
+                "energyStored": 0,
+                "massStoredRatio": 0,
+                "energyStoredRatio": 0,
+            },
+        )
+        brains[army] = brain
+
+    def get_army_brain(army: int) -> Any:
+        reads.append(army)
+        return brains[army]
+
+    lua.globals().GetArmyBrain = get_army_brain
+    lua.globals().observer_logger = emitted.append
+    observer = lua.globals().Overmind4Benchmark.Create(
+        RUN_ID, lua.table_from([4, 2]), lua.globals().observer_logger
+    )
+
+    lua.globals().Overmind4Benchmark.Step(observer, 299)
     assert emitted == []
     assert reads == []
+    lua.globals().Overmind4Benchmark.Step(observer, 300)
+    lua.globals().Overmind4Benchmark.Step(observer, 300)
 
-    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 299)
-    assert emitted == []
-    assert reads == []
-
-    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 300)
-    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 300)
-    assert reads == [1, 2]
+    assert reads == [4, 2]
     assert len(emitted) == 2
-    assert "|tick=300|army=1|" in emitted[0]
+    assert "|tick=300|army=4|" in emitted[0]
+    assert "|mass_income=15" in emitted[0]
     assert "|tick=300|army=2|" in emitted[1]
-
-    lua.globals().BenchmarkObserver.Step(lua.globals().observer, 600)
-    assert reads == [1, 2, 1, 2]
-    assert len(emitted) == 4
+    assert "|mass_income=25" in emitted[1]
 
 
 @pytest.mark.skipif(not BENCHMARK_SCHEMA_READY, reason="benchmark parser RED schema missing")
@@ -248,7 +646,13 @@ class TestBenchmarkParsing:
             [
                 benchmark_line(300, 2, mass_income=16),
                 benchmark_line(300, 1, mass_income=10),
-                benchmark_line(600, 2, mass_income=20),
+                benchmark_line(
+                    600,
+                    2,
+                    mass_income=20,
+                    army_count_raider=7,
+                    army_mass_raider=420,
+                ),
                 benchmark_line(600, 1, mass_income=12),
             ]
         )
@@ -263,6 +667,8 @@ class TestBenchmarkParsing:
             (600, 2),
         ]
         assert checkpoints[-1]["metrics"]["mass_income"] == 20
+        assert checkpoints[-1]["metrics"]["army_count_raider"] == 7
+        assert checkpoints[-1]["metrics"]["army_mass_raider"] == 420
         assert telemetry.benchmark_integrity_reason is None
 
     def test_checkpoint_requires_the_complete_nonnegative_metric_schema(self) -> None:
@@ -494,7 +900,8 @@ def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | i
     home = math.ceil(combat * 0.25)
     garrison = math.ceil(combat * 0.15)
     response = math.ceil(combat * 0.10)
-    field = combat - home - garrison - response
+    raider = math.floor(combat * 0.05)
+    field = combat - home - garrison - response - raider
     utilization_floor = 0.85 if minutes >= 15 else 0.75
     mass_spent = floor["mass_spent"] * scale
     mass_excess = mass_spent / utilization_floor - mass_spent
@@ -531,6 +938,7 @@ def parity_raw_metrics(minutes: int, *, scale: float = 1) -> dict[str, float | i
             "army_count_garrison": garrison,
             "army_count_field": field,
             "army_count_response": response,
+            "army_count_raider": raider,
             "army_count_unassigned": 0,
         }
     )
@@ -621,10 +1029,11 @@ def derived_failure_telemetry(
             "army_count_garrison",
             "army_count_field",
             "army_count_response",
+            "army_count_raider",
             "army_count_unassigned",
         ):
             overrides[(minutes, 1, field)] = 0
-        overrides[(minutes, 1, "army_count_home")] = value
+        overrides[(minutes, 1, "army_count_raider")] = value
     elif metric == "mass_utilization":
         spent = float(raw["mass_spent"])
         overrides[(minutes, 1, "mass_excess")] = spent / float(value) - spent
@@ -827,6 +1236,13 @@ class TestParityReporting:
         assert len(document["operation_events"]) == 7
         assert document["parity"] == parity
         assert document["parity"]["classification"] == "macro-parity-win"
+        own_20m = next(
+            checkpoint
+            for checkpoint in document["benchmark_checkpoints"]
+            if checkpoint["tick"] == 12000 and checkpoint["army"] == 1
+        )
+        assert own_20m["metrics"]["army_count_raider"] == 6
+        assert "army_mass_raider" in own_20m["metrics"]
 
     @pytest.mark.skipif(
         not PROMOTION_API_READY, reason="promotion aggregation RED API missing"

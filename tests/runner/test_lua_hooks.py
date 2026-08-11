@@ -33,6 +33,9 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     logs: list[str] = []
     launched: list[Any] = []
     loaded_maps: list[str] = []
+    harness_threads: list[Any] = []
+    benchmark_creates: list[tuple[Any, ...]] = []
+    benchmark_steps: list[tuple[Any, ...]] = []
 
     scenario = lua.table_from(
         {
@@ -98,6 +101,17 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     colors = lua.table_from(
         {"GameColors": lua.table_from({"PlayerColors": lua.table_from(list(range(1, 17)))})}
     )
+    benchmark_stub = lua.table()
+
+    def benchmark_create(*arguments: Any) -> Any:
+        benchmark_creates.append(arguments)
+        return lua.table_from({"runId": arguments[0] if arguments else None})
+
+    def benchmark_step(*arguments: Any) -> None:
+        benchmark_steps.append(arguments)
+
+    benchmark_stub.Create = benchmark_create
+    benchmark_stub.Step = benchmark_step
 
     def importer(path: str) -> Any:
         normalized = path.lower()
@@ -111,6 +125,8 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
             return colors
         if normalized == "/lua/user/prefs.lua":
             return prefs
+        if normalized.endswith("/overmind4benchmark.lua"):
+            return lua.table_from({"Overmind4Benchmark": benchmark_stub})
         raise AssertionError(f"unexpected import: {path}")
 
     lua.globals().import_ = importer
@@ -122,7 +138,12 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     lua.globals().FixupMapName = lambda name: f"/maps/{name}/{name}_scenario.lua"
     lua.globals().VerifyScenarioConfiguration = lambda _: None
     lua.globals().LaunchSinglePlayerSession = lambda session: launched.append(session)
-    lua.globals().ForkThread = lambda callback: lua.globals().__setitem__("harness_thread", callback)
+    def fork_thread(callback: Any) -> None:
+        harness_threads.append(callback)
+        if lua.globals().harness_thread is None:
+            lua.globals().harness_thread = callback
+
+    lua.globals().ForkThread = fork_thread
     lua.globals().WorldIsPlaying = lambda: True
     lua.globals().GetGameTimeSeconds = lambda: int(args.get("/maxtime", "1800"))
     lua.globals().SetGameSpeed = lambda speed: lua.globals().__setitem__("set_speed", speed)
@@ -130,6 +151,10 @@ def _runtime(args: dict[str, str]) -> tuple[LuaRuntime, list[str], list[Any]]:
     lua.globals().math.mod = lambda left, right: left % right
     lua.globals().table.getn = lambda value: len(value)
     lua.globals().loaded_maps = loaded_maps
+    lua.globals().harness_threads = harness_threads
+    lua.globals().benchmark_stub = benchmark_stub
+    lua.globals().benchmark_creates = benchmark_creates
+    lua.globals().benchmark_steps = benchmark_steps
     return lua, logs, launched
 
 
