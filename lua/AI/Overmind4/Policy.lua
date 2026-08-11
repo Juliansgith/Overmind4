@@ -785,6 +785,15 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
     if (counts.land_factory or 0) < 2 and CanBuild(acu, 'land_factory') then
         return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 2, virtualPlacements), 13, 'opening_second_factory')
     end
+    if (counts.air_factory or 0) < 1 and CanBuild(acu, 'air_factory') then
+        return BuildAtPlacement(
+            acu,
+            'air_factory',
+            ReservePlacement(snapshot, 'air_factory', 1, virtualPlacements),
+            3,
+            'opening_air_factory'
+        )
+    end
     return nil
 end
 

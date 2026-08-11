@@ -171,6 +171,20 @@ def test_reserved_local_mexes_count_as_progress_toward_four() -> None:
     assert intents_of(result, "build_structure")[0]["buildRole"] == "land_factory"
 
 
+def test_safe_acu_builds_first_air_factory_after_local_opening() -> None:
+    snapshot = post_opening_snapshot()
+    snapshot["units"][0]["canBuild"]["air_factory"] = True
+    snapshot["placements"]["air_factory"] = [[14, 2, 22]]
+
+    build = intents_of(decide(snapshot), "build_structure")[0]
+
+    assert (build["actorToken"], build["buildRole"], build["reason"]) == (
+        "1:1",
+        "air_factory",
+        "opening_air_factory",
+    )
+
+
 def test_malformed_occupied_reserved_and_unreachable_sites_are_ignored() -> None:
     sites = [
         {"key": "missing-position", "name": "A", "distance": 1, "localSite": True, "reachable": True, "occupied": False, "reserved": False},
