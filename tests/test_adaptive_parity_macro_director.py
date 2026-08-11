@@ -1857,6 +1857,65 @@ class TestRegionalMacro:
         assert gone["jobs"]["mex:front:1"]["retryCount"] == 1
         assert gone["releasedActorTokens"] == ["eng-1:1"]
 
+    def test_retryable_job_observes_external_site_completion_once(self) -> None:
+        ledger = {
+            "jobs": {
+                "mex:front:1": {
+                    "id": "mex:front:1",
+                    "kind": "rebuild_mex",
+                    "phase": "retryable",
+                    "failureReason": "actor_unavailable",
+                    "actorToken": "eng-1:1",
+                    "actorLineage": {"eng-1": "eng-1:1"},
+                    "targetKey": "front-1",
+                    "retryCount": 1,
+                }
+            }
+        }
+        completed_snapshot = {
+            "tick": 300,
+            "newJobs": [],
+            "actors": [
+                {
+                    "token": "eng-1:2",
+                    "role": "engineer",
+                    "complete": True,
+                    "live": True,
+                    "owned": True,
+                    "available": True,
+                    "canBuild": {"mass_extractor": True},
+                    "position": [90, 0, 0],
+                }
+            ],
+            "targets": [
+                {
+                    "key": "front-1",
+                    "live": True,
+                    "completed": True,
+                    "position": [100, 0, 0],
+                }
+            ],
+        }
+
+        completed = invoke(
+            MODULE, GLOBAL, "UpdateJobLedger", ledger, completed_snapshot
+        )
+        repeated = invoke(
+            MODULE,
+            GLOBAL,
+            "UpdateJobLedger",
+            completed,
+            {**completed_snapshot, "tick": 301},
+        )
+
+        completed_job = completed["jobs"]["mex:front:1"]
+        assert completed_job["phase"] == "completed"
+        assert "failureReason" not in completed_job
+        assert completed_job["actorLineage"] == {"eng-1": "eng-1:1"}
+        assert len(completed["releasedActorTokens"]) == 0
+        assert repeated["jobs"]["mex:front:1"] == completed_job
+        assert len(repeated["releasedActorTokens"]) == 0
+
     def test_job_ledger_generation_death_and_capture_reassign_nearest_exact_survivor(self) -> None:
         base = {
             "jobs": {

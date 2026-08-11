@@ -2484,6 +2484,150 @@ def test_recycled_identity_quarantine_survives_until_site_completion() -> None:
     assert plain(harness.controller.pending) == {}
 
 
+def test_retryable_quarantine_resets_after_external_owned_completion_and_later_loss() -> None:
+    for reverse_completion_units in (False, True):
+        harness = make_harness()
+        _use_real_macro_expansion_and_job_ledger(harness)
+        harness.lua.execute("Policy.Decide = function() return {} end")
+        site = plain(harness.controller.markers.mass[1])
+        harness.controller.markers.mass = lua_value(harness.lua, [site])
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": 1,
+                "fundedExpansionSlots": 1,
+                "lanes": {"mex_rebuild": {"admitted": True}},
+                "regions": [],
+                "intents": [],
+            },
+        )
+        original = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([original])
+        harness.lua.globals().Controller.Step(harness.controller)
+        operation_id = plain(harness.controller.pending)["72:1"]["operationId"]
+
+        recycled = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([recycled])
+        harness.brain.tick = 1
+        harness.lua.globals().Controller.Step(harness.controller)
+        quarantined = plain(harness.controller.jobLedger)["jobs"][operation_id]
+        assert quarantined["phase"] == "retryable"
+        assert quarantined["actorLineage"] == {"72": "72:1"}
+
+        completed_mex = harness.unit(
+            entityId=80,
+            blueprintId="ueb1103",
+            position=site["position"],
+        )
+        completion_units = [recycled, completed_mex]
+        if reverse_completion_units:
+            completion_units.reverse()
+        harness.brain.units = harness.lua.table_from(completion_units)
+        harness.brain.tick = 2
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        completed_job = plain(harness.controller.jobLedger)["jobs"][operation_id]
+        assert completed_job["phase"] == "completed"
+        assert "failureReason" not in completed_job
+        assert len(harness.calls.buildMobile) == 1
+        assert plain(harness.controller.pending) == {}
+
+        harness.brain.units = harness.lua.table_from([recycled])
+        harness.brain.tick = 3
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        assert len(harness.calls.buildMobile) == 2
+        restarted = plain(harness.controller.pending)["72:2"]
+        assert restarted["operationId"] == operation_id
+        assert restarted["operationAttempt"] == 2
+        restarted_job = plain(harness.controller.jobLedger)["jobs"][operation_id]
+        assert restarted_job["actorToken"] == "72:2"
+        assert restarted_job["actorLineage"] == {"72": "72:2"}
+        assert restarted_job["retryCount"] == 2
+
+        harness.brain.tick = 4
+        harness.lua.globals().Controller.Step(harness.controller)
+        assert len(harness.calls.buildMobile) == 2
+        assert list(plain(harness.controller.pending)) == ["72:2"]
+
+
+def test_retryable_quarantine_ignores_captured_and_malformed_mex_boundaries() -> None:
+    for reverse_boundary_units in (False, True):
+        harness = make_harness()
+        _use_real_macro_expansion_and_job_ledger(harness)
+        harness.lua.execute("Policy.Decide = function() return {} end")
+        site = plain(harness.controller.markers.mass[1])
+        harness.controller.markers.mass = lua_value(harness.lua, [site])
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": True,
+                "epoch": 1,
+                "fundedExpansionSlots": 1,
+                "lanes": {"mex_rebuild": {"admitted": True}},
+                "regions": [],
+                "intents": [],
+            },
+        )
+        original = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([original])
+        harness.lua.globals().Controller.Step(harness.controller)
+        operation_id = plain(harness.controller.pending)["72:1"]["operationId"]
+
+        recycled = harness.unit(
+            entityId=72,
+            blueprintId="uel0105",
+            position=[12, 2, 20],
+            canBuild={"ueb1103": True},
+        )
+        harness.brain.units = harness.lua.table_from([recycled])
+        harness.brain.tick = 1
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        captured_mex = harness.unit(
+            entityId=80,
+            blueprintId="ueb1103",
+            position=site["position"],
+            army=2,
+        )
+        malformed_mex = harness.unit(
+            entityId=81,
+            blueprintId="ueb1103",
+            position=site["position"],
+            malformedBlueprint=True,
+        )
+        boundary_units = [recycled, captured_mex, malformed_mex]
+        if reverse_boundary_units:
+            boundary_units.reverse()
+        harness.brain.units = harness.lua.table_from(boundary_units)
+        harness.brain.tick = 2
+        harness.lua.globals().Controller.Step(harness.controller)
+
+        preserved = plain(harness.controller.jobLedger)["jobs"][operation_id]
+        assert preserved["phase"] == "retryable"
+        assert preserved["actorLineage"] == {"72": "72:1"}
+        assert len(harness.calls.buildMobile) == 1
+        assert plain(harness.controller.pending) == {}
+
+
 def test_expansion_lifecycle_has_no_injected_job_epoch_escape_hatch() -> None:
     assert "jobEpoch" not in source("lua/AI/Overmind4/Controller.lua")
 

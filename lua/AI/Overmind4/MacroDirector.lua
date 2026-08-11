@@ -1217,14 +1217,17 @@ MacroDirector.UpdateJobLedger = function(ledger, snapshot)
     table.sort(ids)
     for _, id in ipairs(ids) do
         local job = result.jobs[id]
-        if IsActiveJob(job) then
+        local active = IsActiveJob(job)
+        local target = targets[job.targetKey]
+        if job.phase ~= 'completed' and target and target.completed == true then
+            job.phase = 'completed'
+            job.failureReason = nil
+            if active and job.actorToken then
+                table.insert(result.releasedActorTokens, job.actorToken)
+            end
+        elseif active then
             local actor = actors[job.actorToken]
-            local target = targets[job.targetKey]
-            if target and target.completed == true then
-                job.phase = 'completed'
-                job.failureReason = nil
-                if job.actorToken then table.insert(result.releasedActorTokens, job.actorToken) end
-            elseif target and target.live == false then
+            if target and target.live == false then
                 ReleaseJob(job, result, 'target_gone')
             elseif ExistingMexEngineerInvalid(actor) then
                 local oldToken = job.actorToken
