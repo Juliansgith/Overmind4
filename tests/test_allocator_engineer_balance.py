@@ -960,7 +960,7 @@ def test_pending_missing_engineer_suppresses_duplicate_and_leaves_next_factory_f
 
 @pytest.mark.parametrize(
     ("completed_mex", "expected_target"),
-    [(0, 2), (2, 3), (3, 4), (6, 6), (9, 8), (18, 10), (30, 10)],
+    [(0, 2), (2, 4), (3, 5), (6, 8), (9, 11), (10, 12), (18, 12), (30, 12)],
 )
 def test_completed_mex_economy_ramp_sets_a_bounded_engineer_target_floor(
     completed_mex: int,
@@ -1031,7 +1031,7 @@ def test_incomplete_or_malformed_mex_never_advances_the_engineer_target(
 
     observation = _sample(harness, 4)
 
-    assert observation.macro.engineerTarget == 3
+    assert observation.macro.engineerTarget == 4
 
 
 @pytest.mark.parametrize(
