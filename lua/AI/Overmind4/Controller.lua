@@ -11010,6 +11010,50 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
             end
         end
     end
+    local raiderTargets = {}
+    for _, region in ipairs((forcePlan or {}).regions or {}) do
+        local rank = nil
+        if region.state == 'contested' or region.state == 'retake' then
+            rank = 1
+        elseif region.state == 'planned' or region.state == 'establishing' then
+            rank = 2
+        elseif region.state == 'secured' then
+            rank = 3
+        end
+        if rank and CopyPosition(region.position) then
+            TableInsert(raiderTargets, {
+                key = tostring(region.key or ''),
+                position = CopyPosition(region.position),
+                rank = rank,
+                distance = DistanceSquared(region.position, controller.basePosition),
+            })
+        end
+    end
+    table.sort(raiderTargets, function(a, b)
+        if a.rank ~= b.rank then return a.rank < b.rank end
+        if a.distance ~= b.distance then return a.distance > b.distance end
+        return a.key < b.key
+    end)
+    local raiderTokens = CopyArray(
+        ((forcePlan or {}).assignments or {}).raider or {}
+    )
+    table.sort(raiderTokens)
+    local targetIndex = 1
+    while TableGetn(raiderTokens) > 0 and TableGetn(raiderTargets) > 0 do
+        local tokens = {}
+        for index = 1, 4 do
+            local token = table.remove(raiderTokens, 1)
+            if token then TableInsert(tokens, token) end
+        end
+        local target = raiderTargets[targetIndex]
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'regional_raider', regionKey = target.key,
+            actorTokens = tokens, position = CopyPosition(target.position),
+            priority = 5,
+        })
+        targetIndex = targetIndex + 1
+        if targetIndex > TableGetn(raiderTargets) then targetIndex = 1 end
+    end
     local targetRegion = nil
     local targetDistance = nil
     local targetRank = nil
@@ -12684,6 +12728,11 @@ ESCALATION.ExecuteForceMove = function(
     end
     RememberOrder(controller, signature)
     for _, token in ipairs(tokens) do usedActors[token] = true end
+    Emit(controller, 'order', {
+        command = 'force_move', bucket = bucket,
+        target = tostring(intent.regionKey or 'none'),
+        units = TableGetn(tokens),
+    })
     return true
 end
 
@@ -12859,6 +12908,10 @@ Controller.Execute = function(controller, intents, observation)
             elseif intent.kind == 'regional_field' then
                 issued = ESCALATION.ExecuteForceMove(
                     controller, intent, records, usedActors, 'field', true
+                )
+            elseif intent.kind == 'regional_raider' then
+                issued = ESCALATION.ExecuteForceMove(
+                    controller, intent, records, usedActors, 'raider', true
                 )
             elseif intent.kind == 'field_intercept' then
                 issued = ESCALATION.ExecuteFieldIntercept(

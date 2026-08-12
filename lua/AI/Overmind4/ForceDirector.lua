@@ -67,10 +67,10 @@ ForceDirector.Assign = function(snapshot)
     end
     table.sort(units, function(a, b) return a.token < b.token end)
     local total = Count(units)
-    local homeTarget = math.floor(total * 0.25)
+    local homeTarget = math.floor(total * 0.20)
     local garrisonTarget = math.floor(total * 0.15)
-    local responseTarget = math.floor(total * 0.15)
-    local raiderTarget = math.floor(total * 0.05)
+    local responseTarget = math.floor(total * 0.10)
+    local raiderTarget = math.floor(total * 0.10)
     if total > 0 and homeTarget == 0 then homeTarget = 1 end
     local activeRegions = {}
     for _, region in ipairs(snapshot.regions or {}) do

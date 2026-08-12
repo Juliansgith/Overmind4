@@ -6236,3 +6236,53 @@ def test_regional_field_targeting_excludes_inactive_regions_and_prioritizes_cont
         outcomes.append(plain(harness.calls.aggressive[1].position))
 
     assert outcomes == [[100, 2, 100], [100, 2, 100]]
+
+
+def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    tanks = [
+        harness.unit(
+            entityId=60 + index,
+            blueprintId="uel0201",
+            position=[20, 2, 20],
+        )
+        for index in range(12)
+    ]
+    tokens = [f"{60 + index}:1" for index in range(12)]
+    regions = [
+        {"key": "a-contested", "state": "contested", "position": [100, 2, 100]},
+        {"key": "b-planned", "state": "planned", "position": [300, 2, 300]},
+        {"key": "c-secured", "state": "secured", "position": [200, 2, 200]},
+    ]
+    harness.brain.units = harness.lua.table_from(tanks)
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {},
+            "regions": regions,
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "forcePlan",
+        {
+            "epoch": 1,
+            "assignments": {"raider": tokens},
+            "ownershipByToken": {token: "raider" for token in tokens},
+            "regionAssignments": {},
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 3
+    assert sorted(len(call.units) for call in harness.calls.aggressive.values()) == [4, 4, 4]
+    assert {
+        tuple(plain(call.position)) for call in harness.calls.aggressive.values()
+    } == {(100, 2, 100), (200, 2, 200), (300, 2, 300)}
