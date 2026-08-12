@@ -569,6 +569,40 @@ def test_ten_km_nearby_expansion_does_not_require_a_remote_escort() -> None:
     assert expansion_input["controlledRadius"] == 300
 
 
+def test_live_macro_input_can_fund_four_independent_mex_jobs() -> None:
+    harness = make_harness()
+    template = plain(harness.controller.markers.mass[1])
+    harness.controller.markers.mass = lua_value(
+        harness.lua,
+        [
+            {
+                **template,
+                "key": f"mass-{index}",
+                "name": f"Mass {index}",
+                "position": [30 + index * 20, 2, 30],
+            }
+            for index in range(4)
+        ],
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    macro_input = plain(harness.calls.macroBuildPortfolio[1])
+    mex_requests = [
+        request
+        for request in macro_input["requests"]
+        if request["lane"] == "mex_rebuild"
+    ]
+    assert [request["id"] for request in mex_requests] == [
+        "mex-1",
+        "mex-2",
+        "mex-3",
+        "mex-4",
+    ]
+    assert mex_requests[0]["required"] is True
+    assert all(request.get("optional") is True for request in mex_requests[1:])
+
+
 def test_funded_mex_expansion_does_not_claim_the_missing_hydro_builder() -> None:
     harness = make_harness()
     _use_real_macro_expansion_and_job_ledger(harness)
