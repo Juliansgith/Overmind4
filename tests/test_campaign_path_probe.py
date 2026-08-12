@@ -1312,6 +1312,9 @@ def test_probe_attrition_blocks_failed_destination_and_selects_live_alternate() 
 
     assert campaign_state(harness)["anchorKey"] == before["anchorKey"]
     assert campaign_state(harness).get("routeBlockedCount", 0) == 1
+    route_blocks = campaign_state(harness)["routeBlocks"]
+    block = next(iter(route_blocks.values()))
+    assert block["untilTick"] == 3761
     execute_intents(harness, [release], releasing_observation)
 
     configure_route(harness, [[95, 95.85, 85]], count=1, length=90)
