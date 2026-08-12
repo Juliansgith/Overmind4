@@ -1502,7 +1502,12 @@ MacroDirector.PlanTech = function(snapshot)
     local activeMexUpgrades = Number(snapshot.activeMexUpgrades, 0) or 0
     local mexCount = Count(snapshot.mex or {})
     local mexUpgradeLimit = math.min(4, math.max(1, math.floor(mexCount / 4)))
-    if healthy and mexFunded
+    -- Once two T2 extractors unlock the first land HQ, stop opening more mex
+    -- upgrades until that HQ exists. Otherwise the continuous mex-upgrade
+    -- stream keeps the sole tech commitment occupied forever and the army
+    -- remains T1 despite a full bank.
+    local mexUpgradesMayStart = snapshot.t2HqComplete == true or t2MexCount < 2
+    if healthy and mexFunded and mexUpgradesMayStart
         and activeMexUpgrades < mexUpgradeLimit
     then
         local t1Mex = {}
