@@ -10512,7 +10512,7 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     local factoryPowerReady = currentPower >= factoryPowerTarget
     local factoryGrowthAdmitted = (lanes.factory_growth or {}).admitted == true
         and factoryPowerReady
-    local openingFirstAir = currentLand > 0 and currentAir < 1
+    local openingFirstAir = currentLand >= 2 and currentAir < 1
         and currentPower >= 2 and currentMex >= 2
     local landFactoryTarget = tonumber(macroPlan.landFactoryTarget) or currentLand
     local airFactoryTarget = tonumber(macroPlan.airFactoryTarget) or currentAir
@@ -13875,6 +13875,7 @@ end
 ESCALATION.IntentPortfolioLane = function(intent)
     local role = intent.buildRole or intent.upgradeRole
     if intent.reason == 'opening_air_factory' then return nil end
+    if intent.reason == 'opening_second_factory' then return nil end
     if intent.reason == 'opening_air_mobility' then return nil end
     if intent.reason == 'stagger_mex_upgrade' then return nil end
     if intent.kind == 'reclaim' then return 'reclaim' end

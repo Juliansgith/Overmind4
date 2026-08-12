@@ -2323,6 +2323,44 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
     assert order.units[1].options.entityId == 1
 
 
+def test_acu_second_land_factory_precedes_first_air_director_claim() -> None:
+    harness = make_harness()
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        canBuild={"ueb0101": True, "ueb0102": True},
+    )
+    land = harness.unit(entityId=20, blueprintId="ueb0101")
+    power = [
+        harness.unit(entityId=30 + index, blueprintId="ueb1101")
+        for index in range(2)
+    ]
+    mex = [
+        harness.unit(entityId=40 + index, blueprintId="ueb1103")
+        for index in range(4)
+    ]
+    harness.brain.units = harness.lua.table_from([acu, land, *power, *mex])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 2,
+            "airFactoryTarget": 1,
+            "lanes": {"factory_growth": {"admitted": False}},
+            "grants": [],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb0101"
+
+
 def test_reclaiming_acu_builds_funded_second_air_when_field_engineers_are_busy() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
