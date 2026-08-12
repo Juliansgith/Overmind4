@@ -462,6 +462,26 @@ class TestAirAndMobility:
 
         assert [order["buildRole"] for order in plan["orders"]] == expected
 
+    def test_live_fighter_heavy_air_mix_builds_another_bomber_without_waiting_for_contact(
+        self,
+    ) -> None:
+        snapshot = air_snapshot()
+        snapshot["completed"].update(
+            {"air_scout": 3, "interceptor": 45, "bomber": 5, "transport": 1}
+        )
+        snapshot["needs"].update(
+            {
+                "airThreat": False,
+                "airThreatCount": 0,
+                "visibleRaidTarget": False,
+                "remoteSafeExpansion": False,
+            }
+        )
+
+        plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
+
+        assert [order["buildRole"] for order in plan["orders"]] == ["bomber"]
+
     def test_air_slot_selects_idle_factory_deterministically_under_factory_permutation(self) -> None:
         snapshot = air_snapshot()
         snapshot["completed"].update(
