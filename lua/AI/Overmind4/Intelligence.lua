@@ -406,10 +406,12 @@ Intelligence.AdvanceTransport = function(mission, event)
             local attached = event.attachedCargoTokens or {}
             if Count(attached) == 0 then
                 local arrived = true
+                local tolerance = Number(result.dropTolerance, 20) or 20
+                local toleranceSquared = tolerance * tolerance
                 for _, token in ipairs(result.cargoTokens or {}) do
                     local position = (event.cargoPositions or {})[token]
                     if not position or DistanceSquared(position, result.dropPosition)
-                        > (Number(result.dropTolerance, 20) or 20) ^ 2
+                        > toleranceSquared
                     then
                         arrived = false
                     end

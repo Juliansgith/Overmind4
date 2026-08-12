@@ -571,6 +571,7 @@ class TestAirAndMobility:
         )
         assert late_outside["state"] == "released"
         assert late_outside["failureReason"] == "mission_timeout"
+        assert " ^ " not in director_path(MODULE).read_text(encoding="utf-8")
 
     @pytest.mark.parametrize("state", ("loaded", "flying"))
     @pytest.mark.parametrize(
