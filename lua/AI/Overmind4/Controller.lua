@@ -9432,7 +9432,12 @@ ESCALATION.DirectorExpansionInput = function(
         then
             TableInsert(engineers, unit)
         end
-        if COMBAT_ROLES[unit.role] then TableInsert(escorts, unit) end
+        if COMBAT_ROLES[unit.role] then
+            local escort = ESCALATION.DeepCopy(unit)
+            escort.available = unit.complete == true
+                and controller.pending[unit.token] == nil
+            TableInsert(escorts, escort)
+        end
     end
     return {
         tick = observation.tick,

@@ -569,6 +569,32 @@ def test_ten_km_expansion_beyond_safe_local_radius_requires_an_escort() -> None:
     assert expansion_input["controlledRadius"] == 120
 
 
+def test_force_owned_moving_combat_remains_available_as_region_bootstrap_escort() -> None:
+    harness = make_harness()
+    tank = harness.unit(
+        entityId=70,
+        blueprintId="uel0201",
+        position=[20, 2, 20],
+    )
+    anti_air = harness.unit(
+        entityId=71,
+        blueprintId="uel0104",
+        position=[22, 2, 20],
+    )
+    tank.options.idleState = False
+    tank.options.movingState = True
+    anti_air.options.idleState = False
+    anti_air.options.movingState = True
+    harness.brain.units = harness.lua.table_from([tank, anti_air])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    expansion_input = plain(harness.calls.macroPlanExpansion[1])
+    escorts = {escort["token"]: escort for escort in expansion_input["escorts"]}
+    assert escorts["70:1"]["available"] is True
+    assert escorts["71:1"]["available"] is True
+
+
 def test_funded_mex_expansion_does_not_claim_the_missing_hydro_builder() -> None:
     harness = make_harness()
     _use_real_macro_expansion_and_job_ledger(harness)
