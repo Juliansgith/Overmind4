@@ -866,6 +866,29 @@ def test_idle_acu_patrols_completed_local_mexes_before_home_engineers(
         assert actor["role"] == "acu"
 
 
+def test_dedicated_reclaim_worker_patrols_instead_of_the_idle_acu() -> None:
+    snapshot = _policy_allocator_snapshot("engineer", "engineer", "engineer")
+    for site in snapshot["sites"]["mass"]:
+        site["complete"] = True
+    pgen = next(unit for unit in snapshot["units"] if unit["role"] == "power_generator")
+    for token in ("90:1", "91:1"):
+        extra = copy.deepcopy(pgen)
+        extra["token"] = token
+        snapshot["units"].append(extra)
+    air_factory = copy.deepcopy(
+        next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
+    )
+    air_factory.update(token="92:1", role="air_factory")
+    snapshot["units"].append(air_factory)
+    worker = next(unit for unit in snapshot["units"] if unit["role"] == "engineer")
+    worker["reclaimWorker"] = True
+
+    patrols = intents_of(decide(snapshot), "reclaim_patrol")
+
+    assert len(patrols) == 1
+    assert patrols[0]["actorToken"] == worker["token"]
+
+
 @pytest.mark.parametrize(
     ("blueprint_id", "expected_role"),
     [("uel0105", "engineer"), ("uel0001", "acu")],

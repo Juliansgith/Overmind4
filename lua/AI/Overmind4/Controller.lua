@@ -722,6 +722,7 @@ local function NormalizeOwnUnit(controller, unit)
         airAssigned = controller.airAssignments[token] == true,
         airScoutAssigned = controller.airScoutAssignments[token] == true,
         reclaimPatrolAssigned = controller.reclaimPatrolAssignments[token] == true,
+        reclaimWorker = controller.reclaimWorkerToken == token,
         fieldCohort = fieldCohort == true,
         homeCohort = homeCohort == true,
         campaignEngineer = campaignEngineer == true,
@@ -7967,6 +7968,7 @@ Controller.Create = function(brain)
         airScoutAssignments = {},
         airScoutCount = 0,
         reclaimPatrolAssignments = {},
+        reclaimWorkerToken = nil,
         intelState = { epoch = 0, contacts = {}, threat = {}, expansionSafety = {} },
         macroPlan = { epoch = 0, valid = false, lanes = {}, regions = {}, intents = {} },
         jobLedger = { epoch = 0, jobs = {}, releasedActorTokens = {} },
@@ -9096,7 +9098,12 @@ ESCALATION.DirectorReclaimInput = function(controller, observation, macroPlan)
     end
     local engineers = {}
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-        if unit.role == 'engineer' then TableInsert(engineers, unit) end
+        if unit.role == 'engineer'
+            and (controller.reclaimWorkerToken == nil
+                or unit.token == controller.reclaimWorkerToken)
+        then
+            TableInsert(engineers, unit)
+        end
     end
     return {
         tick = observation.tick,
@@ -11106,11 +11113,35 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     local strategicBuilderToken = ESCALATION.StrategicHydroBuilderToken(
         controller, observation, macroPlan
     )
+    local reclaimInput = ESCALATION.DirectorReclaimInput(
+        controller, observation, macroPlan
+    )
+    if controller.reclaimWorkerToken ~= nil
+        and TableGetn(reclaimInput.engineers or {}) == 0
+    then
+        controller.reclaimWorkerToken = nil
+        reclaimInput = ESCALATION.DirectorReclaimInput(
+            controller, observation, macroPlan
+        )
+    end
     local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
-        ESCALATION.DirectorReclaimInput(controller, observation, macroPlan)
+        reclaimInput
     ) or { jobs = {} }
     reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
+    if controller.reclaimWorkerToken == nil then
+        for _, job in ipairs(reclaimPlan.jobs or {}) do
+            if type(job.actorToken) == 'string'
+                and (controller.reclaimWorkerToken == nil
+                    or job.actorToken < controller.reclaimWorkerToken)
+            then
+                controller.reclaimWorkerToken = job.actorToken
+            end
+        end
+    end
     local reclaimActorTokens = {}
+    if type(controller.reclaimWorkerToken) == 'string' then
+        reclaimActorTokens[controller.reclaimWorkerToken] = true
+    end
     for _, job in ipairs(reclaimPlan.jobs or {}) do
         if type(job.actorToken) == 'string' then
             reclaimActorTokens[job.actorToken] = true

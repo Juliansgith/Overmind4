@@ -3861,6 +3861,16 @@ def test_reclaim_actor_is_reserved_before_expansion_planning() -> None:
     expansion_input = plain(harness.calls.macroPlanExpansion[1])
     assert [unit["token"] for unit in expansion_input["engineers"]] == ["13:1"]
 
+    assert harness.controller.reclaimWorkerToken == "12:1"
+    harness.controller.pending["12:1"] = None
+    _set_director_result(harness, "reclaimPlan", {"jobs": []})
+    harness.brain.tick = 2
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    expansion_input = plain(harness.calls.macroPlanExpansion[2])
+    assert [unit["token"] for unit in expansion_input["engineers"]] == ["13:1"]
+
 
 def test_failed_reclaim_command_returns_its_grant_and_never_reports_ordered() -> None:
     harness = make_harness()

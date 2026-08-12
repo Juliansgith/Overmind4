@@ -1355,7 +1355,21 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         if TableGetn(siteKeys) >= 2 then
             local best = nil
             local bestDistance = nil
-            if reclaimPatrolAcu then
+            for _, engineer in ipairs(engineers) do
+                if engineer.reclaimWorker == true
+                    and not assignedEngineers[engineer.token]
+                    and engineer.campaignEngineer ~= true
+                    and IsUsablePosition(engineer.position)
+                then
+                    best = engineer
+                    bestDistance = PositionDistanceSquared(
+                        engineer.position,
+                        snapshot.basePosition
+                    )
+                    break
+                end
+            end
+            if not best and reclaimPatrolAcu then
                 local claimed = false
                 for _, existing in ipairs(intents) do
                     if existing.actorToken == reclaimPatrolAcu.token then
