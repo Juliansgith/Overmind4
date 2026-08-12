@@ -818,7 +818,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local engineers = {}
     local reclaimPatrolActive = false
     local reclaimPatrolAcu = nil
-    local adjacencyPowerAcu = nil
+    local strategicConstructionAcu = nil
     for _, unit in ipairs(units) do
         if unit.reclaimPatrolAssigned == true then
             reclaimPatrolActive = true
@@ -828,7 +828,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             and not pendingActors[unit.token]
             and (unit.idle == true or unit.reclaimPatrolAssigned == true)
         then
-            adjacencyPowerAcu = unit
+            strategicConstructionAcu = unit
             if unit.idle == true and unit.reclaimPatrolAssigned ~= true then
                 reclaimPatrolAcu = unit
             end
@@ -1135,6 +1135,38 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         assignedEngineers[best.token] = true
         return true
     end
+    local function AssignAcuPlacement(role, index, priority, reason)
+        if not strategicConstructionAcu
+            or not CanBuild(strategicConstructionAcu, role)
+        then
+            return false
+        end
+        for _, existing in ipairs(intents or {}) do
+            if existing.actorToken == strategicConstructionAcu.token then
+                return false
+            end
+        end
+        local position = ReservePlacement(
+            snapshot,
+            role,
+            index,
+            virtualPlacements
+        )
+        if not position then return false end
+        AddIntent(intents, BuildAtPlacement(
+            strategicConstructionAcu,
+            role,
+            position,
+            priority,
+            reason
+        ))
+        if reclaimPatrolAcu
+            and reclaimPatrolAcu.token == strategicConstructionAcu.token
+        then
+            reclaimPatrolAcu = nil
+        end
+        return true
+    end
 
     -- Required energy recovery owns its builder before speculative expansion
     -- lanes are assigned.  The allocator may later deny either request, but
@@ -1246,12 +1278,21 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and sustainedFactory
         and not massStalled
     then
-        if AssignPlacement(
+        local assignedFactory = AssignPlacement(
             'land_factory',
             placementIndex.land_factory,
             21,
             macro and 'production_saturation' or 'third_factory'
-        ) then
+        )
+        if not assignedFactory and macro then
+            assignedFactory = AssignAcuPlacement(
+                'land_factory',
+                placementIndex.land_factory,
+                21,
+                'production_saturation'
+            )
+        end
+        if assignedFactory then
             plannedFactory = true
             placementIndex.land_factory = placementIndex.land_factory + 1
             counts.land_factory = (counts.land_factory or 0) + 1
@@ -1271,40 +1312,13 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             19,
             'factory_adjacency_power'
         )
-        if not assignedPower
-            and adjacencyPowerAcu
-            and CanBuild(adjacencyPowerAcu, 'power_generator')
-        then
-            local acuClaimed = false
-            for _, existing in ipairs(intents or {}) do
-                if existing.actorToken == adjacencyPowerAcu.token then
-                    acuClaimed = true
-                    break
-                end
-            end
-            if not acuClaimed then
-                local position = ReservePlacement(
-                    snapshot,
-                    'power_generator',
-                    placementIndex.power_generator,
-                    virtualPlacements
-                )
-                if position then
-                    AddIntent(intents, BuildAtPlacement(
-                        adjacencyPowerAcu,
-                        'power_generator',
-                        position,
-                        19,
-                        'factory_adjacency_power'
-                    ))
-                    if reclaimPatrolAcu
-                        and reclaimPatrolAcu.token == adjacencyPowerAcu.token
-                    then
-                        reclaimPatrolAcu = nil
-                    end
-                    assignedPower = true
-                end
-            end
+        if not assignedPower then
+            assignedPower = AssignAcuPlacement(
+                'power_generator',
+                placementIndex.power_generator,
+                19,
+                'factory_adjacency_power'
+            )
         end
         if assignedPower then
             plannedPower = true
@@ -2842,6 +2856,14 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 and role == 'power_generator'
                 and (intent.reason == 'factory_adjacency_power'
                     or intent.reason == 'opening_air_power')
+            local strategicFactory = structureRequest
+                and role == 'land_factory'
+                and intent.reason == 'production_saturation'
+                and macro.economyLedgerValid == true
+                and FiniteNumber(rollingMassStoredRatio)
+                and FiniteNumber(rollingEnergyStoredRatio)
+                and rollingMassStoredRatio >= 0.95
+                and rollingEnergyStoredRatio >= 0.5
             local protectedCombat = intent == protectedCombatIntent
             local protectedAirScreen = intent.kind == 'factory_build'
                 and intent.reason == 'persistent_air_screen'
@@ -2947,7 +2969,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     energyFit = availableEnergy + fitTolerance >= requestEnergyDrain
                         and energyFit
                 end
-                allowed = strategicHydro or strategicPower
+                allowed = strategicHydro or strategicPower or strategicFactory
                     or overflowCombat or sustainedCombat
                     or (massFit and energyFit)
             end

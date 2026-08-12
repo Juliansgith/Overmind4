@@ -3267,7 +3267,9 @@ local function RecordPending(controller, intent, record)
 end
 
 local function ExecuteStructure(controller, intent, record)
-    local preemptReclaimPatrol = intent.reason == 'factory_adjacency_power'
+    local strategicConstruction = intent.reason == 'factory_adjacency_power'
+        or intent.reason == 'production_saturation'
+    local preemptReclaimPatrol = strategicConstruction
         and record.role == 'acu'
         and controller.reclaimPatrolAssignments[intent.actorToken] == true
     if controller.pending[intent.actorToken]

@@ -689,8 +689,55 @@ def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy(
     ]
 
 
+def test_full_bank_acu_builds_target_factory_while_field_engineers_are_busy() -> None:
+    snapshot = _policy_allocator_snapshot(
+        "air_factory",
+        *(["power_generator"] * 7),
+        "mass_extractor",
+        "mass_extractor",
+    )
+    for unit in snapshot["units"]:
+        if unit["role"] == "engineer":
+            unit["idle"] = False
+        elif unit["role"] == "acu":
+            unit.update(buildRate=10, idle=False, reclaimPatrolAssigned=True)
+    snapshot["macro"].update(
+        factoryTarget=4,
+        factoryDemand=4,
+        massSurplusTicks=300,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+        rollingMassStoredRatio=1,
+        rollingEnergyStoredRatio=1,
+    )
+
+    factories = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "production_saturation"
+    ]
+
+    assert [(intent["actorToken"], intent["buildRole"]) for intent in factories] == [
+        ("1:1", "land_factory")
+    ]
+
+
 @pytest.mark.parametrize("clear_fails", [False, True])
-def test_factory_adjacency_power_safely_preempts_acu_reclaim_patrol(
+@pytest.mark.parametrize(
+    ("reason", "build_role", "blueprint_id"),
+    [
+        ("factory_adjacency_power", "power_generator", "ueb1101"),
+        ("production_saturation", "land_factory", "ueb0101"),
+    ],
+)
+def test_strategic_construction_safely_preempts_acu_reclaim_patrol(
+    reason: str,
+    build_role: str,
+    blueprint_id: str,
     clear_fails: bool,
 ) -> None:
     harness = make_harness()
@@ -699,7 +746,7 @@ def test_factory_adjacency_power_safely_preempts_acu_reclaim_patrol(
         blueprintId="uel0001",
         idleState=False,
         states={"Moving": True},
-        canBuild={"ueb1101": True},
+        canBuild={blueprint_id: True},
     )
     harness.brain.units = harness.lua.table_from([acu])
     harness.controller.reclaimPatrolAssignments["1:1"] = True
@@ -712,9 +759,9 @@ def test_factory_adjacency_power_safely_preempts_acu_reclaim_patrol(
             {
                 "kind": "build_structure",
                 "actorToken": "1:1",
-                "buildRole": "power_generator",
+                "buildRole": build_role,
                 "position": [30, 0, 40],
-                "reason": "factory_adjacency_power",
+                "reason": reason,
             }
         ],
         observation,
