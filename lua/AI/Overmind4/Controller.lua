@@ -9501,6 +9501,37 @@ ESCALATION.DirectorExpansionInput = function(
     end
     local engineers = {}
     local escorts = {}
+    local focusRegionKeys = {}
+    local latestCompletedRegion = nil
+    local latestCompletedTick = -1
+    for operationId, job in pairs((controller.jobLedger or {}).jobs or {}) do
+        if type(job.regionKey) == 'string' then
+            if job.phase ~= 'completed' and job.phase ~= 'retryable'
+                and job.phase ~= 'cancelled'
+            then
+                focusRegionKeys[job.regionKey] = true
+            elseif job.phase == 'completed' then
+                local lifecycle = (controller.operationLifecycle or {})[operationId]
+                for _, attempt in pairs((lifecycle or {}).attempts or {}) do
+                    local completedTick = attempt.completed == true
+                        and tonumber(attempt.lastTick) or nil
+                    if completedTick and (completedTick > latestCompletedTick
+                        or (completedTick == latestCompletedTick
+                            and tostring(job.regionKey)
+                                < tostring(latestCompletedRegion or '')))
+                    then
+                        latestCompletedTick = completedTick
+                        latestCompletedRegion = job.regionKey
+                    end
+                end
+            end
+        end
+    end
+    if latestCompletedRegion
+        and observation.tick - latestCompletedTick <= 1200
+    then
+        focusRegionKeys[latestCompletedRegion] = true
+    end
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
         if unit.role == 'engineer' and unit.token ~= strategicBuilderToken
             and not (excludedEngineerTokens or {})[unit.token]
@@ -9521,6 +9552,7 @@ ESCALATION.DirectorExpansionInput = function(
         engineers = engineers,
         escorts = escorts,
         sites = sites,
+        focusRegionKeys = focusRegionKeys,
         blockedActorTokensBySite =
             ESCALATION.ExpansionBlockedActorTokensBySite(controller, engineers),
         regions = ESCALATION.DeepCopy(regions),

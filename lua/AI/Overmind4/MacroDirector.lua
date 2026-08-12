@@ -449,7 +449,7 @@ local function RegionEligibility(regions)
     return result
 end
 
-local function SiteRecord(site, regionEligibility)
+local function SiteRecord(site, regionEligibility, focusRegions)
     local regionKey = type(site.regionKey) == 'string'
         and site.regionKey or site.key
     local position = NormalizedPosition(site.position)
@@ -462,6 +462,7 @@ local function SiteRecord(site, regionEligibility)
         regionKey = regionKey,
         position = position,
         lost = site.lost == true,
+        focused = (focusRegions or {})[regionKey] == true,
         value = Number(site.value, 0) or 0,
         eligible = eligible and position ~= nil,
     }
@@ -470,6 +471,7 @@ end
 local function SameSiteRecord(left, right)
     return left.regionKey == right.regionKey
         and left.lost == right.lost
+        and left.focused == right.focused
         and left.value == right.value
         and left.eligible == right.eligible
         and SamePosition(left.position, right.position)
@@ -477,6 +479,8 @@ end
 
 local function EligibleSites(snapshot)
     local regionEligibility = RegionEligibility(snapshot.regions)
+    local focusRegions = type(snapshot.focusRegionKeys) == 'table'
+        and snapshot.focusRegionKeys or {}
     local byKey = {}
     local conflicted = {}
     local result = {}
@@ -484,7 +488,7 @@ local function EligibleSites(snapshot)
         if type(site) == 'table' and type(site.key) == 'string'
             and site.key ~= ''
         then
-            local normalized = SiteRecord(site, regionEligibility)
+            local normalized = SiteRecord(site, regionEligibility, focusRegions)
             local existing = byKey[site.key]
             if existing and not SameSiteRecord(existing, normalized) then
                 conflicted[site.key] = true
@@ -543,32 +547,33 @@ local function EscortTokens(escorts, claimed)
 end
 
 local function MatchCostZero()
-    return { 0, 0, 0, 0 }
+    return { 0, 0, 0, 0, 0 }
 end
 
 local function MatchCostAddAssignment(left, assignment)
     return {
         left[1] + (assignment.site.lost == true and 0 or 1),
-        left[2] + (assignment.remote == true and 1 or 0),
-        left[3] - (Number(assignment.site.value, 0) or 0),
-        left[4] + assignment.distance,
+        left[2] + (assignment.site.focused == true and 0 or 1),
+        left[3] + (assignment.remote == true and 1 or 0),
+        left[4] - (Number(assignment.site.value, 0) or 0),
+        left[5] + assignment.distance,
     }
 end
 
 local function MatchCostAdd(left, right)
     return {
         left[1] + right[1], left[2] + right[2],
-        left[3] + right[3], left[4] + right[4],
+        left[3] + right[3], left[4] + right[4], left[5] + right[5],
     }
 end
 
 local function MatchCostNegate(cost)
-    return { -cost[1], -cost[2], -cost[3], -cost[4] }
+    return { -cost[1], -cost[2], -cost[3], -cost[4], -cost[5] }
 end
 
 local function MatchCostLess(left, right)
     if not right then return true end
-    for index = 1, 4 do
+    for index = 1, 5 do
         if left[index] ~= right[index] then
             return left[index] < right[index]
         end
@@ -580,6 +585,9 @@ local function AssignmentPreferred(left, right)
     if not right then return true end
     if (left.site.lost == true) ~= (right.site.lost == true) then
         return left.site.lost == true
+    end
+    if left.site.focused ~= right.site.focused then
+        return left.site.focused == true
     end
     if left.remote ~= right.remote then return left.remote ~= true end
     local leftValue = Number(left.site.value, 0) or 0

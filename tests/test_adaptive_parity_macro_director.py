@@ -1428,6 +1428,32 @@ class TestRegionalMacro:
         assert {job["regionKey"] for job in jobs} == {"region-a", "region-b"}
         assert len({job["actorToken"] for job in jobs}) == 2
 
+    def test_recently_active_cluster_is_finished_before_starting_nearby_new_cluster(self) -> None:
+        jobs = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 1,
+                "engineers": [
+                    {"token": "eng", "position": [0, 0, 0], "available": True}
+                ],
+                "sites": [
+                    mass_site("active-2", 20, 0, region="active"),
+                    mass_site("new-1", 15, 0, region="new"),
+                ],
+                "regions": [
+                    {"key": "active", "state": "establishing"},
+                    {"key": "new", "state": "planned"},
+                ],
+                "focusRegionKeys": {"active": True},
+            },
+        )["jobs"]
+
+        assert [(job["regionKey"], job["siteKey"]) for job in jobs] == [
+            ("active", "active-2")
+        ]
+
     def test_multiple_remote_regions_bind_disjoint_land_and_aa_escort_pairs(self) -> None:
         snapshot = {
             "fundedExpansionSlots": 2,
