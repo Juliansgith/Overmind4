@@ -10156,8 +10156,13 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             })
         end
     end
-    if (lanes.factory_growth or {}).admitted == true then
-        if currentLand < (tonumber(macroPlan.landFactoryTarget) or currentLand) then
+    local factoryGrowthAdmitted = (lanes.factory_growth or {}).admitted == true
+    local openingFirstAir = currentLand > 0 and currentAir < 1
+        and currentPower >= 2 and currentMex >= 2
+    if factoryGrowthAdmitted then
+        if not openingFirstAir
+            and currentLand < (tonumber(macroPlan.landFactoryTarget) or currentLand)
+        then
             local actor = ESCALATION.AvailableDirectorActor(
                 controller, observation, 'engineer', 'land_factory', reserved
             )
@@ -10171,27 +10176,31 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
                 })
             end
         end
+    end
+    if factoryGrowthAdmitted or openingFirstAir then
         if currentAir < (tonumber(macroPlan.airFactoryTarget) or currentAir) then
-            local actor = currentLand > 0 and currentAir < 1
-                and currentPower >= 2
-                and currentMex >= 2
+            local actor = openingFirstAir
                 and ESCALATION.AvailableDirectorActor(
                     controller, observation, 'acu', 'air_factory', reserved
                 ) or nil
-            if not actor and currentLand >= 4 then
+            if not actor and factoryGrowthAdmitted and currentLand >= 4 then
                 actor = StrategicAcu('air_factory')
             end
-            actor = actor or ESCALATION.AvailableDirectorActor(
-                controller, observation, 'engineer', 'air_factory', reserved
-            )
+            if not actor and factoryGrowthAdmitted then
+                actor = ESCALATION.AvailableDirectorActor(
+                    controller, observation, 'engineer', 'air_factory', reserved
+                )
+            end
             local positions = (observation.placements or {}).air_factory or {}
             if actor and positions[1] then
                 reserved[actor.token] = true
                 ESCALATION.AppendDirectorIntent(intents, {
                     kind = 'build_structure', actorToken = actor.token,
                     buildRole = 'air_factory', position = CopyPosition(positions[1]),
-                    reason = actor.role == 'acu' and 'production_saturation'
-                        or 'funded_air_factory_growth',
+                    reason = openingFirstAir and actor.role == 'acu'
+                        and 'opening_air_factory'
+                        or (actor.role == 'acu' and 'production_saturation'
+                            or 'funded_air_factory_growth'),
                     priority = 4,
                 })
             end
@@ -12990,6 +12999,7 @@ end
 
 ESCALATION.IntentPortfolioLane = function(intent)
     local role = intent.buildRole or intent.upgradeRole
+    if intent.reason == 'opening_air_factory' then return nil end
     if intent.kind == 'reclaim' then return 'reclaim' end
     if intent.kind == 'escorted_expansion' then return 'mex_rebuild' end
     if intent.kind == 'transport_load' then return 'air_production' end

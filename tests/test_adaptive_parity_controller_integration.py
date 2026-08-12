@@ -2257,17 +2257,12 @@ def test_acu_starts_first_air_after_two_power_and_local_mex() -> None:
             "airFactoryTarget": 1,
             "lanes": {
                 "energy_recovery": {"admitted": True},
-                "factory_growth": {"admitted": True},
+                "factory_growth": {"admitted": False},
             },
             "grants": [
                 {
                     "requestId": "energy-1",
                     "lane": "energy_recovery",
-                    "source": "bank",
-                },
-                {
-                    "requestId": "factory-1",
-                    "lane": "factory_growth",
                     "source": "bank",
                 },
             ],
