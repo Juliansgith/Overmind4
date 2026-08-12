@@ -183,6 +183,18 @@ local function SafeCall(defaultValue, fn, ...)
     return defaultValue
 end
 
+ESCALATION.FactoryProductionIdle = function(unit)
+    if SafeCall(false, unit.IsIdleState, unit) == true then return true end
+    local queue = SafeCall(nil, unit.GetCommandQueue, unit)
+    if type(queue) ~= 'table' or TableGetn(queue) < 1 then return false end
+    for _, command in ipairs(queue) do
+        if type(command) ~= 'table' or command.isRally ~= true then
+            return false
+        end
+    end
+    return true
+end
+
 local function SafeArmyStat(brain, name)
     local raw = SafeCall(nil, brain.GetArmyStat, brain, name, -1)
     if type(raw) ~= 'table' then return -1 end
@@ -630,7 +642,10 @@ local function NormalizeOwnUnit(controller, unit)
     local complete = fraction >= 1
     local buildingState = SafeCall(false, unit.IsUnitState, unit, 'Building') == true
     local movingState = SafeCall(false, unit.IsUnitState, unit, 'Moving') == true
-    local busy = SafeCall(false, unit.IsIdleState, unit) ~= true
+    local productionIdle = role == 'land_factory'
+        and ESCALATION.FactoryProductionIdle(unit)
+    local busy = not productionIdle
+        and SafeCall(false, unit.IsIdleState, unit) ~= true
         or buildingState
         or SafeCall(false, unit.IsUnitState, unit, 'Upgrading') == true
         or SafeCall(false, unit.IsUnitState, unit, 'Enhancing') == true
@@ -3368,7 +3383,7 @@ local function ExecuteFactoryProduction(controller, intent, record)
     )
     if not actor
         or not blueprintId
-        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or not ESCALATION.FactoryProductionIdle(actor)
         or SafeCall(false, actor.IsUnitState, actor, 'Building') == true
         or SafeCall(false, actor.IsUnitState, actor, 'Upgrading') == true
         or SafeCall(false, actor.IsPaused, actor) == true

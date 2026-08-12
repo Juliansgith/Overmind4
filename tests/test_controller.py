@@ -981,7 +981,9 @@ def test_rally_only_queue_is_idle_but_active_build_and_moving_actor_are_busy() -
         entityId=1,
         blueprintId="ueb0101",
         queue=[rally],
-        idleState=True,
+        # FAF may report a factory with only its persistent rally command as
+        # non-idle.  That command must not block the production queue.
+        idleState=False,
         canBuild={"uel0105": True},
     )
     building_factory = harness.unit(
@@ -1025,6 +1027,7 @@ def test_rally_integration_leaves_factory_eligible_for_production_next_step() ->
     harness.lua.globals().Controller.Step(harness.controller)
     assert len(harness.calls.rally) == 1
     assert factory.options.queue[1].isRally is True
+    factory.options.idleState = False
 
     harness.brain.tick = 10
     harness.lua.globals().Controller.Step(harness.controller)
