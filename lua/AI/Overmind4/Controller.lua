@@ -9134,7 +9134,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     local constructionBacklog = 0
     local landBacklog = 0
     local airBacklog = 0
-    local activeTechUpgrade = false
+    local activeFactoryTechUpgrade = false
     for _, unit in ipairs(observation.units or {}) do
         if unit.complete == true then
             if unit.role == 'engineer' then counts.engineers = counts.engineers + 1 end
@@ -9180,8 +9180,11 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         local pendingRole = operation.upgradeRole or operation.buildRole
         if (operation.kind == 'factory_upgrade' or operation.kind == 'structure_upgrade')
             and ESCALATION.requestLanes[pendingRole] == 'tech'
+            and (pendingRole == 'land_factory_t2'
+                or pendingRole == 'land_factory_t2_support'
+                or pendingRole == 'land_factory_t3')
         then
-            activeTechUpgrade = true
+            activeFactoryTechUpgrade = true
         end
         if operation.buildRole == 'engineer' then
             counts.engineers = counts.engineers + 1
@@ -9237,7 +9240,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             energyCost = 2250, required = true })
     end
     if completedMex >= 9 and counts.landFactoriesT1 >= 2
-        and not activeTechUpgrade
+        and not activeFactoryTechUpgrade
     then
         if counts.landFactoriesT2 < 1 and counts.mexT2 < 2 then
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
