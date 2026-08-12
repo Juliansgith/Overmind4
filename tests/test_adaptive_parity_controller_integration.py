@@ -6589,6 +6589,51 @@ def test_regional_field_targeting_excludes_inactive_regions_and_prioritizes_cont
     assert outcomes == [[100, 2, 100], [100, 2, 100]]
 
 
+def test_sub_assault_field_does_not_snake_to_friendly_secured_mex() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    tanks = [
+        harness.unit(entityId=70 + index, blueprintId="uel0201")
+        for index in range(30)
+    ]
+    tokens = [f"{70 + index}:1" for index in range(30)]
+    harness.brain.units = harness.lua.table_from(tanks)
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {},
+            "regions": [
+                {
+                    "key": "friendly-mex",
+                    "state": "secured",
+                    "productionAnchor": True,
+                    "position": [350, 2, 350],
+                }
+            ],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "forcePlan",
+        {
+            "epoch": 1,
+            "assignments": {"field": tokens},
+            "ownershipByToken": {token: "field" for token in tokens},
+            "regionAssignments": {},
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 0
+    assert len(harness.calls.move) == 0
+
+
 def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

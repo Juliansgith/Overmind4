@@ -1762,7 +1762,7 @@ class TestRegionalMacro:
             "engineers": [
                 {"token": "eng", "position": [0, 0, 0], "available": True}
             ],
-            "sites": [mass_site("remote", 300, 0, region="remote")],
+            "sites": [mass_site("remote", 200, 0, region="remote")],
             "regions": [{"key": "remote", "state": "planned"}],
         }
 
@@ -1788,6 +1788,28 @@ class TestRegionalMacro:
         assert without_screen["denials"][0]["actorToken"] == "eng"
         assert without_screen["denials"][0]["regionKey"] == "remote"
         assert with_screen["jobs"][0]["escortTokens"] == ["aa", "tank"]
+
+    def test_engineer_does_not_walk_across_map_even_with_an_escort(self) -> None:
+        result = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanExpansion",
+            {
+                "fundedExpansionSlots": 1,
+                "controlledRadius": 60,
+                "engineers": [
+                    {"token": "eng", "position": [0, 0, 0], "available": True}
+                ],
+                "sites": [mass_site("too-far", 221, 0, region="remote")],
+                "regions": [{"key": "remote", "state": "planned"}],
+                "escorts": [
+                    {"token": "tank", "role": "tank", "available": True},
+                    {"token": "aa", "role": "anti_air", "available": True},
+                ],
+            },
+        )
+
+        assert len(result["jobs"]) == 0
 
     def test_reclaim_is_region_local_deterministic_unique_and_revalidated(self) -> None:
         snapshot = {

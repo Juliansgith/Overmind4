@@ -19,6 +19,7 @@ local LANE_RANK = {
     air_production = 7,
     engineers = 8,
 }
+local MAX_ENGINEER_WALK_DISTANCE = 220
 
 local function Copy(value)
     if type(value) ~= 'table' then return value end
@@ -613,6 +614,7 @@ local function ExpansionCandidates(engineers, sites, blockedBySite, controlledRa
                 and blockedBySite[site.key] or {}
             if blockedActors[engineer.token] ~= true then
                 local distance = Distance(engineer.position, site.position)
+                if distance <= MAX_ENGINEER_WALK_DISTANCE then
                 local regionKey = site.regionKey or site.key
                 local candidate = {
                     engineer = engineer,
@@ -632,6 +634,7 @@ local function ExpansionCandidates(engineers, sites, blockedBySite, controlledRa
                     and AssignmentPreferred(candidate, regionCandidates[classKey])
                 then
                     regionCandidates[classKey] = candidate
+                end
                 end
             end
         end

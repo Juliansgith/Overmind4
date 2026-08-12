@@ -169,9 +169,7 @@ def test_mature_mex_economy_scales_to_three_t2_engineers() -> None:
 def test_first_completed_t3_factory_builds_a_t3_engineer_before_t3_combat() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
-    _set_director_result(
-        harness, "macroPlan", _macro_plan(lane="land_production")
-    )
+    _set_director_result(harness, "macroPlan", _macro_plan(lane="tech"))
     _set_director_result(
         harness, "techPlan", {"t3ProductionRole": "t3_direct_fire"}
     )
@@ -223,6 +221,37 @@ def test_mass_rich_t3_engineer_builds_local_t3_power_before_idling() -> None:
 
     assert len(harness.calls.buildMobile) == 1
     assert harness.calls.buildMobile[1].blueprintId == "ueb1301"
+
+
+def test_t3_engineer_keeps_t3_power_inside_safe_spawn_economy() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _healthy_bank(harness)
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="energy_recovery")
+    )
+    mexes = [
+        harness.unit(entityId=100 + index, blueprintId="ueb1202")
+        for index in range(16)
+    ]
+    engineer = harness.unit(
+        entityId=21,
+        blueprintId="uel0309",
+        position=[395, 2, 400],
+        canBuild={"ueb1301": True},
+    )
+    forward_factory = harness.unit(
+        entityId=22, blueprintId="ueb0301", position=[400, 2, 400]
+    )
+    harness.brain.units = harness.lua.table_from(
+        [engineer, forward_factory, *mexes]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    position = plain(harness.calls.buildMobile[1].position)
+    home = plain(harness.controller.basePosition)
+    assert (position[0] - home[0]) ** 2 + (position[2] - home[2]) ** 2 <= 90**2
 
 
 def test_t2_generator_candidates_touch_factory_skirt_and_require_t2_builder() -> None:

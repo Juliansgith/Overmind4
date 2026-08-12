@@ -2850,6 +2850,8 @@ local function PlacementSnapshot(controller, units)
                     or unit.role == 'land_factory_t2_support'
                     or unit.role == 'land_factory_t3'
                     or unit.role == 'air_factory')
+                    and (role ~= 'power_generator_t3'
+                        or DistanceSquared(unit.position, controller.basePosition) <= 8100)
                 then
                     TableInsert(factories, unit)
                 end
@@ -9562,6 +9564,7 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         local bestPosition = nil
         local bestDistance = nil
         for _, position in ipairs(t3PowerPositions) do
+            if DistanceSquared(position, controller.basePosition) <= 8100 then
             for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
                 if unit.role == 't3_engineer'
                     and (unit.available == true or unit.moving == true)
@@ -9583,6 +9586,7 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
                         bestDistance = distance
                     end
                 end
+            end
             end
         end
         if best then
@@ -10569,6 +10573,20 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             })
         end
     end
+    if currentT3Engineers < 1 then
+        local factory = ESCALATION.AvailableDirectorActor(
+            controller, observation, 'land_factory_t3', 't3_engineer', reserved
+        )
+        if factory then
+            reserved[factory.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'factory_build', actorToken = factory.token,
+                buildRole = 't3_engineer',
+                reason = 'first_t3_engineer', priority = 4,
+            })
+            currentT3Engineers = currentT3Engineers + 1
+        end
+    end
     local landLane = (lanes.land_production or {})
     if landLane.admitted == true or landLane.preserved == true then
         local roleCounts = { t2_direct_fire = 0, t2_anti_air = 0 }
@@ -11450,12 +11468,6 @@ ESCALATION.AdaptForceIntents = function(
         local rank = nil
         if region.state == 'contested' or region.state == 'retake' then
             rank = 1
-        elseif region.state == 'establishing' then
-            rank = 2
-        elseif region.state == 'secured'
-            and region.productionAnchor ~= false
-        then
-            rank = 3
         end
         local distance = rank and DistanceSquared(
             region.position, controller.basePosition
@@ -11470,12 +11482,8 @@ ESCALATION.AdaptForceIntents = function(
             rallyDistance = distance
         end
         if rank and (targetRank == nil or rank < targetRank
-            or (rank == targetRank and rank < 3
-                and tostring(region.key) < tostring(targetRegion.key))
-            or (rank == targetRank and rank == 3
-                and (targetDistance == nil or distance > targetDistance
-                    or (distance == targetDistance
-                        and tostring(region.key) < tostring(targetRegion.key)))))
+            or (rank == targetRank
+                and tostring(region.key) < tostring(targetRegion.key)))
         then
             targetRegion = region
             targetDistance = distance
