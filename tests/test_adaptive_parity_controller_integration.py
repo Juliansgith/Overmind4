@@ -2744,7 +2744,7 @@ def test_airlift_delivery_retargets_when_the_drop_mex_becomes_blocked() -> None:
             "missionId": "airlift:front",
             "siteKey": "front",
             "position": drop,
-            "completedTick": 100,
+            "completedTick": -200,
         },
     )
     harness.lua.execute("Policy.Decide = function() return {} end")

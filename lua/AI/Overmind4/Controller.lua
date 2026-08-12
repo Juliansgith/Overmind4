@@ -10132,6 +10132,9 @@ ESCALATION.AdaptTransportIntent = function(
                     controller.brain, Catalog.IdFor('mass_extractor'),
                     TerrainPosition(site.position))
             then
+                if observation.tick < (tonumber(delivery.completedTick) or 0) + 100 then
+                    return
+                end
                 local alternatives = {}
                 for _, candidate in ipairs(((observation or {}).sites or {}).mass or {}) do
                     local candidatePosition = TerrainPosition(candidate.position)
@@ -10141,6 +10144,7 @@ ESCALATION.AdaptTransportIntent = function(
                         and not controller.reservations[candidate.key]
                         and not SiteIsBlocked(controller, candidate.key)
                         and candidatePosition
+                        and DistanceSquared(record.position, candidatePosition) <= 80 * 80
                         and Reachable('Amphibious', record.position, candidatePosition)
                     then
                         local safe = true
@@ -10183,8 +10187,15 @@ ESCALATION.AdaptTransportIntent = function(
                     controller.transportDeliveries[replacement.key] = delivery
                     Emit(controller, 'airlift_delivery_retarget', {
                         actor = delivery.actorToken,
+                        distance = math.sqrt(replacement.distance),
                         from_site = siteKey,
                         site = replacement.key,
+                    })
+                else
+                    controller.transportDeliveries[siteKey] = nil
+                    Emit(controller, 'airlift_delivery_abandoned', {
+                        actor = delivery.actorToken,
+                        site = siteKey,
                     })
                 end
                 return
