@@ -10433,9 +10433,12 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     local currentLand = 0
     local currentAir = 0
     local currentMex = 0
+    local currentAdvancedMex = 0
+    local currentStorage = 0
     local currentPower = 0
     local currentHydro = 0
     local powerPending = false
+    local storagePending = false
     for _, unit in ipairs(observation.units or {}) do
         if unit.complete == true then
             if unit.role == 'engineer' then currentEngineers = currentEngineers + 1 end
@@ -10446,6 +10449,12 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
                 currentT3Engineers = currentT3Engineers + 1
             end
             if unit.roleFamily == 'mass_extractor' then currentMex = currentMex + 1 end
+            if unit.role == 'mass_extractor_t2'
+                or unit.role == 'mass_extractor_t3'
+            then
+                currentAdvancedMex = currentAdvancedMex + 1
+            end
+            if unit.role == 'mass_storage' then currentStorage = currentStorage + 1 end
             if unit.role == 'power_generator' then currentPower = currentPower + 1 end
             if unit.role == 'hydrocarbon' then currentHydro = currentHydro + 1 end
             if unit.role == 'land_factory' or unit.role == 'land_factory_t2'
@@ -10470,6 +10479,10 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         if operation.buildRole == 'power_generator' then
             currentPower = currentPower + 1
             powerPending = true
+        end
+        if operation.buildRole == 'mass_storage' then
+            currentStorage = currentStorage + 1
+            storagePending = true
         end
     end
     local function StrategicAcu(buildRole)
@@ -10513,6 +10526,29 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         math.max(4, (currentLand + currentAir) * 2))
     local factoryPowerReady = currentPower >= factoryPowerTarget
     local energyLane = lanes.energy_recovery or {}
+    local economy = observation.economy or {}
+    if currentAdvancedMex > 0
+        and currentStorage < currentAdvancedMex * 4
+        and not storagePending
+        and ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
+        and economy.massStoredRatio >= 0.5
+        and economy.energyStoredRatio >= 0.5
+    then
+        local actor = ESCALATION.AvailableDirectorActor(
+            controller, observation, 'engineer', 'mass_storage', reserved
+        )
+        if not actor then actor = StrategicAcu('mass_storage') end
+        local positions = (observation.placements or {}).mass_storage or {}
+        if actor and positions[1] then
+            reserved[actor.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'build_structure', actorToken = actor.token,
+                buildRole = 'mass_storage', position = CopyPosition(positions[1]),
+                reason = 'mex_adjacency_storage', priority = 2,
+            })
+        end
+    end
     if currentMex >= 6 and not factoryPowerReady and not powerPending
         and (energyLane.admitted == true or energyLane.preserved == true)
     then
