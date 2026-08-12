@@ -6131,6 +6131,93 @@ def test_banked_safe_mex_upgrade_does_not_wait_for_hq_tech_grant() -> None:
     assert harness.calls.upgrade[1].blueprintId == "ueb1202"
 
 
+def test_uncontested_remote_owned_mex_is_upgradeable_before_region_package_finishes() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute("MacroDirectorStub.PlanTech = MacroDirector.PlanTech")
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    mex = harness.unit(
+        entityId=20,
+        blueprintId="ueb1103",
+        position=[150, 2, 150],
+        canBuild={"ueb1202": True},
+    )
+    harness.brain.units = harness.lua.table_from([mex])
+    marker = harness.controller.markers.mass[1]
+    marker.position = lua_value(harness.lua, [150, 2, 150])
+    marker_key = marker.key
+    harness.brain.massStoredRatio = 1
+    harness.brain.energyStoredRatio = 1
+    harness.brain.massTrend = 1
+    harness.brain.energyTrend = 10
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"tech": {"admitted": False}},
+            "regions": [
+                {
+                    "key": "remote",
+                    "state": "establishing",
+                    "memberKeys": [marker_key],
+                    "position": [150, 2, 150],
+                }
+            ],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "intelState",
+        {"contacts": {}, "threat": {}, "expansionSafety": {"remote": "safe"}},
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.upgrade) == 1
+    assert harness.calls.upgrade[1].blueprintId == "ueb1202"
+
+
+def test_first_air_staging_facility_is_added_to_a_secured_region_package() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute(
+        "MacroDirectorStub.PlanRegionPackage = MacroDirector.PlanRegionPackage"
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    engineer = harness.unit(
+        entityId=10,
+        blueprintId="uel0105",
+        position=[80, 2, 80],
+        canBuild={"ueb5202": True},
+    )
+    air = [
+        harness.unit(entityId=100 + index, blueprintId="uea0102")
+        for index in range(8)
+    ]
+    harness.brain.units = harness.lua.table_from([engineer, *air])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [
+                {"key": "front", "state": "secured", "position": [80, 2, 80]}
+            ],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb5202"
+
+
 def test_failed_t3_hq_command_is_rejected_without_false_ordered_phase_and_retries_by_attempt() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
@@ -6465,6 +6552,63 @@ def test_mature_field_force_continuously_pressures_public_enemy_spawn() -> None:
     assert plain(harness.calls.aggressive[1].position) == plain(
         harness.controller.targetPosition
     )
+
+
+def test_mature_field_force_pressures_recent_enemy_factory_instead_of_empty_spawn() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    tanks = [
+        harness.unit(entityId=100 + index, blueprintId="uel0201")
+        for index in range(40)
+    ]
+    tokens = [f"{100 + index}:1" for index in range(40)]
+    harness.brain.units = harness.lua.table_from(tanks)
+    harness.brain.tick = 500
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {},
+            "regions": [
+                {"key": "secured", "state": "secured", "position": [60, 2, 60]}
+            ],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "intelState",
+        {
+            "contacts": {
+                "enemy-factory": {
+                    "token": "enemy-factory",
+                    "role": "factory",
+                    "position": [75, 2, 190],
+                    "lastSeenTick": 450,
+                }
+            },
+            "threat": {},
+            "expansionSafety": {},
+        },
+    )
+    _set_director_result(
+        harness,
+        "forcePlan",
+        {
+            "epoch": 1,
+            "assignments": {"field": tokens},
+            "ownershipByToken": {token: "field" for token in tokens},
+            "regionAssignments": {},
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 1
+    assert plain(harness.calls.aggressive[1].position) == [75, 2, 190]
 
 
 def test_visible_ground_cluster_dispatches_regional_response_force() -> None:

@@ -25,6 +25,7 @@ local IdByRole = {
     radar = 'ueb3101',
     point_defense = 'ueb2101',
     static_anti_air = 'ueb2104',
+    air_staging = 'ueb5202',
     mass_extractor_t2 = 'ueb1202',
     mass_extractor_t3 = 'ueb1302',
     land_factory_t3 = 'ueb0301',

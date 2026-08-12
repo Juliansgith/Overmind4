@@ -1047,9 +1047,15 @@ MacroDirector.PlanExpansion = function(snapshot)
 end
 
 MacroDirector.PlanRegionPackage = function(region, snapshot)
+    local requiredRoles = {
+        'radar', 'static_anti_air', 'point_defense', 'land_factory',
+    }
+    if snapshot and snapshot.airStagingNeeded == true then
+        table.insert(requiredRoles, 'air_staging')
+    end
     return {
         regionKey = region and region.key or nil,
-        requiredRoles = { 'radar', 'static_anti_air', 'point_defense', 'land_factory' },
+        requiredRoles = requiredRoles,
         garrisonMinimum = 4,
         garrisonAntiAirMinimum = 1,
         persistent = true,

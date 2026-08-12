@@ -60,12 +60,12 @@ local BUILD_ROLES = {
         'power_generator',
     },
     engineer = {
-        'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor',
+        'air_factory', 'air_staging', 'hydrocarbon', 'land_factory', 'mass_extractor',
         'mass_storage', 'point_defense', 'power_generator', 'radar',
         'static_anti_air',
     },
     t2_engineer = {
-        'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor',
+        'air_factory', 'air_staging', 'hydrocarbon', 'land_factory', 'mass_extractor',
         'mass_storage', 'point_defense', 'power_generator',
         'power_generator_t2', 'radar', 'static_anti_air',
     },
@@ -130,6 +130,7 @@ local ESCALATION = {
     LAND_COMBAT_ENERGY_RESERVE = 1.773333,
     requestLanes = {
         air_factory = 'air',
+        air_staging = 'construction',
         air_scout = 'air',
         bomber = 'air',
         hydrocarbon = 'energy',
@@ -161,6 +162,7 @@ local ESCALATION = {
     },
     placementFoundationRoles = {
         air_factory = true,
+        air_staging = true,
         land_factory = true,
         land_factory_t2 = true,
         land_factory_t2_support = true,
@@ -171,6 +173,7 @@ local ESCALATION = {
     },
     placementObstacleRoles = {
         air_factory = true,
+        air_staging = true,
         hydrocarbon = true,
         land_factory = true,
         land_factory_t2 = true,
@@ -9482,7 +9485,9 @@ ESCALATION.DirectorReclaimInput = function(controller, observation, macroPlan)
     }
 end
 
-ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
+ESCALATION.DirectorTechInput = function(
+    controller, observation, macroPlan, intelState
+)
     local factories = {}
     local mex = {}
     local regionByMember = {}
@@ -9523,7 +9528,7 @@ ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
             local regionKey = siteKey and regionByMember[siteKey] or nil
             local region = regionKey and regionByKey[regionKey] or nil
             local safety = regionKey
-                and ((controller.intelState or {}).expansionSafety or {})[regionKey]
+                and ((intelState or {}).expansionSafety or {})[regionKey]
                 or nil
             local distance = Distance(unit.position, controller.basePosition)
             TableInsert(mex, {
@@ -9532,7 +9537,8 @@ ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
                 tier = ESCALATION.DirectorRoleTier(unit.role),
                 upgrading = controller.pending[unit.token] ~= nil,
                 safe = safety ~= 'contested'
-                    and (distance <= 80 or (region and region.state == 'secured')),
+                    and (distance <= 80 or safety == 'safe'
+                        or (region and region.state == 'secured')),
                 distance = distance,
             })
             if controller.pending[unit.token] then activeMexUpgrades = activeMexUpgrades + 1 end
@@ -10324,6 +10330,7 @@ ESCALATION.AdaptPackageIntents = function(
         return
     end
     local offsets = {
+        air_staging = { 8, 8 },
         radar = { 0, 0 },
         static_anti_air = { 4, 0 },
         point_defense = { 0, 4 },
@@ -10968,7 +10975,9 @@ ESCALATION.AdaptTransportIntent = function(
     end
 end
 
-ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved)
+ESCALATION.AdaptForceIntents = function(
+    controller, forcePlan, intelState, intents, reserved
+)
     for _, intent in ipairs((forcePlan or {}).intents or {}) do
         ESCALATION.AppendDirectorIntent(intents, intent)
     end
@@ -11139,7 +11148,32 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
     if TableGetn(fieldTokens) >= 40 and controller.targetPath == true
         and CopyPosition(controller.targetPosition)
     then
-        targetRegion = {
+        local economicTarget = nil
+        local economicRank = nil
+        local economicSeen = nil
+        for _, contact in pairs((intelState or {}).contacts or {}) do
+            local rank = contact.role == 'factory' and 1
+                or (contact.role == 'mass_extractor_t3' and 2
+                    or (contact.role == 'mass_extractor_t2' and 3
+                        or (contact.role == 'mass_extractor' and 4 or nil)))
+            local seen = tonumber(contact.lastSeenTick) or -1000000
+            if rank and CurrentTick(controller) - seen <= 600
+                and CopyPosition(contact.position)
+                and (not economicTarget or rank < economicRank
+                    or (rank == economicRank and seen > economicSeen)
+                    or (rank == economicRank and seen == economicSeen
+                        and tostring(contact.token or '')
+                            < tostring(economicTarget.token or '')))
+            then
+                economicTarget = contact
+                economicRank = rank
+                economicSeen = seen
+            end
+        end
+        targetRegion = economicTarget and {
+            key = 'enemy_economy',
+            position = CopyPosition(economicTarget.position),
+        } or {
             key = 'enemy_spawn',
             position = CopyPosition(controller.targetPosition),
         }
@@ -12041,6 +12075,29 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         end
     end
     local packagePlans = {}
+    local airUnitCount = 0
+    local airStagingCount = 0
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.complete == true then
+            if unit.role == 'air_scout' or unit.role == 'interceptor'
+                or unit.role == 'bomber' or unit.role == 'transport'
+            then
+                airUnitCount = airUnitCount + 1
+            elseif unit.role == 'air_staging' then
+                airStagingCount = airStagingCount + 1
+            end
+        end
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.buildRole == 'air_staging' then
+            airStagingCount = airStagingCount + 1
+        end
+    end
+    local desiredAirStaging = 0
+    if airUnitCount >= 8 then
+        desiredAirStaging = math.min(3, math.ceil(airUnitCount / 20))
+    end
+    local airStagingSlots = math.max(0, desiredAirStaging - airStagingCount)
     for _, region in ipairs(macroPlan.regions or {}) do
         if region.state == 'establishing' or region.state == 'secured'
             or region.state == 'contested' or region.state == 'retake'
@@ -12064,8 +12121,17 @@ ESCALATION.UpdateDirectors = function(controller, observation)
                     completedRoles = completedRoles,
                     pendingRoles = pendingRoles,
                     enemyAirPressure = (tonumber((intelState.threat or {}).air) or 0) > 0,
+                    airStagingNeeded = airStagingSlots > 0,
                 }
             ) or {}
+            if airStagingSlots > 0 then
+                for _, role in ipairs(package.requiredRoles or {}) do
+                    if role == 'air_staging' then
+                        airStagingSlots = airStagingSlots - 1
+                        break
+                    end
+                end
+            end
             TableInsert(packagePlans, {
                 region = ESCALATION.DeepCopy(region),
                 plan = ESCALATION.DeepCopy(package),
@@ -12073,7 +12139,9 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         end
     end
     local techPlan = ESCALATION.directors.macro.PlanTech(
-        ESCALATION.DirectorTechInput(controller, observation, macroPlan)
+        ESCALATION.DirectorTechInput(
+            controller, observation, macroPlan, intelState
+        )
     ) or {}
     techPlan = ESCALATION.DeepCopy(techPlan)
 
@@ -12248,7 +12316,9 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         controller, observation, transportPlan, intents
     )
     ESCALATION.AdaptFieldIntercept(controller, observation, intents, reserved)
-    ESCALATION.AdaptForceIntents(controller, forcePlan, intents, reserved)
+    ESCALATION.AdaptForceIntents(
+        controller, forcePlan, intelState, intents, reserved
+    )
 
     controller.intelState = intelState
     controller.macroPlan = macroPlan
@@ -13235,7 +13305,7 @@ ESCALATION.IntentPortfolioLane = function(intent)
         then
             return 'energy_recovery'
         end
-        if role == 'mass_extractor' or role == 'radar'
+        if role == 'mass_extractor' or role == 'radar' or role == 'air_staging'
             or role == 'point_defense' or role == 'static_anti_air'
         then
             return 'mex_rebuild'
