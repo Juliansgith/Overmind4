@@ -9381,18 +9381,27 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         end
     end
     local t2PowerTarget = math.min(4, math.max(1, math.ceil(completedMex / 6)))
+    local urgentEnergyDeficit = completedMex >= 9
+        and ESCALATION.FiniteEconomyNumber(economy.energyIncome)
+        and ESCALATION.FiniteEconomyNumber(economy.energyRequested)
+        and economy.energyRequested > economy.energyIncome
+        and ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
+        and economy.massStoredRatio >= 0.5
+        and economy.massTrend >= 0
+    local safePowerBank = ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
+        and ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.energyTrend, true)
+        and economy.massStoredRatio >= 0.95
+        and economy.massTrend >= 0
+        and economy.energyStoredRatio >= 0.5
+        and economy.energyTrend >= 0
     if t2PowerCount < t2PowerTarget
         and TableGetn(t2PowerPositions) > 0
         and energyLane
         and (energyLane.admitted == true or energyLane.preserved == true)
-        and ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
-        and ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
-        and ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
-        and ESCALATION.FiniteEconomyNumber(economy.energyTrend, true)
-        and economy.massStoredRatio >= 0.8
-        and economy.massTrend >= 0
-        and economy.energyStoredRatio >= 0.3
-        and economy.energyTrend >= 0
+        and (safePowerBank or urgentEnergyDeficit)
     then
         local best = nil
         local bestPosition = nil
