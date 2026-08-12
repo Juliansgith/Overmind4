@@ -64,19 +64,36 @@ def test_pressure_front_executes_when_force_director_owns_home_reserve() -> None
         extra_markers=[layered_marker("front-b", 80, 50)],
     )
     home = campaign_state(harness)["homeTokens"]
+    harness.lua.globals().directorResults.macroPlan = lua_value(
+        harness.lua,
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {},
+            "regions": [
+                {
+                    "key": "front-a",
+                    "state": "secured",
+                    "position": [70, 2, 40],
+                    "productionAnchor": True,
+                }
+            ],
+            "intents": [],
+        },
+    )
     harness.lua.globals().directorResults.forcePlan = lua_value(
         harness.lua,
         {
             "epoch": 1,
             "assignments": {
-                "home": home,
+                "home": [],
                 "garrison": [],
-                "field": [],
+                "field": home,
                 "response": [],
                 "raider": [],
                 "unassigned": [],
             },
-            "ownershipByToken": {token: "home" for token in home},
+            "ownershipByToken": {token: "field" for token in home},
             "regionAssignments": {},
             "ratios": {},
             "intents": [],
@@ -85,6 +102,8 @@ def test_pressure_front_executes_when_force_director_owns_home_reserve() -> None
 
     harness.lua.globals().Controller.Step(harness.controller)
 
+    force_input = plain(harness.calls.forceAssign[1])
+    assert sorted(unit["token"] for unit in force_input["units"]) == home
     assert plain(harness.controller.forcePlan)["ownershipByToken"]
     assert campaign_state(harness)["state"] == "active"
     assert len(harness.calls.aggressive) == 1

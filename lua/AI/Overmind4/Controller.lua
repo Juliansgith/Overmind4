@@ -10405,7 +10405,9 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
         end
     end
     table.sort(fieldTokens)
-    if targetRegion and TableGetn(fieldTokens) > 0 then
+    if controller.fieldCampaign == nil
+        and targetRegion and TableGetn(fieldTokens) > 0
+    then
         ESCALATION.AppendDirectorIntent(intents, {
             kind = 'regional_field', regionKey = targetRegion.key,
             actorTokens = fieldTokens, position = CopyPosition(targetRegion.position),
@@ -10604,7 +10606,13 @@ end
 ESCALATION.DirectorForceInput = function(controller, observation, macroPlan, intelState, previousAssignments)
     local units = {}
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-        if COMBAT_ROLES[unit.role] then TableInsert(units, unit) end
+        if COMBAT_ROLES[unit.role]
+            and (controller.fieldCampaign == nil
+                or (type(controller.fieldCampaign.homeTokenSet) == 'table'
+                    and controller.fieldCampaign.homeTokenSet[unit.token] == true))
+        then
+            TableInsert(units, unit)
+        end
     end
     return {
         tick = observation.tick,
