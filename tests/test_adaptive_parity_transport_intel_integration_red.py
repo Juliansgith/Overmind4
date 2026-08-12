@@ -252,11 +252,11 @@ def _run_scaled_scout_step(reverse_markers: bool) -> tuple[list[Any], int]:
     return patrol_positions, objective_count
 
 
-def test_controller_bounds_scout_orders_to_32_on_640_marker_map_permutations() -> None:
+def test_controller_bounds_enemy_directed_scout_orders_on_640_marker_permutations() -> None:
     forward_positions, forward_objectives = _run_scaled_scout_step(False)
     reverse_positions, reverse_objectives = _run_scaled_scout_step(True)
 
-    # Three public spawn markers are added to the 640 public mass markers.
-    assert forward_objectives == reverse_objectives == 643
-    assert len(forward_positions) == len(reverse_positions) == 32
+    # Only the one public occupied enemy spawn augments unowned mass markers.
+    assert forward_objectives == reverse_objectives == 641
+    assert len(forward_positions) == len(reverse_positions) == 8
     assert reverse_positions == forward_positions

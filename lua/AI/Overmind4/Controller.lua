@@ -10875,20 +10875,25 @@ end
 ESCALATION.DirectorScoutInput = function(controller, observation, macroPlan)
     local objectives = {}
     for _, site in ipairs((observation.sites or {}).mass or {}) do
-        TableInsert(objectives, {
-            key = site.key, position = CopyPosition(site.position), public = true,
-        })
+        if site.complete ~= true and site.occupied ~= true then
+            TableInsert(objectives, {
+                key = site.key, position = CopyPosition(site.position), public = true,
+                priority = tonumber(site.distance) or 0,
+            })
+        end
     end
     for _, marker in ipairs((controller.markers or {}).spawn or {}) do
-        TableInsert(objectives, {
-            key = 'spawn:' .. tostring(marker.name),
-            position = CopyPosition(marker.position), public = true,
-        })
-    end
-    for _, region in ipairs(macroPlan.regions or {}) do
-        TableInsert(objectives, {
-            key = region.key, position = CopyPosition(region.position), public = true,
-        })
+        if ScenarioInfo and ScenarioInfo.Options
+            and ScenarioInfo.Options.TeamSpawn == 'fixed'
+            and marker.occupiedSpawn == true
+            and marker.name == controller.targetName
+        then
+            TableInsert(objectives, {
+                key = 'spawn:' .. tostring(marker.name),
+                position = CopyPosition(marker.position), public = true,
+                strategic = true, priority = 1000000000,
+            })
+        end
     end
     local covered = ESCALATION.DeepCopy(
         (controller.directorState or {}).lastCoveredTicks or {}
@@ -10994,7 +10999,29 @@ ESCALATION.AdaptBomberIntent = function(
     local bomber = ESCALATION.AvailableDirectorActor(
         controller, observation, 'bomber', nil, reserved
     )
-    if not bomber or controller.bomberMissions[bomber.token] then return end
+    local preemptPublicHarass = false
+    if visualTarget and (not bomber
+        or controller.bomberMissions[bomber.token])
+    then
+        bomber = nil
+        for _, unit in ipairs(observation.units or {}) do
+            local mission = controller.bomberMissions[unit.token]
+            if unit.role == 'bomber' and unit.complete == true
+                and not reserved[unit.token] and not controller.pending[unit.token]
+                and mission and mission.publicHarass == true
+            then
+                bomber = unit
+                preemptPublicHarass = true
+                break
+            end
+        end
+    end
+    local activeMission = bomber and controller.bomberMissions[bomber.token] or nil
+    if activeMission then
+        if not visualTarget or activeMission.publicHarass ~= true then return end
+        preemptPublicHarass = true
+    end
+    if not bomber then return end
     reserved[bomber.token] = true
     if visualTarget then
         ESCALATION.AppendDirectorIntent(intents, {
@@ -11002,6 +11029,7 @@ ESCALATION.AdaptBomberIntent = function(
             targetToken = bomberTarget.targetToken,
             targetRole = bomberTarget.targetRole,
             position = CopyPosition(bomberTarget.position),
+            preemptPublicHarass = preemptPublicHarass,
             reason = 'current_visual_raid', priority = 3,
         })
     else
@@ -11718,6 +11746,7 @@ ESCALATION.PublicScoutObjective = function(controller, observation, key, positio
     local public = false
     for _, site in ipairs((observation.sites or {}).mass or {}) do
         if site.key == key and DistanceSquared(site.position, position) <= 0.01
+            and site.complete ~= true and site.occupied ~= true
         then
             public = true
         end
@@ -11780,7 +11809,10 @@ end
 
 ESCALATION.ExecuteBomberRaid = function(controller, intent, records, usedActors, observation)
     local record = records[intent.actorToken]
-    if usedActors[intent.actorToken] or controller.bomberMissions[intent.actorToken]
+    local existingMission = controller.bomberMissions[intent.actorToken]
+    local mayPreempt = intent.preemptPublicHarass == true
+        and existingMission and existingMission.publicHarass == true
+    if usedActors[intent.actorToken] or (existingMission and not mayPreempt)
         or not record or record.role ~= 'bomber' or record.complete ~= true
     then
         return false
@@ -11809,7 +11841,10 @@ ESCALATION.ExecuteBomberRaid = function(controller, intent, records, usedActors,
     end
     local actor = LiveOwnedActor(controller, intent.actorToken, record, 'bomber')
     if not actor then return false end
+    if not pcall(function() IssueClearCommands({ actor }) end) then return false end
     if not pcall(function() IssueAggressiveMove({ actor }, targetPosition) end) then
+        controller.bomberMissions[intent.actorToken] = nil
+        pcall(function() IssueClearCommands({ actor }) end)
         return false
     end
     controller.bomberMissions[intent.actorToken] = {

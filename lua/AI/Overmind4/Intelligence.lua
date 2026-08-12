@@ -30,7 +30,7 @@ local function DistanceSquared(a, b)
     return dx * dx + dz * dz
 end
 
-local MAX_SCOUT_OBJECTIVES = 32
+local MAX_SCOUT_OBJECTIVES = 8
 local MAX_MEMORY_CONTACTS = 64
 local RADAR_COALESCE_DISTANCE_SQUARED = 64 * 64
 
@@ -112,11 +112,18 @@ Intelligence.PlanScoutRoute = function(snapshot)
         })
     end
     table.sort(ranked, function(a, b)
+        local strategicA = a.objective.strategic == true
+        local strategicB = b.objective.strategic == true
+        if strategicA ~= strategicB then return strategicA end
         if a.age == b.age then
+            local priorityA = Number(a.objective.priority, 0) or 0
+            local priorityB = Number(b.objective.priority, 0) or 0
+            if priorityA ~= priorityB then return priorityA > priorityB end
             return tostring(a.objective.key) < tostring(b.objective.key)
         end
         return a.age > b.age
     end)
+    local nextObjectiveKey = ranked[1] and ranked[1].objective.key or nil
     objectives = {}
     local index = 1
     while index <= Count(ranked) and index <= MAX_SCOUT_OBJECTIVES do
@@ -124,7 +131,10 @@ Intelligence.PlanScoutRoute = function(snapshot)
         index = index + 1
     end
     SortByKey(objectives, 'key')
-    local result = { objectiveKeys = {}, waypoints = {}, coverageAgeTicks = {} }
+    local result = {
+        objectiveKeys = {}, waypoints = {}, coverageAgeTicks = {},
+        nextObjectiveKey = nextObjectiveKey,
+    }
     local nextAge = -1
     for _, objective in ipairs(objectives) do
         local last = Number(covered[objective.key], 0) or 0
@@ -132,7 +142,7 @@ Intelligence.PlanScoutRoute = function(snapshot)
         table.insert(result.objectiveKeys, objective.key)
         table.insert(result.waypoints, Copy(objective.position))
         result.coverageAgeTicks[objective.key] = age
-        if age > nextAge then
+        if not result.nextObjectiveKey and age > nextAge then
             nextAge = age
             result.nextObjectiveKey = objective.key
         end

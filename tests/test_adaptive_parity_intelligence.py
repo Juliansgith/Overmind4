@@ -109,6 +109,37 @@ class TestFairIntel:
         assert plan["coverageAgeTicks"] == {"a": 100, "b": 2000, "c": 500}
         assert plan["nextObjectiveKey"] == "b"
 
+    def test_public_enemy_spawn_starts_a_short_aggressive_scout_route(self) -> None:
+        objectives = [
+            {
+                "key": f"mass-{index:02d}",
+                "position": [index * 10, 0, index * 7],
+                "public": True,
+                "priority": index,
+            }
+            for index in range(20)
+        ]
+        objectives.append(
+            {
+                "key": "spawn:z-enemy",
+                "position": [500, 0, 500],
+                "public": True,
+                "strategic": True,
+                "priority": 1000,
+            }
+        )
+
+        plan = invoke(
+            MODULE,
+            GLOBAL,
+            "PlanScoutRoute",
+            {"tick": 300, "objectives": objectives, "lastCoveredTicks": {}},
+        )
+
+        assert plan["nextObjectiveKey"] == "spawn:z-enemy"
+        assert len(plan["objectiveKeys"]) == 8
+        assert "spawn:z-enemy" in plan["objectiveKeys"]
+
     def test_640_public_objectives_are_permutation_stable_and_bounded_to_32_waypoints(self) -> None:
         objectives = [
             {

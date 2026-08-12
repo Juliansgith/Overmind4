@@ -1133,6 +1133,70 @@ def test_idle_bomber_harasses_public_mass_route_without_visual_target() -> None:
     assert mission["objectiveKeys"] == [site["key"] for site in public_sites]
 
 
+def test_scout_input_targets_enemy_spawn_and_ignores_owned_or_unoccupied_points() -> None:
+    harness = make_harness()
+    near_site = plain(harness.controller.markers.mass[1])
+    own_mex = harness.unit(
+        entityId=70,
+        blueprintId="ueb1103",
+        position=near_site["position"],
+    )
+    harness.brain.units = harness.lua.table_from([own_mex])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    objectives = plain(harness.calls.intelligencePlanScoutRoute[1])["objectives"]
+    by_key = {objective["key"]: objective for objective in objectives}
+    assert "spawn:ARMY_2" in by_key
+    assert by_key["spawn:ARMY_2"]["strategic"] is True
+    assert "spawn:ARMY_1" not in by_key
+    assert "spawn:ARMY_3" not in by_key
+    assert near_site["key"] not in by_key
+
+
+def test_visual_mex_preempts_an_active_public_bomber_harass_route() -> None:
+    harness = make_harness()
+    bomber = harness.unit(
+        entityId=30,
+        blueprintId="uea0103",
+        position=[10, 20, 20],
+    )
+    enemy_mex = harness.unit(
+        entityId=90,
+        blueprintId="ueb1103",
+        blueprintCategories=["STRUCTURE", "MASSEXTRACTION", "TECH1"],
+        army=2,
+        position=[80, 2, 80],
+        seenNow=True,
+        onRadar=True,
+    )
+    harness.brain.units = harness.lua.table_from([bomber])
+    harness.brain.enemies = harness.lua.table_from([enemy_mex])
+    harness.controller.bomberMissions["30:1"] = lua_value(
+        harness.lua,
+        {
+            "bomberToken": "30:1",
+            "publicHarass": True,
+            "objectiveKeys": [plain(harness.controller.markers.mass[1])["key"]],
+            "issuedTick": 0,
+        },
+    )
+    harness.lua.execute(
+        "IntelligenceStub.SelectBomberTarget = function() return { "
+        "targetToken = '90:1', targetRole = 'mass_extractor', "
+        "position = { 80, 2, 80 } } end"
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.aggressive) == 1
+    assert plain(harness.calls.aggressive[1].position) == [80, 2, 80]
+    mission = plain(harness.controller.bomberMissions["30:1"])
+    assert mission["targetToken"] == "90:1"
+    assert mission.get("publicHarass") is not True
+
+
 def test_public_bomber_harass_releases_after_route_and_reissues_without_churn() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
