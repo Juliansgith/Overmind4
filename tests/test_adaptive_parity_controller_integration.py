@@ -174,6 +174,16 @@ def test_banked_post_mex_tech_commits_the_first_t2_land_hq_during_a_stall() -> N
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
+def test_ten_km_nearby_expansion_does_not_require_a_remote_escort() -> None:
+    harness = make_harness()
+    harness.lua.execute("ScenarioInfo.size = { 512, 512 }")
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    expansion_input = plain(harness.calls.macroPlanExpansion[1])
+    assert expansion_input["controlledRadius"] == 300
+
+
 def test_funded_mex_expansion_does_not_claim_the_missing_hydro_builder() -> None:
     harness = make_harness()
     _use_real_macro_expansion_and_job_ledger(harness)
