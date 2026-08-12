@@ -318,6 +318,26 @@ class TestAirAndMobility:
                 "interceptor",
             ),
             (
+                {"air_scout": 1, "interceptor": 8, "bomber": 1, "transport": 1},
+                {
+                    "airThreat": False,
+                    "airThreatCount": 0,
+                    "visibleRaidTarget": False,
+                    "remoteSafeExpansion": False,
+                },
+                "interceptor",
+            ),
+            (
+                {"air_scout": 1, "interceptor": 12, "bomber": 1, "transport": 1},
+                {
+                    "airThreat": False,
+                    "airThreatCount": 0,
+                    "visibleRaidTarget": False,
+                    "remoteSafeExpansion": False,
+                },
+                "bomber",
+            ),
+            (
                 {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1},
                 {"airThreatCount": 3, "visibleRaidTarget": True},
                 "interceptor",

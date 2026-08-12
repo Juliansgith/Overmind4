@@ -8902,12 +8902,12 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             visibleRaidTarget = true
         end
     end
-    local interceptorTarget = math.min(12, 8 + airThreat * 2)
+    local interceptorTarget = 12
     local needsAirProduction = counts.air_scout < 1
         or counts.interceptor < 2
         or (counts.transport < 1 and TableGetn(regions or {}) > 1)
         or counts.interceptor < 4
-        or counts.bomber < 1
+        or counts.bomber < 2
         or counts.interceptor < interceptorTarget
         or (visibleRaidTarget and counts.bomber * 4 < counts.interceptor)
     if counts.airFactoriesT1 > 0 and needsAirProduction then

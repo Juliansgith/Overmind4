@@ -201,10 +201,10 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
         harness.unit(entityId=30, blueprintId="uea0101"),
         *[
             harness.unit(entityId=entity_id, blueprintId="uea0102")
-            for entity_id in range(31, 35)
+            for entity_id in range(31, 39)
         ],
-        harness.unit(entityId=35, blueprintId="uea0103"),
-        harness.unit(entityId=36, blueprintId="uea0107"),
+        harness.unit(entityId=39, blueprintId="uea0103"),
+        harness.unit(entityId=40, blueprintId="uea0107"),
     ]
     harness.brain.units = harness.lua.table_from(
         [*mexes, *factories, air_factory, *air_package]

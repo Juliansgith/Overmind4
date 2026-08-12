@@ -263,13 +263,15 @@ Intelligence.PlanAir = function(snapshot)
             else
                 local threat = Number(needs.airThreatCount, nil)
                 if threat == nil then threat = needs.airThreat == true and 1 or 0 end
-                local interceptorTarget = math.min(12, 8 + math.max(0, threat) * 2)
+                local interceptorTarget = 12
                 if needs.visibleRaidTarget == true
                     and totals.bomber * 4 < totals.interceptor
                 then
                     role = 'bomber'
                 elseif totals.interceptor < interceptorTarget then
                     role = 'interceptor'
+                elseif totals.bomber < 2 then
+                    role = 'bomber'
                 end
             end
         end
