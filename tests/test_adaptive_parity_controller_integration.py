@@ -210,7 +210,7 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
         [*mexes, *factories, air_factory, *air_package]
     )
     harness.brain.tick = 5815
-    harness.brain.massIncome = 2.1
+    harness.brain.massIncome = 2.5
     harness.brain.massRequested = 4.46
     harness.brain.massUsage = 4.46
     harness.brain.massTrend = 1.34
@@ -282,7 +282,7 @@ def test_lost_mex_backlog_publishes_up_to_four_independent_rebuild_grants() -> N
     ] == ["mex-1", "mex-2", "mex-3", "mex-4"]
 
 
-def test_full_bank_factory_growth_precedes_optional_engineer_and_air_reserves() -> None:
+def test_partial_bank_and_forecast_fund_factory_growth_before_optional_reserves() -> None:
     harness = make_harness()
     harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
     harness.lua.execute(
@@ -312,6 +312,10 @@ def test_full_bank_factory_growth_precedes_optional_engineer_and_air_reserves() 
         harness.unit(entityId=31, blueprintId="ueb0101"),
         harness.unit(entityId=32, blueprintId="ueb0102"),
     ]
+    power = [
+        harness.unit(entityId=40 + index, blueprintId="ueb1101")
+        for index in range(6)
+    ]
     air_package = [
         harness.unit(entityId=200, blueprintId="uea0101"),
         *[
@@ -322,35 +326,35 @@ def test_full_bank_factory_growth_precedes_optional_engineer_and_air_reserves() 
         harness.unit(entityId=210, blueprintId="uea0107"),
     ]
     harness.brain.units = harness.lua.table_from(
-        [*mexes, *engineers, *factories, *air_package]
+        [*mexes, *engineers, *factories, *power, *air_package]
     )
     harness.brain.tick = 5815
-    harness.brain.massIncome = 2.1
+    harness.brain.massIncome = 2.5
     harness.brain.massRequested = 1.9466667
     harness.brain.massUsage = 1.9466667
-    harness.brain.massTrend = 0.1533333
-    harness.brain.massStored = 635
-    harness.brain.massStoredRatio = 0.945
+    harness.brain.massTrend = 0.5533333
+    harness.brain.massStored = 230
+    harness.brain.massStoredRatio = 0.145
     harness.brain.energyIncome = 30
     harness.brain.energyRequested = 24.1843
     harness.brain.energyUsage = 24.1843
     harness.brain.energyTrend = 5.8157
-    harness.brain.energyStored = 4000
-    harness.brain.energyStoredRatio = 1
+    harness.brain.energyStored = 2050
+    harness.brain.energyStoredRatio = 0.517
     harness.controller.economyLedger = lua_value(
         harness.lua,
         {
             "valid": True,
             "inputValid": True,
             "lastTick": 5815,
-            "recurringMassIncome": 2.1,
+            "recurringMassIncome": 2.5,
             "recurringEnergyIncome": 30,
             "massRequested": 1.9466667,
             "energyRequested": 24.1843,
             "massDemandSatisfaction": 1,
             "energyDemandSatisfaction": 1,
-            "oneTimeMassReserve": 635,
-            "oneTimeEnergyReserve": 4000,
+            "oneTimeMassReserve": 230,
+            "oneTimeEnergyReserve": 2050,
         },
     )
 
