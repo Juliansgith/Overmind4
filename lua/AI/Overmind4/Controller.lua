@@ -8715,6 +8715,10 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         landFactoriesT1 = 0,
         landFactoriesT2 = 0,
         airFactoriesT1 = 0,
+        air_scout = 0,
+        interceptor = 0,
+        bomber = 0,
+        transport = 0,
         idleFactories = 0,
     }
     local constructionBacklog = 0
@@ -8734,6 +8738,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
                 counts.landFactoriesT2 = counts.landFactoriesT2 + 1
             end
             if unit.role == 'air_factory' then counts.airFactoriesT1 = counts.airFactoriesT1 + 1 end
+            if counts[unit.role] ~= nil then counts[unit.role] = counts[unit.role] + 1 end
             if (unit.role == 'land_factory' or unit.role == 'land_factory_t2'
                     or unit.role == 'land_factory_t2_support'
                     or unit.role == 'land_factory_t3' or unit.role == 'air_factory')
@@ -8753,6 +8758,9 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     end
     for _, operation in pairs(controller.pending or {}) do
         if StructureOperation(operation) then constructionBacklog = constructionBacklog + 1 end
+        if counts[operation.buildRole] ~= nil then
+            counts[operation.buildRole] = counts[operation.buildRole] + 1
+        end
     end
     local completedMex = counts.mexT1 + counts.mexT2 + counts.mexT3
     landBacklog = math.max(0, completedMex * 2 - (counts.landFactoriesT1
@@ -8780,7 +8788,24 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             massDrain = 0.28, energyDrain = 3, massCost = 56,
             energyCost = 600, required = true })
     end
-    if counts.airFactoriesT1 > 0 then
+    local airThreat = math.max(0, tonumber((intelState.threat or {}).air) or 0)
+    local visibleRaidTarget = false
+    for _, enemy in ipairs(observation.enemyObservations or {}) do
+        if enemy.currentlyVisual == true
+            and (enemy.role == 'engineer' or enemy.role == 'mass_extractor')
+        then
+            visibleRaidTarget = true
+        end
+    end
+    local interceptorTarget = math.min(12, 4 + airThreat * 2)
+    local needsAirProduction = counts.air_scout < 1
+        or counts.interceptor < 2
+        or (counts.transport < 1 and TableGetn(regions or {}) > 1)
+        or counts.interceptor < 4
+        or counts.bomber < 1
+        or counts.interceptor < interceptorTarget
+        or (visibleRaidTarget and counts.bomber * 4 < counts.interceptor)
+    if counts.airFactoriesT1 > 0 and needsAirProduction then
         TableInsert(requests, { id = 'air-1', lane = 'air_production',
             massDrain = 0.2, energyDrain = 9, massCost = 50,
             energyCost = 2250, required = true })

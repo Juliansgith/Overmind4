@@ -197,7 +197,18 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
         for entity_id in (20, 21, 22)
     ]
     air_factory = harness.unit(entityId=23, blueprintId="ueb0102")
-    harness.brain.units = harness.lua.table_from([*mexes, *factories, air_factory])
+    air_package = [
+        harness.unit(entityId=30, blueprintId="uea0101"),
+        *[
+            harness.unit(entityId=entity_id, blueprintId="uea0102")
+            for entity_id in range(31, 35)
+        ],
+        harness.unit(entityId=35, blueprintId="uea0103"),
+        harness.unit(entityId=36, blueprintId="uea0107"),
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [*mexes, *factories, air_factory, *air_package]
+    )
     harness.brain.tick = 5815
     harness.brain.massIncome = 2.1
     harness.brain.massRequested = 4.46
@@ -233,6 +244,10 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
     macro_input = plain(harness.calls.macroBuildPortfolio[1])
     assert macro_input["economy"]["massRequested"] == pytest.approx(0.76)
     assert macro_input["economy"]["energyRequested"] == pytest.approx(10.23)
+    assert not any(
+        request["lane"] == "air_production"
+        for request in macro_input["requests"]
+    ), macro_input["counts"]
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
