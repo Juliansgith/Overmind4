@@ -825,9 +825,9 @@ def test_live_twenty_minute_bank_invests_in_advanced_mex_storage() -> None:
     snapshot = _advanced_mex_storage_snapshot()
     snapshot["economy"].update(
         massStoredRatio=0.66,
-        massTrend=0.1,
+        massTrend=-0.71,
         energyStoredRatio=0.94,
-        energyTrend=1,
+        energyTrend=-0.1,
     )
 
     storage = [
@@ -843,12 +843,10 @@ def test_live_twenty_minute_bank_invests_in_advanced_mex_storage() -> None:
     ("change", "value"),
     [
         ("massStoredRatio", 0.499),
-        ("massTrend", -0.01),
         ("energyStoredRatio", 0.499),
-        ("energyTrend", -0.01),
     ],
 )
-def test_advanced_mex_storage_fails_closed_without_healthy_full_banks(
+def test_advanced_mex_storage_fails_closed_without_healthy_banks(
     change: str,
     value: float,
 ) -> None:
