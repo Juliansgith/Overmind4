@@ -1357,7 +1357,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and FiniteNumber(economy.massTrend)
         and FiniteNumber(economy.energyStoredRatio)
         and FiniteNumber(economy.energyTrend)
-        and tonumber(economy.massStoredRatio) >= 0.5
+        and tonumber(economy.massStoredRatio) >= 0.95
         and tonumber(economy.massTrend) >= 0
         and tonumber(economy.energyStoredRatio) >= 0.5
         and tonumber(economy.energyTrend) >= 0
@@ -2931,7 +2931,7 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 and FiniteNumber(economy.massTrend)
                 and FiniteNumber(economy.energyStoredRatio)
                 and FiniteNumber(economy.energyTrend)
-                and tonumber(economy.massStoredRatio) >= 0.5
+                and tonumber(economy.massStoredRatio) >= 0.95
                 and tonumber(economy.massTrend) >= 0
                 and tonumber(economy.energyStoredRatio) >= 0.5
                 and tonumber(economy.energyTrend) >= 0
