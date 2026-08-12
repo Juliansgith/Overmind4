@@ -1197,6 +1197,52 @@ def test_visual_mex_preempts_an_active_public_bomber_harass_route() -> None:
     assert mission.get("publicHarass") is not True
 
 
+def test_idle_bomber_attacks_recently_scouted_mex_after_vision_is_lost() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute(
+        "IntelligenceStub.UpdateMemory = Intelligence.UpdateMemory"
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    bomber = harness.unit(
+        entityId=30,
+        blueprintId="uea0103",
+        position=[10, 20, 20],
+    )
+    harness.brain.units = harness.lua.table_from([bomber])
+    harness.brain.enemies = harness.lua.table_from([])
+    harness.brain.tick = 100
+    harness.controller.intelState = lua_value(
+        harness.lua,
+        {
+            "epoch": 1,
+            "threat": {},
+            "expansionSafety": {},
+            "contacts": {
+                "90:1": {
+                    "token": "90:1",
+                    "role": "mass_extractor_t2",
+                    "position": [80, 2, 80],
+                    "source": "vision",
+                    "currentlyVisual": False,
+                    "current": False,
+                    "lastSeenTick": 50,
+                }
+            },
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.aggressive) == 1
+    raid_position = plain(harness.calls.aggressive[1].position)
+    assert [raid_position[0], raid_position[2]] == [80, 80]
+    mission = plain(harness.controller.bomberMissions["30:1"])
+    assert mission["targetToken"] == "90:1"
+    assert mission["rememberedRaid"] is True
+
+
 def test_recent_scout_contact_defers_unescorted_mex_until_intelligence_expires() -> None:
     harness = make_harness()
     _use_real_macro_expansion_and_job_ledger(harness)
