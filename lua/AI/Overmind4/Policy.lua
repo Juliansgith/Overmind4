@@ -1272,7 +1272,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     end
 
     if not underContact
-        and not reclaimPatrolActive
+        and (not reclaimPatrolActive or reclaimPatrolAcu ~= nil)
         and activeReclaimJobs == 0
         and completedMex >= 4
         and (TableGetn(engineers) >= 4 or reclaimPatrolAcu ~= nil)

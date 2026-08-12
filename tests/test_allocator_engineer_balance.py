@@ -681,6 +681,9 @@ def test_idle_acu_patrols_completed_local_mexes_before_home_engineers(
     )
     air_factory.update(token="92:1", role="air_factory")
     snapshot["units"].append(air_factory)
+    next(
+        unit for unit in snapshot["units"] if unit["role"] == "engineer"
+    )["reclaimPatrolAssigned"] = True
     if under_contact:
         snapshot["enemyContact"] = {"position": [12, 2, 12], "immediate": True}
 
