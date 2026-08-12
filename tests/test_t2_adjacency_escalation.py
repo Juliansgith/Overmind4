@@ -166,6 +166,65 @@ def test_mature_mex_economy_scales_to_three_t2_engineers() -> None:
     assert harness.calls.buildFactory[1].blueprintId == "uel0208"
 
 
+def test_first_completed_t3_factory_builds_a_t3_engineer_before_t3_combat() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="land_production")
+    )
+    _set_director_result(
+        harness, "techPlan", {"t3ProductionRole": "t3_direct_fire"}
+    )
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(
+                entityId=20,
+                blueprintId="ueb0301",
+                canBuild={"uel0309": True, "uel0303": True},
+            )
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].blueprintId == "uel0309"
+
+
+def test_mass_rich_t3_engineer_builds_local_t3_power_before_idling() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _healthy_bank(harness)
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="energy_recovery")
+    )
+    mexes = [
+        harness.unit(
+            entityId=100 + index,
+            blueprintId="ueb1202",
+            position=[80 + index * 4, 2, 80],
+        )
+        for index in range(19)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(entityId=20, blueprintId="ueb0301", position=[40, 2, 40]),
+            harness.unit(
+                entityId=21,
+                blueprintId="uel0309",
+                position=[35, 2, 40],
+                canBuild={"ueb1301": True},
+            ),
+            *mexes,
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1301"
+
+
 def test_t2_generator_candidates_touch_factory_skirt_and_require_t2_builder() -> None:
     harness = make_harness()
     factory = harness.unit(

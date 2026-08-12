@@ -69,6 +69,11 @@ local BUILD_ROLES = {
         'mass_storage', 'point_defense', 'power_generator',
         'power_generator_t2', 'radar', 'static_anti_air',
     },
+    t3_engineer = {
+        'air_factory', 'air_staging', 'land_factory', 'mass_storage',
+        'point_defense', 'power_generator', 'power_generator_t2',
+        'power_generator_t3', 'radar', 'static_anti_air',
+    },
     land_factory = {
         'anti_air', 'artillery', 'engineer', 'lab', 'land_factory_t2',
         'land_factory_t2_support',
@@ -81,7 +86,7 @@ local BUILD_ROLES = {
     land_factory_t2_support = {
         't2_anti_air', 't2_direct_fire', 't2_engineer',
     },
-    land_factory_t3 = { 't3_direct_fire' },
+    land_factory_t3 = { 't3_direct_fire', 't3_engineer' },
 }
 
 local COMBAT_ROLES = {
@@ -145,8 +150,10 @@ local ESCALATION = {
         mass_storage = 'construction',
         power_generator = 'energy',
         power_generator_t2 = 'energy',
+        power_generator_t3 = 'energy',
         engineer = 'engineer',
         t2_engineer = 'factory',
+        t3_engineer = 'factory',
         anti_air = 'factory',
         artillery = 'factory',
         lab = 'factory',
@@ -170,6 +177,7 @@ local ESCALATION = {
         mass_storage = true,
         power_generator = true,
         power_generator_t2 = true,
+        power_generator_t3 = true,
     },
     placementObstacleRoles = {
         air_factory = true,
@@ -185,6 +193,7 @@ local ESCALATION = {
         mass_storage = true,
         power_generator = true,
         power_generator_t2 = true,
+        power_generator_t3 = true,
     },
     factoryProducts = {
         air_factory = {
@@ -201,7 +210,7 @@ local ESCALATION = {
         land_factory_t2_support = {
             t2_anti_air = true, t2_direct_fire = true, t2_engineer = true,
         },
-        land_factory_t3 = { t3_direct_fire = true },
+        land_factory_t3 = { t3_direct_fire = true, t3_engineer = true },
     },
 }
 
@@ -2751,6 +2760,7 @@ local function PlacementSnapshot(controller, units)
         mass_storage = {},
         power_generator = {},
         power_generator_t2 = {},
+        power_generator_t3 = {},
     }
     local claimed = {}
     local occupiedRects = {}
@@ -2811,6 +2821,12 @@ local function PlacementSnapshot(controller, units)
     end)
     local placementRoles = {}
     for _, unit in ipairs(units or {}) do
+        if unit.complete == true and unit.role == 't3_engineer' then
+            TableInsert(placementRoles, 'power_generator_t3')
+            break
+        end
+    end
+    for _, unit in ipairs(units or {}) do
         if unit.complete == true and unit.role == 't2_engineer' then
             TableInsert(placementRoles, 'power_generator_t2')
             break
@@ -2821,7 +2837,9 @@ local function PlacementSnapshot(controller, units)
     TableInsert(placementRoles, 'air_factory')
     for _, role in ipairs(placementRoles) do
         roleProbeStart = probes
-        if role == 'power_generator' or role == 'power_generator_t2' then
+        if role == 'power_generator' or role == 'power_generator_t2'
+            or role == 'power_generator_t3'
+        then
             local generatorSpec = ESCALATION.FootprintSpec(
                 controller, role
             )
@@ -2958,6 +2976,7 @@ local function PlacementSnapshot(controller, units)
         + TableGetn(placements.mass_storage)
         + TableGetn(placements.power_generator)
         + TableGetn(placements.power_generator_t2)
+        + TableGetn(placements.power_generator_t3)
     return placements
 end
 
@@ -9026,7 +9045,9 @@ ESCALATION.PublishObserverSnapshots = function(controller)
 end
 
 ESCALATION.DirectorRoleTier = function(role)
-    if role == 'mass_extractor_t3' or role == 'land_factory_t3' then return 3 end
+    if role == 'mass_extractor_t3' or role == 'land_factory_t3'
+        or role == 'power_generator_t3' or role == 't3_engineer'
+    then return 3 end
     if role == 'mass_extractor_t2' or role == 'land_factory_t2'
         or role == 'land_factory_t2_support' or role == 't2_engineer'
         or role == 'power_generator_t2'
@@ -9483,11 +9504,15 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
 
     local economy = observation.economy or {}
     local t2PowerPositions = (observation.placements or {}).power_generator_t2 or {}
+    local t3PowerPositions = (observation.placements or {}).power_generator_t3 or {}
     local t2PowerCount = 0
+    local t3PowerCount = 0
     local completedMex = 0
     for _, unit in ipairs(observation.units or {}) do
         if unit.role == 'power_generator_t2' then
             t2PowerCount = t2PowerCount + 1
+        elseif unit.role == 'power_generator_t3' then
+            t3PowerCount = t3PowerCount + 1
         elseif unit.roleFamily == 'mass_extractor' and unit.complete == true then
             completedMex = completedMex + 1
         end
@@ -9495,6 +9520,8 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
     for _, operation in pairs(controller.pending or {}) do
         if operation.buildRole == 'power_generator_t2' then
             t2PowerCount = t2PowerCount + 1
+        elseif operation.buildRole == 'power_generator_t3' then
+            t3PowerCount = t3PowerCount + 1
         end
     end
     local t2PowerTarget = math.min(4, math.max(1, math.ceil(completedMex / 6)))
@@ -9519,6 +9546,50 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
     if safePowerBank and completedMex >= 12 then
         t2PowerTarget = math.min(12, math.max(t2PowerTarget,
             math.ceil(completedMex / 2)))
+    end
+    local t3PowerTarget = math.min(3, math.max(1,
+        math.ceil(completedMex / 8)))
+    if t3PowerCount < t3PowerTarget
+        and TableGetn(t3PowerPositions) > 0
+        and energyLane
+        and (energyLane.admitted == true or energyLane.preserved == true)
+        and (safePowerBank or urgentEnergyDeficit)
+    then
+        local best = nil
+        local bestPosition = nil
+        local bestDistance = nil
+        for _, position in ipairs(t3PowerPositions) do
+            for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+                if unit.role == 't3_engineer'
+                    and (unit.available == true or unit.moving == true)
+                    and controller.pending[unit.token] == nil
+                    and not ESCALATION.TransportTokenClaimed(controller, unit.token)
+                    and (unit.canBuild or {}).power_generator_t3 == true
+                then
+                    local distance = DistanceSquared(unit.position, position)
+                    local pairKey = tostring(PlacementKey(position) or '')
+                        .. ':' .. tostring(unit.token)
+                    local bestKey = bestPosition
+                        and (tostring(PlacementKey(bestPosition) or '')
+                            .. ':' .. tostring(best.token)) or nil
+                    if not best or distance < bestDistance
+                        or (distance == bestDistance and pairKey < bestKey)
+                    then
+                        best = unit
+                        bestPosition = position
+                        bestDistance = distance
+                    end
+                end
+            end
+        end
+        if best then
+            return best.token, {
+                kind = 'build_structure', actorToken = best.token,
+                buildRole = 'power_generator_t3',
+                position = CopyPosition(bestPosition),
+                reason = 'factory_adjacency_t3_power', priority = 1,
+            }
+        end
     end
     if t2PowerCount < t2PowerTarget
         and TableGetn(t2PowerPositions) > 0
@@ -10344,6 +10415,7 @@ end
 ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, techPlan, intents, reserved)
     local currentEngineers = 0
     local currentT2Engineers = 0
+    local currentT3Engineers = 0
     local currentLand = 0
     local currentAir = 0
     local currentMex = 0
@@ -10354,6 +10426,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             if unit.role == 'engineer' then currentEngineers = currentEngineers + 1 end
             if unit.role == 't2_engineer' then
                 currentT2Engineers = currentT2Engineers + 1
+            end
+            if unit.role == 't3_engineer' then
+                currentT3Engineers = currentT3Engineers + 1
             end
             if unit.roleFamily == 'mass_extractor' then currentMex = currentMex + 1 end
             if unit.role == 'power_generator' then currentPower = currentPower + 1 end
@@ -10371,6 +10446,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         if operation.buildRole == 'engineer' then currentEngineers = currentEngineers + 1 end
         if operation.buildRole == 't2_engineer' then
             currentT2Engineers = currentT2Engineers + 1
+        end
+        if operation.buildRole == 't3_engineer' then
+            currentT3Engineers = currentT3Engineers + 1
         end
         if operation.buildRole == 'land_factory' then currentLand = currentLand + 1 end
         if operation.buildRole == 'air_factory' then currentAir = currentAir + 1 end
@@ -10529,17 +10607,22 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             slot = slot + 1
         end
         if type((techPlan or {}).t3ProductionRole) == 'string' then
+            local t3ProductionRole = currentT3Engineers < 1
+                and 't3_engineer' or techPlan.t3ProductionRole
             local factory = ESCALATION.AvailableDirectorActor(
                 controller, observation, 'land_factory_t3',
-                techPlan.t3ProductionRole, reserved
+                t3ProductionRole, reserved
             )
             if factory then
                 reserved[factory.token] = true
                 ESCALATION.AppendDirectorIntent(intents, {
                     kind = 'factory_build', actorToken = factory.token,
-                    buildRole = techPlan.t3ProductionRole,
+                    buildRole = t3ProductionRole,
                     reason = 'funded_t3_production', priority = 5,
                 })
+                if t3ProductionRole == 't3_engineer' then
+                    currentT3Engineers = currentT3Engineers + 1
+                end
             end
         end
     end
@@ -13626,6 +13709,7 @@ ESCALATION.IntentPortfolioLane = function(intent)
     end
     if intent.kind == 'build_structure' or intent.kind == 'assist_structure' then
         if role == 'power_generator' or role == 'power_generator_t2'
+            or role == 'power_generator_t3'
             or role == 'hydrocarbon'
         then
             return 'energy_recovery'

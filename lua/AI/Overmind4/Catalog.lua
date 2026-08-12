@@ -2,12 +2,14 @@ local IdByRole = {
     acu = 'uel0001',
     engineer = 'uel0105',
     t2_engineer = 'uel0208',
+    t3_engineer = 'uel0309',
     land_factory = 'ueb0101',
     air_factory = 'ueb0102',
     land_factory_t2 = 'ueb0201',
     land_factory_t2_support = 'zeb9501',
     power_generator = 'ueb1101',
     power_generator_t2 = 'ueb1201',
+    power_generator_t3 = 'ueb1301',
     mass_storage = 'ueb1106',
     hydrocarbon = 'ueb1102',
     mass_extractor = 'ueb1103',
@@ -46,6 +48,7 @@ local FamilyByRole = {
     land_factory_t2_support = 'land_factory',
     land_factory_t3 = 'land_factory',
     power_generator_t2 = 'power_generator',
+    power_generator_t3 = 'power_generator',
 }
 
 Catalog = {}
