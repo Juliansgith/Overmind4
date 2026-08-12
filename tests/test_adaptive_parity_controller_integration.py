@@ -1304,6 +1304,10 @@ def test_three_scouts_receive_disjoint_public_route_sectors() -> None:
     }
 
 
+def test_scout_partition_uses_luaplus_compatible_modulo() -> None:
+    assert "(index - 1) % 3" not in source("lua/AI/Overmind4/Controller.lua")
+
+
 def test_scout_input_targets_enemy_spawn_and_ignores_owned_or_unoccupied_points() -> None:
     harness = make_harness()
     near_site = plain(harness.controller.markers.mass[1])

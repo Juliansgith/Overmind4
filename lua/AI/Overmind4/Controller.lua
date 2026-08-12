@@ -10732,7 +10732,7 @@ ESCALATION.AdaptScoutIntent = function(controller, observation, scoutPlan, inten
     local routeKeys = {}
     local routeWaypoints = {}
     for index, key in ipairs(objectiveKeys) do
-        if ((index - 1) % 3) + 1 == routeIndex then
+        if math.mod(index - 1, 3) + 1 == routeIndex then
             TableInsert(routeKeys, key)
             TableInsert(routeWaypoints, CopyPosition(scoutPlan.waypoints[index]))
         end
