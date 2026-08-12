@@ -11504,8 +11504,20 @@ ESCALATION.AdaptForceIntents = function(
         end
     end
     table.sort(fieldTokens)
+    local records = RecordByToken((observation or {}).units or {})
+    local fieldAntiAir = 0
+    local fieldArtillery = 0
+    for _, token in ipairs(fieldTokens) do
+        local record = records[token]
+        if record and (record.role == 'anti_air' or record.role == 't2_anti_air') then
+            fieldAntiAir = fieldAntiAir + 1
+        elseif record and record.role == 'artillery' then
+            fieldArtillery = fieldArtillery + 1
+        end
+    end
     local assaultTarget = nil
-    if TableGetn(fieldTokens) >= 40 and controller.targetPath == true
+    if TableGetn(fieldTokens) >= 18 and fieldAntiAir >= 1 and fieldArtillery >= 1
+        and controller.targetPath == true
         and CopyPosition(controller.targetPosition)
     then
         local economicTarget = nil
@@ -11539,7 +11551,6 @@ ESCALATION.AdaptForceIntents = function(
         }
     end
     local mission = controller.fieldAssaultMission
-    local records = RecordByToken((observation or {}).units or {})
     if mission then
         local liveTokens = {}
         for _, token in ipairs(mission.actorTokens or {}) do
@@ -11550,7 +11561,7 @@ ESCALATION.AdaptForceIntents = function(
                 TableInsert(liveTokens, token)
             end
         end
-        if TableGetn(liveTokens) < math.max(20, math.floor((mission.initialCount or 0) * 0.5))
+        if TableGetn(liveTokens) < math.max(10, math.floor((mission.initialCount or 0) * 0.5))
             or CurrentTick(controller) - (mission.createdTick or 0) >= 1800
         then
             controller.fieldAssaultMission = nil
@@ -11566,7 +11577,7 @@ ESCALATION.AdaptForceIntents = function(
                 end
             end
             local quorum = math.max(
-                math.min(30, TableGetn(liveTokens)),
+                math.min(15, TableGetn(liveTokens)),
                 math.ceil(TableGetn(liveTokens) * 0.75)
             )
             if arrived >= quorum then
@@ -13411,20 +13422,44 @@ ESCALATION.ExecuteForceMove = function(
         TableInsert(actors, actor)
     end
     if TableGetn(actors) == 0 then return false end
-    if bucket == 'response'
-        and not pcall(function() IssueClearCommands(actors) end)
-    then
+    local sourcePosition = CopyPosition(
+        SafeCall(nil, actors[1].GetPosition, actors[1])
+    )
+    local destination = CopyPosition(intent.position)
+    if not IsCampaignPosition(sourcePosition) or not IsCampaignPosition(destination) then
         return false
     end
-    if aggressive == true and intent.clearFirst == true
-        and not pcall(function() IssueClearCommands(actors) end)
-    then
+    local canPathOk, canPath = pcall(function()
+        return NavUtils.CanPathTo('Land', sourcePosition, destination)
+    end)
+    if not canPathOk or canPath ~= true then return false end
+    local pathOk, path, count, length = pcall(function()
+        return NavUtils.PathTo('Land', sourcePosition, destination)
+    end)
+    if not pathOk then return false end
+    local waypoints = ESCALATION.RouteNormalizePath(
+        sourcePosition, destination, path, count, length
+    )
+    if not waypoints then return false end
+    local mustClear = bucket == 'response' or intent.clearFirst == true
+        or TableGetn(waypoints) > 1
+    if mustClear and not pcall(function() IssueClearCommands(actors) end) then
         return false
+    end
+    local dispatched = false
+    local terminal = TableGetn(waypoints)
+    for index = 1, terminal - 1 do
+        if not pcall(function() IssueMove(actors, waypoints[index]) end) then
+            if dispatched then pcall(function() IssueClearCommands(actors) end) end
+            return false
+        end
+        dispatched = true
     end
     local ok = aggressive == true
-        and pcall(function() IssueAggressiveMove(actors, CopyPosition(intent.position)) end)
-        or pcall(function() IssueMove(actors, CopyPosition(intent.position)) end)
+        and pcall(function() IssueAggressiveMove(actors, waypoints[terminal]) end)
+        or pcall(function() IssueMove(actors, waypoints[terminal]) end)
     if not ok then
+        if dispatched then pcall(function() IssueClearCommands(actors) end) end
         return false
     end
     RememberOrder(controller, signature)

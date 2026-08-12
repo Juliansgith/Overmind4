@@ -6595,9 +6595,9 @@ def test_sub_assault_field_does_not_snake_to_friendly_secured_mex() -> None:
     harness.lua.execute("Policy.Decide = function() return {} end")
     tanks = [
         harness.unit(entityId=70 + index, blueprintId="uel0201")
-        for index in range(30)
+        for index in range(19)
     ]
-    tokens = [f"{70 + index}:1" for index in range(30)]
+    tokens = [f"{70 + index}:1" for index in range(19)]
     harness.brain.units = harness.lua.table_from(tanks)
     _set_director_result(
         harness,
@@ -6690,9 +6690,14 @@ def test_mature_field_force_rallies_then_launches_one_coherent_enemy_spawn_assau
     harness.lua.execute("Policy.Decide = function() return {} end")
     tanks = [
         harness.unit(entityId=100 + index, blueprintId="uel0201")
-        for index in range(40)
+        for index in range(16)
+    ] + [
+        harness.unit(entityId=116, blueprintId="uel0103"),
+        harness.unit(entityId=117, blueprintId="uel0103"),
+        harness.unit(entityId=118, blueprintId="uel0104"),
+        harness.unit(entityId=119, blueprintId="uel0104"),
     ]
-    tokens = [f"{100 + index}:1" for index in range(40)]
+    tokens = [f"{100 + index}:1" for index in range(20)]
     harness.brain.units = harness.lua.table_from(tanks)
     _set_director_result(
         harness,
@@ -6727,12 +6732,20 @@ def test_mature_field_force_rallies_then_launches_one_coherent_enemy_spawn_assau
 
     for tank in tanks:
         tank.options.position = harness.lua.table_from([60, 2, 60])
+    harness.calls.pathWaypoints = lua_value(
+        harness.lua,
+        [[80, 2, 80], plain(harness.controller.targetPosition)]
+    )
+    harness.calls.pathCount = 2
+    harness.calls.pathLength = 100
     harness.brain.tick = 10
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.clear) == 1
+    assert len(harness.calls.move) == 2
+    assert plain(harness.calls.move[2].position) == [80, 2, 80]
     assert len(harness.calls.aggressive) == 1
-    assert len(harness.calls.aggressive[1].units) == 40
+    assert len(harness.calls.aggressive[1].units) == 20
     assert plain(harness.calls.aggressive[1].position) == plain(
         harness.controller.targetPosition
     )
@@ -6747,9 +6760,14 @@ def test_mature_field_force_pressures_recent_enemy_factory_instead_of_empty_spaw
     harness.lua.execute("Policy.Decide = function() return {} end")
     tanks = [
         harness.unit(entityId=100 + index, blueprintId="uel0201")
-        for index in range(40)
+        for index in range(16)
+    ] + [
+        harness.unit(entityId=116, blueprintId="uel0103"),
+        harness.unit(entityId=117, blueprintId="uel0103"),
+        harness.unit(entityId=118, blueprintId="uel0104"),
+        harness.unit(entityId=119, blueprintId="uel0104"),
     ]
-    tokens = [f"{100 + index}:1" for index in range(40)]
+    tokens = [f"{100 + index}:1" for index in range(20)]
     harness.brain.units = harness.lua.table_from(tanks)
     harness.brain.tick = 500
     _set_director_result(
