@@ -3900,6 +3900,54 @@ def test_loaded_transport_reconcile_rejects_attached_foreign_extra_cargo() -> No
     ] is True
 
 
+def test_loading_an_existing_transport_needs_no_air_production_grant() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    transport = harness.unit(
+        entityId=31,
+        blueprintId="uea0107",
+        position=[10, 20, 20],
+        cargo=[],
+    )
+    cargo = harness.unit(
+        entityId=32,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+    )
+    harness.brain.units = harness.lua.table_from([transport, cargo])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"air_production": {"admitted": False}},
+            "grants": [],
+            "regions": [],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "transportPlan",
+        {
+            "mode": "airlift",
+            "missionId": "airlift:front",
+            "siteKey": "front",
+            "transportToken": "31:1",
+            "cargoTokens": ["32:1"],
+            "dropPosition": [300, 2, 300],
+            "dropTolerance": 20,
+            "retryCount": 0,
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.transportLoad) == 1
+    assert harness.controller.transportMissions["airlift:front"] is not None
+
+
 def test_airlift_command_failure_rejects_attempt_then_retries_same_semantic_operation() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

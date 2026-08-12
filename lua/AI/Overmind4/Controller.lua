@@ -13012,7 +13012,7 @@ ESCALATION.IntentPortfolioLane = function(intent)
     if intent.reason == 'opening_air_mobility' then return nil end
     if intent.kind == 'reclaim' then return 'reclaim' end
     if intent.kind == 'escorted_expansion' then return 'mex_rebuild' end
-    if intent.kind == 'transport_load' then return 'air_production' end
+    if intent.kind == 'transport_load' then return nil end
     if intent.kind == 'factory_upgrade' or intent.kind == 'structure_upgrade' then
         return 'tech'
     end
