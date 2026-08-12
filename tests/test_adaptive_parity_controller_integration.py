@@ -1595,6 +1595,35 @@ def test_interceptors_leave_base_to_engage_visible_air_and_return_after_contact(
     assert harness.controller.airInterceptMission is None
 
 
+def test_low_fuel_interceptor_loads_into_live_air_staging_before_new_missions() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    interceptor = harness.unit(
+        entityId=100,
+        blueprintId="uea0102",
+        position=[30, 20, 30],
+        fuelRatio=0.15,
+    )
+    staging = harness.unit(
+        entityId=200,
+        blueprintId="ueb5202",
+        position=[20, 2, 20],
+        hasTransportSpace=True,
+    )
+    harness.brain.units = harness.lua.table_from([interceptor, staging])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.transportLoad) == 1
+    assert _same_lua_reference(
+        harness, harness.calls.transportLoad[1].units[1], interceptor
+    )
+    assert _same_lua_reference(
+        harness, harness.calls.transportLoad[1].transport, staging
+    )
+    assert plain(harness.controller.airRefuelMissions)["100:1"]["stagingToken"] == "200:1"
+
+
 def test_public_bomber_harass_releases_after_route_and_reissues_without_churn() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

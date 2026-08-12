@@ -224,6 +224,17 @@ def make_harness() -> ControllerHarness:
             function unit:GetFocusUnit() return self.options.focusUnit end
             function unit:GetTransport() return self.options.transport end
             function unit:GetCargo() return self.options.cargo or {} end
+            function unit:GetFuelRatio()
+                if self.options.fuelRatio == nil then return -1 end
+                return self.options.fuelRatio
+            end
+            function unit:TransportHasSpaceFor(target)
+                return self.options.hasTransportSpace ~= false
+            end
+            function unit:ForkThread(fn)
+                self.options.forkedThread = fn
+                return { kind = 'thread' }
+            end
             function unit:GetBlip(army)
                 local options = self.options
                 return {

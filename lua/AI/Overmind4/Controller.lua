@@ -737,6 +737,8 @@ local function NormalizeOwnUnit(controller, unit)
     local radarRadius = tonumber(intel.RadarRadius) or 0
     local liveRadarRadius = tonumber(SafeCall(nil, unit.GetIntelRadius, unit, 'Radar'))
     if liveRadarRadius and liveRadarRadius > 0 then radarRadius = liveRadarRadius end
+    local fuelRatio = tonumber(SafeCall(-1, unit.GetFuelRatio, unit)) or -1
+    local attached = SafeCall(false, unit.IsUnitState, unit, 'Attached') == true
 
     controller.unitRefs[token] = unit
     return {
@@ -752,6 +754,8 @@ local function NormalizeOwnUnit(controller, unit)
         building = buildingState,
         moving = movingState,
         healthRatio = healthRatio,
+        fuelRatio = fuelRatio,
+        attached = attached,
         position = position,
         canBuild = canBuild,
         needsRally = role == 'land_factory' and controller.rallied[token] ~= true,
@@ -3841,6 +3845,99 @@ ESCALATION.ExecuteAirRecover = function(
     Emit(controller, 'order', {
         actor = 'air_intercept', command = 'recover_patrol',
         role = 'interceptor', units = TableGetn(tokens),
+    })
+    return true
+end
+
+ESCALATION.AirStagingRefuelThread = function(staging)
+    while staging and staging.Dead ~= true
+        and SafeCall(true, staging.BeenDestroyed, staging) ~= true
+    do
+        local active = {}
+        local ready = true
+        for _, aircraft in ipairs(staging.Overmind4Refueling or {}) do
+            if aircraft and aircraft.Dead ~= true
+                and SafeCall(true, aircraft.BeenDestroyed, aircraft) ~= true
+            then
+                TableInsert(active, aircraft)
+                local fuel = tonumber(SafeCall(-1,
+                    aircraft.GetFuelRatio, aircraft)) or -1
+                if fuel >= 0 and fuel < 0.9 then ready = false end
+            end
+        end
+        staging.Overmind4Refueling = active
+        if TableGetn(active) == 0 then break end
+        if ready then
+            local position = TerrainPosition(SafeCall(nil,
+                staging.GetPosition, staging))
+            if position then
+                pcall(function()
+                    IssueTransportUnload({ staging }, {
+                        position[1] + 5, position[2], position[3] + 5,
+                    })
+                end)
+            end
+            WaitSeconds(2)
+            for _, aircraft in ipairs(active) do aircraft.Loading = false end
+            staging.Overmind4Refueling = {}
+            break
+        end
+        WaitSeconds(1)
+    end
+    if staging then staging.Overmind4RefuelThread = nil end
+end
+
+ESCALATION.ExecuteAirRefuel = function(
+    controller, intent, records, usedActors
+)
+    local record = records[intent.actorToken]
+    local stagingRecord = records[intent.stagingToken]
+    local airRoles = { air_scout = true, bomber = true, interceptor = true }
+    if usedActors[intent.actorToken] or controller.pending[intent.actorToken]
+        or not record or airRoles[record.role] ~= true
+        or record.complete ~= true or not stagingRecord
+        or stagingRecord.role ~= 'air_staging'
+        or stagingRecord.complete ~= true
+    then
+        return false
+    end
+    local aircraft = LiveOwnedActor(
+        controller, intent.actorToken, record, record.role)
+    local staging = LiveOwnedActor(
+        controller, intent.stagingToken, stagingRecord, 'air_staging')
+    local fuel = aircraft and tonumber(SafeCall(-1,
+        aircraft.GetFuelRatio, aircraft)) or -1
+    if not aircraft or not staging or fuel < 0 or fuel >= 0.3
+        or SafeCall(false, staging.TransportHasSpaceFor,
+            staging, aircraft) ~= true
+    then
+        return false
+    end
+    if not pcall(function() IssueClearCommands({ aircraft }) end) then return false end
+    if not pcall(function() IssueTransportLoad({ aircraft }, staging) end) then
+        return false
+    end
+    staging.Overmind4Refueling = staging.Overmind4Refueling or {}
+    TableInsert(staging.Overmind4Refueling, aircraft)
+    aircraft.Loading = true
+    if not staging.Overmind4RefuelThread then
+        staging.Overmind4RefuelThread = SafeCall(nil,
+            staging.ForkThread, staging, ESCALATION.AirStagingRefuelThread)
+    end
+    controller.airRefuelMissions[intent.actorToken] = {
+        actorToken = intent.actorToken,
+        stagingToken = intent.stagingToken,
+        issuedTick = CurrentTick(controller),
+    }
+    controller.airAssignments[intent.actorToken] = nil
+    controller.airScoutAssignments[intent.actorToken] = nil
+    controller.bomberMissions[intent.actorToken] = nil
+    controller.airInterceptMission = nil
+    usedActors[intent.actorToken] = true
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'air_refuel', role = record.role,
+        staging = intent.stagingToken,
     })
     return true
 end
@@ -8277,6 +8374,7 @@ Controller.Create = function(brain)
         transportCargoRefs = {},
         bomberMissions = {},
         airInterceptMission = nil,
+        airRefuelMissions = {},
         enemyRefs = {},
         operationLifecycle = {},
         expansionClearances = {},
@@ -11596,6 +11694,69 @@ ESCALATION.AdaptBomberIntent = function(
     end
 end
 
+ESCALATION.AdaptAirRefuel = function(controller, observation, intents, reserved)
+    controller.airRefuelMissions = controller.airRefuelMissions or {}
+    local records = RecordByToken(observation.units or {})
+    for token, mission in pairs(controller.airRefuelMissions) do
+        local record = records[token]
+        local staging = records[mission.stagingToken]
+        if not record or not staging or staging.role ~= 'air_staging' then
+            controller.airRefuelMissions[token] = nil
+        elseif record.attached == true or (tonumber(record.fuelRatio) or -1) < 0.9 then
+            reserved[token] = true
+        else
+            controller.airRefuelMissions[token] = nil
+        end
+    end
+    local staging = {}
+    local aircraft = {}
+    local airRoles = { air_scout = true, bomber = true, interceptor = true }
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'air_staging' and unit.complete == true then
+            TableInsert(staging, unit)
+        elseif airRoles[unit.role] == true and unit.complete == true
+            and not reserved[unit.token] and not controller.pending[unit.token]
+            and not controller.airRefuelMissions[unit.token]
+            and (tonumber(unit.fuelRatio) or -1) >= 0
+            and (tonumber(unit.fuelRatio) or -1) < 0.25
+        then
+            TableInsert(aircraft, unit)
+        end
+    end
+    table.sort(staging, function(a, b) return a.token < b.token end)
+    table.sort(aircraft, function(a, b)
+        local af = tonumber(a.fuelRatio) or 1
+        local bf = tonumber(b.fuelRatio) or 1
+        if af ~= bf then return af < bf end
+        return a.token < b.token
+    end)
+    local usedStaging = {}
+    for _, unit in ipairs(aircraft) do
+        local best = nil
+        local bestDistance = nil
+        for _, candidate in ipairs(staging) do
+            if not usedStaging[candidate.token] then
+                local distance = DistanceSquared(unit.position, candidate.position)
+                if not best or distance < bestDistance
+                    or (distance == bestDistance and candidate.token < best.token)
+                then
+                    best = candidate
+                    bestDistance = distance
+                end
+            end
+        end
+        if best then
+            usedStaging[best.token] = true
+            reserved[unit.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'air_refuel', actorToken = unit.token,
+                stagingToken = best.token, priority = 0,
+                reason = 'low_fuel',
+            })
+        end
+    end
+end
+
 ESCALATION.AdaptAirIntercept = function(controller, observation, intents, reserved)
     local priority = {
         interceptor = 1, bomber = 2, transport = 3, air_scout = 4,
@@ -12454,6 +12615,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         controller, observation, radarIntents, macroPlan, intents, reserved
     )
     ESCALATION.AdaptAirIntents(controller, observation, airPlan, intents, reserved)
+    ESCALATION.AdaptAirRefuel(controller, observation, intents, reserved)
     ESCALATION.AdaptAirIntercept(controller, observation, intents, reserved)
     ESCALATION.AdaptBomberIntent(
         controller, observation, intelState, bomberTarget, scoutPlan, intents, reserved
@@ -13299,6 +13461,10 @@ Controller.Execute = function(controller, intents, observation)
             elseif intent.kind == 'air_recover' then
                 issued = ESCALATION.ExecuteAirRecover(
                     controller, intent, records, usedActors, observation
+                )
+            elseif intent.kind == 'air_refuel' then
+                issued = ESCALATION.ExecuteAirRefuel(
+                    controller, intent, records, usedActors
                 )
             elseif intent.kind == 'bomber_raid' then
                 issued = ESCALATION.ExecuteBomberRaid(
