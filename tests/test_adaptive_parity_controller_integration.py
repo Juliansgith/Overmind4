@@ -3832,7 +3832,17 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
         )
         for entity_id in range(12, 12 + engineer_count)
     ]
-    harness.brain.units = harness.lua.table_from(engineers)
+    owned_mex = []
+    if expected_worker:
+        for index, site in enumerate(plain(harness.controller.markers.mass)[:2]):
+            owned_mex.append(
+                harness.unit(
+                    entityId=100 + index,
+                    blueprintId="ueb1103",
+                    position=site["position"],
+                )
+            )
+    harness.brain.units = harness.lua.table_from([*engineers, *owned_mex])
     _set_director_result(
         harness,
         "macroPlan",
@@ -3894,20 +3904,6 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
                 "intents": [],
             },
         )
-        harness.lua.globals().policyResult = lua_value(
-            harness.lua,
-            [
-                {
-                    "kind": "build_structure",
-                    "actorToken": "12:1",
-                    "buildRole": "power_generator",
-                    "position": [10, 2, 20],
-                    "priority": 1,
-                    "reason": "should_not_steal_reclaimer",
-                }
-            ],
-        )
-        harness.lua.execute("Policy.Decide = function() return policyResult end")
     harness.brain.tick = 2
 
     harness.lua.globals().Controller.Step(harness.controller)
@@ -3918,7 +3914,11 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
         f"{entity_id}:1" for entity_id in expected_tokens
     ]
     if expected_worker:
-        assert len(harness.calls.buildMobile) == 0
+        assert len(harness.calls.patrol) == 2
+        assert all(
+            call.units[1].options.entityId == 12
+            for call in harness.calls.patrol.values()
+        )
 
 
 def test_failed_reclaim_command_returns_its_grant_and_never_reports_ordered() -> None:

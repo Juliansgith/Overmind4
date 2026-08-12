@@ -11337,6 +11337,57 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         ESCALATION.AppendDirectorIntent(intents, intent)
     end
     ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
+    if type(controller.reclaimWorkerToken) == 'string'
+        and TableGetn(reclaimPlan.jobs or {}) == 0
+        and controller.reclaimPatrolAssignments[controller.reclaimWorkerToken] ~= true
+    then
+        local worker = nil
+        for _, unit in ipairs(observation.units or {}) do
+            if unit.token == controller.reclaimWorkerToken
+                and unit.role == 'engineer'
+                and unit.complete == true
+                and unit.idle == true
+            then
+                worker = unit
+                break
+            end
+        end
+        if worker then
+            local patrolSites = {}
+            for _, site in ipairs((observation.sites or {}).mass or {}) do
+                if site.complete == true
+                    and type(site.key) == 'string'
+                    and type(site.position) == 'table'
+                then
+                    TableInsert(patrolSites, site)
+                end
+            end
+            table.sort(patrolSites, function(a, b)
+                local aDistance = DistanceSquared(worker.position, a.position)
+                local bDistance = DistanceSquared(worker.position, b.position)
+                if aDistance ~= bDistance then return aDistance < bDistance end
+                return a.key < b.key
+            end)
+            local siteKeys = {}
+            local waypoints = {}
+            for _, site in ipairs(patrolSites) do
+                if TableGetn(siteKeys) < 4 then
+                    TableInsert(siteKeys, site.key)
+                    TableInsert(waypoints, CopyPosition(site.position))
+                end
+            end
+            if TableGetn(siteKeys) >= 2 then
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'reclaim_patrol',
+                    actorToken = controller.reclaimWorkerToken,
+                    siteKeys = siteKeys,
+                    waypoints = waypoints,
+                    priority = 49,
+                    reason = 'dedicated_reclaim_patrol',
+                })
+            end
+        end
+    end
     if type(controller.reclaimWorkerToken) == 'string' then
         reserved[controller.reclaimWorkerToken] = true
     end
