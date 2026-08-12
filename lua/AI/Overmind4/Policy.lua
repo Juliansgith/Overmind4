@@ -2185,7 +2185,7 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
                     plannedEngineer = true
                     plannedEngineerCount = plannedEngineerCount + 1
                 elseif not recoveryMode
-                    and (counts.scout or 0) < 1
+                    and (counts.scout or 0) + (counts.air_scout or 0) < 1
                     and CanBuild(factory, 'scout')
                 then
                     role = 'scout'

@@ -570,6 +570,34 @@ def test_nine_mex_income_sustains_four_land_factories_before_storage_overflows()
     assert all(reason == "continuous_land_production" for _, reason in orders)
 
 
+def test_completed_air_scout_prevents_rejected_land_scout_from_idling_factory() -> None:
+    snapshot = _policy_allocator_snapshot("air_scout")
+    snapshot["units"] = [
+        unit for unit in snapshot["units"] if unit["role"] != "scout"
+    ]
+    factories = [
+        unit for unit in snapshot["units"] if unit["role"] == "land_factory"
+    ]
+    factories[0]["idle"] = False
+    snapshot["pending"] = [
+        {
+            "kind": "factory_build",
+            "actorToken": factories[0]["token"],
+            "buildRole": "tank",
+            "accepted": True,
+        }
+    ]
+    snapshot["macro"].update(
+        factoryFundedCount=0,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+    )
+
+    assert _factory_orders(snapshot) == [("artillery", "continuous_land_production")]
+
+
 def test_first_hydro_is_not_starved_by_future_commitment_reservations() -> None:
     snapshot = _policy_allocator_snapshot("engineer")
     snapshot["sites"]["hydro"] = [
