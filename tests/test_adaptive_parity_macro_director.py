@@ -177,7 +177,7 @@ class TestFundedPortfolio:
             "tech",
         }
 
-    def test_live_nine_mex_state_prioritizes_engineers_before_optional_factory_growth(self) -> None:
+    def test_live_nine_mex_state_caps_the_engineer_target_below_the_artifact_count(self) -> None:
         snapshot = portfolio_snapshot()
         snapshot["economy"].update(
             {
@@ -198,14 +198,11 @@ class TestFundedPortfolio:
 
         plan = build_portfolio(snapshot)
 
-        assert plan["engineerTarget"] == 13
-        grant_ids = [grant["requestId"] for grant in plan["grants"]]
-        assert "engineers-1" in grant_ids
-        assert "factory_growth-1" not in grant_ids
+        assert plan["engineerTarget"] == 9
 
     @pytest.mark.parametrize(
         ("completed_mex", "expected_target"),
-        [(0, 4), (6, 10), (16, 20), (40, 20)],
+        [(0, 4), (6, 7), (11, 10), (16, 12), (40, 12)],
     )
     def test_completed_mex_scales_the_early_engineer_target_to_adaptive_pace(
         self, completed_mex: int, expected_target: int

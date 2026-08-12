@@ -2114,7 +2114,7 @@ local function MacroSnapshot(controller, units, economy)
         math.max(2, math.min(12,
             CountArray(fundedBuilderWork)
                 + (postCombatExpansionFunded and 1 or 0))),
-        math.min(12, 2 + completedMex)
+        math.min(12, 4 + math.ceil(completedMex / 2))
     )
     unlockingEngineerNeeded = postCombatExpansionFunded
         and completedEngineers < engineerTarget
@@ -8797,7 +8797,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         required = counts.landFactoriesT1 + counts.landFactoriesT2 < 1,
         optional = counts.landFactoriesT1 + counts.landFactoriesT2 >= 1,
     })
-    local engineerTarget = math.min(20, 4 + completedMex)
+    local engineerTarget = math.min(12, 4 + math.ceil(completedMex / 2))
     if counts.landFactoriesT1 + counts.landFactoriesT2 > 0
         and counts.engineers < engineerTarget
     then

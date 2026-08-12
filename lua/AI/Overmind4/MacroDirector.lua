@@ -258,9 +258,9 @@ MacroDirector.BuildPortfolio = function(snapshot)
         + (Number(counts.mexT2, 0) or 0)
         + (Number(counts.mexT3, 0) or 0)
     plan.engineerTarget = Clamp(math.max(
-        4 + completedMex,
+        4 + Ceil(completedMex / 2),
         2 + plan.fundedExpansionSlots
-    ), 4, 20)
+    ), 4, 12)
     plan.landFactoryTarget = Clamp(1 + Ceil(landBacklog / 3), 1, 12)
     plan.airFactoryTarget = Clamp(1 + Ceil(airBacklog / 3), 1, 4)
     plan.factoryTarget = Clamp(plan.landFactoryTarget + plan.airFactoryTarget, 1, 16)

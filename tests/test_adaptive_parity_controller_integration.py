@@ -265,9 +265,12 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
         harness.unit(entityId=entity_id, blueprintId="ueb1103")
         for entity_id in range(10, 20)
     ] + [harness.unit(entityId=20, blueprintId="ueb1202")]
+    # The live 10-minute artifact had 11 completed mex.  Ten T1 engineers plus
+    # the ACU is enough construction capacity; the old 4+mex target requested
+    # five more engineers and starved both land factories of combat production.
     engineers = [
         harness.unit(entityId=entity_id, blueprintId="uel0105")
-        for entity_id in range(100, 115)
+        for entity_id in range(100, 110)
     ]
     factories = [
         harness.unit(entityId=30, blueprintId="ueb0101"),
