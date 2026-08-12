@@ -152,6 +152,40 @@ def test_completed_airlift_history_is_cleared_when_owned_mex_is_lost() -> None:
     assert harness.controller.transportHistory[history_key] is None
 
 
+def test_airlift_loads_the_free_engineer_nearest_the_transport() -> None:
+    harness = make_harness()
+    _capture_policy_snapshots(harness)
+    _use_real_intelligence_planners(harness, transport=True)
+    site = _mass_marker("remote-airlift", [300, 3, 300])
+    harness.controller.markers.mass = lua_value(harness.lua, [site])
+    far_first = harness.unit(
+        entityId=71,
+        blueprintId="uel0105",
+        position=[600, 3, 600],
+    )
+    near_second = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[14, 3, 20],
+    )
+    transport = harness.unit(
+        entityId=81,
+        blueprintId="uea0107",
+        position=[12, 20, 20],
+        cargo=[],
+    )
+    harness.brain.units = harness.lua.table_from(
+        [far_first, near_second, transport]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    transport_input = plain(harness.calls.intelligencePlanTransport[1])
+    assert transport_input["engineer"]["token"] == "72:1"
+    assert len(harness.calls.transportLoad) == 1
+    assert harness.calls.transportLoad[1].units[1].options.entityId == 72
+
+
 @pytest.mark.parametrize(
     ("site_position", "with_transport", "expected_mode"),
     [
