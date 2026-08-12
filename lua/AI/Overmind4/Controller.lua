@@ -10733,7 +10733,11 @@ ESCALATION.AdaptAirIntents = function(controller, observation, airPlan, intents,
             reserved[actorToken] = true
             ESCALATION.AppendDirectorIntent(intents, {
                 kind = 'factory_build', actorToken = actorToken,
-                buildRole = order.buildRole, reason = 'funded_air_mix', priority = 4,
+                buildRole = order.buildRole,
+                reason = (order.buildRole == 'air_scout'
+                        or order.buildRole == 'transport')
+                    and 'opening_air_mobility' or 'funded_air_mix',
+                priority = 4,
             })
         end
     end
@@ -11111,6 +11115,11 @@ ESCALATION.DirectorAirInput = function(
         end
     elseif funded then
         -- Compatibility for narrow callers that only publish lane admission.
+        fundedSlots = 1
+    end
+    local openingMobilityNeeded = completed.air_scout < 1
+        or (completed.transport < 1 and TableGetn(macroPlan.regions or {}) > 1)
+    if fundedSlots < 1 and openingMobilityNeeded and TableGetn(factories) > 0 then
         fundedSlots = 1
     end
     return {
@@ -13000,6 +13009,7 @@ end
 ESCALATION.IntentPortfolioLane = function(intent)
     local role = intent.buildRole or intent.upgradeRole
     if intent.reason == 'opening_air_factory' then return nil end
+    if intent.reason == 'opening_air_mobility' then return nil end
     if intent.kind == 'reclaim' then return 'reclaim' end
     if intent.kind == 'escorted_expansion' then return 'mex_rebuild' end
     if intent.kind == 'transport_load' then return 'air_production' end

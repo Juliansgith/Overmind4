@@ -559,6 +559,53 @@ def test_air_grants_map_one_for_one_to_idle_factory_queues(
     )
 
 
+@pytest.mark.parametrize(
+    ("completed_scout", "expected_blueprint"),
+    ((False, "uea0101"), (True, "uea0107")),
+)
+def test_opening_scout_and_transport_do_not_wait_for_optional_air_grants(
+    completed_scout: bool,
+    expected_blueprint: str,
+) -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute(
+        "local RealPlanAir = Intelligence.PlanAir; "
+        "IntelligenceStub.PlanAir = function(snapshot) "
+        "return RealPlanAir(snapshot) end; "
+        "Policy.Decide = function() return {} end"
+    )
+    air_factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0102",
+        canBuild={"uea0101": True, "uea0107": True},
+    )
+    units = [air_factory]
+    if completed_scout:
+        units.append(harness.unit(entityId=30, blueprintId="uea0101"))
+    harness.brain.units = harness.lua.table_from(units)
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"air_production": {"admitted": False}},
+            "grants": [],
+            "regions": [
+                {"key": "home", "position": [10, 2, 10]},
+                {"key": "front", "position": [300, 2, 300]},
+            ],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].blueprintId == expected_blueprint
+
+
 def test_ten_km_expansion_beyond_safe_local_radius_requires_an_escort() -> None:
     harness = make_harness()
     harness.lua.execute("ScenarioInfo.size = { 512, 512 }")
