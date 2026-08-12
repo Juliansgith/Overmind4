@@ -9034,7 +9034,7 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
 end
 
 ESCALATION.DirectorExpansionInput = function(
-    controller, observation, macroPlan, strategicBuilderToken
+    controller, observation, macroPlan, strategicBuilderToken, excludedEngineerTokens
 )
     local regions = macroPlan.regions or {}
     local regionByMember = {}
@@ -9058,7 +9058,9 @@ ESCALATION.DirectorExpansionInput = function(
     local engineers = {}
     local escorts = {}
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-        if unit.role == 'engineer' and unit.token ~= strategicBuilderToken then
+        if unit.role == 'engineer' and unit.token ~= strategicBuilderToken
+            and not (excludedEngineerTokens or {})[unit.token]
+        then
             TableInsert(engineers, unit)
         end
         if COMBAT_ROLES[unit.role] then TableInsert(escorts, unit) end
@@ -9088,6 +9090,8 @@ ESCALATION.DirectorReclaimInput = function(controller, observation, macroPlan)
             mass = tonumber(candidate.mass) or 0,
             visible = true,
             live = true,
+            observerToken = candidate.observerToken,
+            visionRadius = tonumber(candidate.visionRadius) or RECLAIM_QUERY_RADIUS,
         })
     end
     local engineers = {}
@@ -11102,9 +11106,20 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     local strategicBuilderToken = ESCALATION.StrategicHydroBuilderToken(
         controller, observation, macroPlan
     )
+    local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
+        ESCALATION.DirectorReclaimInput(controller, observation, macroPlan)
+    ) or { jobs = {} }
+    reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
+    local reclaimActorTokens = {}
+    for _, job in ipairs(reclaimPlan.jobs or {}) do
+        if type(job.actorToken) == 'string' then
+            reclaimActorTokens[job.actorToken] = true
+        end
+    end
     local expansionPlan = ESCALATION.directors.macro.PlanExpansion(
         ESCALATION.DirectorExpansionInput(
-            controller, observation, macroPlan, strategicBuilderToken
+            controller, observation, macroPlan, strategicBuilderToken,
+            reclaimActorTokens
         )
     ) or { jobs = {}, denials = {} }
     expansionPlan = ESCALATION.DeepCopy(expansionPlan)
@@ -11168,10 +11183,6 @@ ESCALATION.UpdateDirectors = function(controller, observation)
             })
         end
     end
-    local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
-        ESCALATION.DirectorReclaimInput(controller, observation, macroPlan)
-    ) or { jobs = {} }
-    reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
     local techPlan = ESCALATION.directors.macro.PlanTech(
         ESCALATION.DirectorTechInput(controller, observation, macroPlan)
     ) or {}
@@ -11278,6 +11289,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     for _, intent in ipairs(macroPlan.intents or {}) do
         ESCALATION.AppendDirectorIntent(intents, intent)
     end
+    ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
     ESCALATION.RecordExpansionDenials(controller, expansionPlan.denials)
     ESCALATION.AdaptExpansionIntents(
         controller, ledgerExpansionPlan, forcePlan, intents, reserved
@@ -11288,7 +11300,6 @@ ESCALATION.UpdateDirectors = function(controller, observation)
             intents, reserved
         )
     end
-    ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
     ESCALATION.AdaptTechIntents(controller, observation, techPlan, intents, reserved)
     ESCALATION.AdaptScoutIntent(controller, observation, scoutPlan, intents, reserved)
     ESCALATION.AdaptRadarIntents(

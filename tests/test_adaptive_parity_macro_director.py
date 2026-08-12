@@ -1805,6 +1805,40 @@ class TestRegionalMacro:
                 candidate["visible"] = False
         assert len(invoke(MODULE, GLOBAL, "PlanReclaim", revalidated)["jobs"]) == 0
 
+    def test_reclaim_skips_high_value_wreck_outside_the_engineers_live_vision(self) -> None:
+        snapshot = {
+            "regions": [
+                {"key": "home", "state": "secured", "position": [0, 0, 0], "radius": 80},
+            ],
+            "engineers": [
+                {"token": "eng", "position": [0, 0, 0], "available": True},
+            ],
+            "candidates": [
+                {
+                    "key": "far-high",
+                    "position": [70, 0, 0],
+                    "mass": 500,
+                    "visible": True,
+                    "live": True,
+                    "visionRadius": 32,
+                },
+                {
+                    "key": "near-low",
+                    "position": [10, 0, 0],
+                    "mass": 40,
+                    "visible": True,
+                    "live": True,
+                    "visionRadius": 32,
+                },
+            ],
+        }
+
+        jobs = invoke(MODULE, GLOBAL, "PlanReclaim", snapshot)["jobs"]
+
+        assert [(job["actorToken"], job["targetKey"]) for job in jobs] == [
+            ("eng", "near-low"),
+        ]
+
     def test_remote_expansion_backlog_does_not_consume_each_regions_reclaim_lane(self) -> None:
         snapshot = portfolio_snapshot()
         snapshot["opportunities"].update(

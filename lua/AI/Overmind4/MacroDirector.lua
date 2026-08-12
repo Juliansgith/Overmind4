@@ -1080,43 +1080,47 @@ MacroDirector.PlanReclaim = function(snapshot)
     for _, region in ipairs(regions) do
         local radius = Number(region.radius, 80) or 80
         local selectedCandidate = nil
+        local selectedEngineer = nil
         for _, candidate in ipairs(candidates) do
             if not usedCandidates[candidate.key]
                 and DistanceSquared(candidate.position, region.position) <= radius * radius
             then
-                selectedCandidate = candidate
-                break
-            end
-        end
-        if selectedCandidate then
-            local selectedEngineer = nil
-            local selectedDistance = nil
-            for _, engineer in ipairs(engineers) do
-                if not usedEngineers[engineer.token]
-                    and DistanceSquared(engineer.position, region.position) <= radius * radius
-                then
-                    local distance = DistanceSquared(engineer.position, selectedCandidate.position)
-                    if selectedDistance == nil or distance < selectedDistance
-                        or (distance == selectedDistance and engineer.token < selectedEngineer.token)
+                local visionRadius = math.min(
+                    radius,
+                    Number(candidate.visionRadius, 32) or 32
+                )
+                local selectedDistance = nil
+                for _, engineer in ipairs(engineers) do
+                    local distance = DistanceSquared(engineer.position, candidate.position)
+                    if not usedEngineers[engineer.token]
+                        and DistanceSquared(engineer.position, region.position) <= radius * radius
+                        and distance <= visionRadius * visionRadius
+                        and (selectedDistance == nil or distance < selectedDistance
+                            or (distance == selectedDistance
+                                and engineer.token < selectedEngineer.token))
                     then
                         selectedEngineer = engineer
                         selectedDistance = distance
                     end
                 end
+                if selectedEngineer then
+                    selectedCandidate = candidate
+                    break
+                end
             end
-            if selectedEngineer then
-                table.insert(jobs, {
-                    id = 'reclaim:' .. tostring(selectedCandidate.key),
-                    kind = 'reclaim',
-                    actorToken = selectedEngineer.token,
-                    targetKey = selectedCandidate.key,
-                    regionKey = region.key,
-                    position = Copy(selectedCandidate.position),
-                    requiresLiveVisionRevalidation = true,
-                })
-                usedEngineers[selectedEngineer.token] = true
-                usedCandidates[selectedCandidate.key] = true
-            end
+        end
+        if selectedCandidate and selectedEngineer then
+            table.insert(jobs, {
+                id = 'reclaim:' .. tostring(selectedCandidate.key),
+                kind = 'reclaim',
+                actorToken = selectedEngineer.token,
+                targetKey = selectedCandidate.key,
+                regionKey = region.key,
+                position = Copy(selectedCandidate.position),
+                requiresLiveVisionRevalidation = true,
+            })
+            usedEngineers[selectedEngineer.token] = true
+            usedCandidates[selectedCandidate.key] = true
         end
     end
     return { jobs = jobs }

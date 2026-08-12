@@ -3813,6 +3813,55 @@ def test_reclaim_causal_operation_keeps_stable_id_until_observed_completion() ->
     _assert_operation_stream_clean(harness)
 
 
+def test_reclaim_actor_is_reserved_before_expansion_planning() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    harness.controller.markers.hydro = harness.lua.table_from([])
+    engineers = [
+        harness.unit(entityId=12, blueprintId="uel0105", position=[10, 2, 20]),
+        harness.unit(entityId=13, blueprintId="uel0105", position=[12, 2, 20]),
+    ]
+    harness.brain.units = harness.lua.table_from(engineers)
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 2,
+            "regions": [
+                {
+                    "key": "home",
+                    "state": "secured",
+                    "position": [10, 2, 20],
+                    "radius": 80,
+                }
+            ],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "reclaimPlan",
+        {
+            "jobs": [
+                {
+                    "id": "reclaim:prop:501",
+                    "actorToken": "12:1",
+                    "targetKey": "prop:501",
+                    "regionKey": "home",
+                    "position": [13, 2, 20],
+                }
+            ]
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    expansion_input = plain(harness.calls.macroPlanExpansion[1])
+    assert [unit["token"] for unit in expansion_input["engineers"]] == ["13:1"]
+
+
 def test_failed_reclaim_command_returns_its_grant_and_never_reports_ordered() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
