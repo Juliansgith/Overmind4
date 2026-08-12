@@ -6235,6 +6235,7 @@ ESCALATION.RouteFinalizeRelease = function(controller, campaign, route, reason)
     if retireCampaign then
         controller.fieldCampaign = nil
         controller.fieldCampaignEnabled = false
+        controller.strategicAssaultEnabled = true
         Emit(controller, 'campaign_retired', {
             reason = 'bulk_route_failed',
             route = route.routeKey or 'none',
@@ -7994,6 +7995,7 @@ Controller.Create = function(brain)
         lastReclaimQueryTick = -RECLAIM_QUERY_INTERVAL_TICKS,
         lastErrorTick = -REORDER_COOLDOWN_TICKS,
         crossMapOffenseEnabled = false,
+        strategicAssaultEnabled = false,
     }
     brain.Overmind4ForcePlan = {
         epoch = 0,
@@ -10535,12 +10537,22 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
         end
     end
     table.sort(fieldTokens)
+    local strategicAssault = controller.fieldCampaign == nil
+        and controller.strategicAssaultEnabled == true
+        and controller.targetPath == true
+        and IsCampaignPosition(controller.targetPosition)
     if controller.fieldCampaign == nil
-        and targetRegion and TableGetn(fieldTokens) > 0
+        and (strategicAssault or targetRegion)
+        and TableGetn(fieldTokens) > 0
     then
         ESCALATION.AppendDirectorIntent(intents, {
-            kind = 'regional_field', regionKey = targetRegion.key,
-            actorTokens = fieldTokens, position = CopyPosition(targetRegion.position),
+            kind = strategicAssault and 'regional_assault' or 'regional_field',
+            regionKey = strategicAssault
+                and ('target:' .. tostring(controller.targetName or 'enemy'))
+                or targetRegion.key,
+            actorTokens = fieldTokens,
+            position = CopyPosition(strategicAssault
+                and controller.targetPosition or targetRegion.position),
             priority = 6,
         })
     end
@@ -11874,6 +11886,10 @@ Controller.Execute = function(controller, intents, observation)
                     controller, intent, records, usedActors, 'response'
                 )
             elseif intent.kind == 'regional_field' then
+                issued = ESCALATION.ExecuteForceMove(
+                    controller, intent, records, usedActors, 'field', true
+                )
+            elseif intent.kind == 'regional_assault' then
                 issued = ESCALATION.ExecuteForceMove(
                     controller, intent, records, usedActors, 'field', true
                 )
