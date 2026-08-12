@@ -11337,6 +11337,9 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         ESCALATION.AppendDirectorIntent(intents, intent)
     end
     ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
+    if type(controller.reclaimWorkerToken) == 'string' then
+        reserved[controller.reclaimWorkerToken] = true
+    end
     ESCALATION.RecordExpansionDenials(controller, expansionPlan.denials)
     ESCALATION.AdaptExpansionIntents(
         controller, ledgerExpansionPlan, forcePlan, intents, reserved
@@ -12151,6 +12154,9 @@ Controller.Step = function(controller)
     local policyIntents = Policy.Decide(observation) or {}
     local intents = {}
     local directorClaims = {}
+    if type(controller.reclaimWorkerToken) == 'string' then
+        directorClaims[controller.reclaimWorkerToken] = true
+    end
     for _, job in pairs((controller.jobLedger or {}).jobs or {}) do
         if type(job.actorToken) == 'string'
             and job.phase ~= 'completed' and job.phase ~= 'retryable'

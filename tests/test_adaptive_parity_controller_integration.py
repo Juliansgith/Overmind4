@@ -3863,6 +3863,8 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
             }
         )
     _set_director_result(harness, "reclaimPlan", {"jobs": reclaim_jobs})
+    _set_director_result(harness, "expansionPlan", {"jobs": [], "denials": []})
+    _set_director_result(harness, "jobLedger", {"epoch": 1, "jobs": {}})
 
     harness.lua.globals().Controller.Step(harness.controller)
 
@@ -3874,6 +3876,32 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
     assert harness.controller.reclaimWorkerToken == expected_worker
     harness.controller.pending["12:1"] = None
     _set_director_result(harness, "reclaimPlan", {"jobs": []})
+    if expected_worker:
+        _set_director_result(
+            harness,
+            "macroPlan",
+            {
+                "valid": False,
+                "epoch": 0,
+                "fundedExpansionSlots": 2,
+                "regions": [],
+                "intents": [],
+            },
+        )
+        harness.lua.globals().policyResult = lua_value(
+            harness.lua,
+            [
+                {
+                    "kind": "build_structure",
+                    "actorToken": "12:1",
+                    "buildRole": "power_generator",
+                    "position": [10, 2, 20],
+                    "priority": 1,
+                    "reason": "should_not_steal_reclaimer",
+                }
+            ],
+        )
+        harness.lua.execute("Policy.Decide = function() return policyResult end")
     harness.brain.tick = 2
 
     harness.lua.globals().Controller.Step(harness.controller)
@@ -3883,6 +3911,8 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
     assert [unit["token"] for unit in expansion_input["engineers"]] == [
         f"{entity_id}:1" for entity_id in expected_tokens
     ]
+    if expected_worker:
+        assert len(harness.calls.buildMobile) == 0
 
 
 def test_failed_reclaim_command_returns_its_grant_and_never_reports_ordered() -> None:
