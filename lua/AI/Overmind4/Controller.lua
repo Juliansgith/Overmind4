@@ -10514,9 +10514,15 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         and factoryPowerReady
     local openingFirstAir = currentLand > 0 and currentAir < 1
         and currentPower >= 2 and currentMex >= 2
+    local landFactoryTarget = tonumber(macroPlan.landFactoryTarget) or currentLand
+    local airFactoryTarget = tonumber(macroPlan.airFactoryTarget) or currentAir
+    local airFactoryPriority = currentAir < airFactoryTarget
+        and currentAir * math.max(1, landFactoryTarget)
+            < currentLand * math.max(1, airFactoryTarget)
     if factoryGrowthAdmitted then
         if not openingFirstAir
-            and currentLand < (tonumber(macroPlan.landFactoryTarget) or currentLand)
+            and not airFactoryPriority
+            and currentLand < landFactoryTarget
         then
             local actor = ESCALATION.AvailableDirectorActor(
                 controller, observation, 'engineer', 'land_factory', reserved
@@ -10533,7 +10539,7 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         end
     end
     if factoryGrowthAdmitted or openingFirstAir then
-        if currentAir < (tonumber(macroPlan.airFactoryTarget) or currentAir) then
+        if currentAir < airFactoryTarget then
             local actor = openingFirstAir
                 and ESCALATION.AvailableDirectorActor(
                     controller, observation, 'acu', 'air_factory', reserved

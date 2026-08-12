@@ -713,6 +713,31 @@ def test_eight_factories_continue_adjacency_power_beyond_the_old_ten_cap() -> No
     assert power[0]["buildRole"] == "power_generator"
 
 
+def test_acu_builds_second_factory_before_optional_third_and_fourth_power() -> None:
+    snapshot = _policy_allocator_snapshot()
+    acu = next(unit for unit in snapshot["units"] if unit["role"] == "acu")
+    acu["canBuild"].update(land_factory=True, power_generator=True)
+    first_factory = next(
+        unit for unit in snapshot["units"] if unit["role"] == "land_factory"
+    )
+    snapshot["units"] = [
+        unit
+        for unit in snapshot["units"]
+        if unit["role"] != "land_factory" or unit is first_factory
+    ]
+    snapshot["macro"] = None
+
+    acu_builds = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("actorToken") == acu["token"]
+    ]
+
+    assert [(intent["buildRole"], intent["reason"]) for intent in acu_builds] == [
+        ("land_factory", "opening_second_factory")
+    ]
+
+
 def test_idle_acu_fills_factory_power_deficit_before_more_factory_growth() -> None:
     snapshot = _policy_allocator_snapshot(
         *("land_factory" for _ in range(2)),

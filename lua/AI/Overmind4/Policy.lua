@@ -787,6 +787,14 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
         return nil
     end
 
+    -- Convert the completed four-mex opening into a second production lane
+    -- before adding optional adjacency power.  The previous ordering left a
+    -- large mass bank waiting on two more generators and delayed the second
+    -- factory by roughly two minutes in the live Ian's Cross canary.
+    if (counts.land_factory or 0) < 2 and CanBuild(acu, 'land_factory') then
+        return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 2, virtualPlacements), 12, 'opening_second_factory')
+    end
+
     if CountClaimedLocalSites(massSites, virtualReserved) >= 4
         and powerCount < 4 and CanBuild(acu, 'power_generator')
     then
@@ -804,9 +812,6 @@ local function AcuOpening(snapshot, units, counts, virtualReserved, virtualPlace
         end
     end
 
-    if (counts.land_factory or 0) < 2 and CanBuild(acu, 'land_factory') then
-        return BuildAtPlacement(acu, 'land_factory', ReservePlacement(snapshot, 'land_factory', 2, virtualPlacements), 13, 'opening_second_factory')
-    end
     if (counts.air_factory or 0) < 1 and CanBuild(acu, 'air_factory') then
         return BuildAtPlacement(
             acu,
