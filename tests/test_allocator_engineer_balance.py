@@ -717,7 +717,7 @@ def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy(
     ]
 
 
-def test_full_bank_acu_builds_target_factory_while_field_engineers_are_busy() -> None:
+def test_full_bank_target_factory_prefers_acu_over_available_field_engineer() -> None:
     snapshot = _policy_allocator_snapshot(
         "air_factory",
         *(["power_generator"] * 7),
@@ -725,9 +725,7 @@ def test_full_bank_acu_builds_target_factory_while_field_engineers_are_busy() ->
         "mass_extractor",
     )
     for unit in snapshot["units"]:
-        if unit["role"] == "engineer":
-            unit["idle"] = False
-        elif unit["role"] == "acu":
+        if unit["role"] == "acu":
             unit.update(buildRate=10, idle=False, reclaimPatrolAssigned=True)
     snapshot["macro"].update(
         factoryTarget=4,

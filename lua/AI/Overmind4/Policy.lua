@@ -1278,18 +1278,21 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and sustainedFactory
         and not massStalled
     then
-        local assignedFactory = AssignPlacement(
-            'land_factory',
-            placementIndex.land_factory,
-            21,
-            macro and 'production_saturation' or 'third_factory'
-        )
-        if not assignedFactory and macro then
+        local assignedFactory = false
+        if macro then
             assignedFactory = AssignAcuPlacement(
                 'land_factory',
                 placementIndex.land_factory,
                 21,
                 'production_saturation'
+            )
+        end
+        if not assignedFactory then
+            assignedFactory = AssignPlacement(
+                'land_factory',
+                placementIndex.land_factory,
+                21,
+                macro and 'production_saturation' or 'third_factory'
             )
         end
         if assignedFactory then
