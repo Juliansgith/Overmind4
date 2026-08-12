@@ -664,13 +664,23 @@ def test_opening_air_power_is_not_starved_by_future_commitment_reservations() ->
 
 
 @pytest.mark.parametrize(("under_contact", "expected"), [(False, 1), (True, 0)])
-def test_one_home_engineer_patrols_completed_local_mexes_for_reclaim(
+def test_idle_acu_patrols_completed_local_mexes_before_home_engineers(
     under_contact: bool,
     expected: int,
 ) -> None:
     snapshot = _policy_allocator_snapshot("engineer", "engineer", "engineer")
     for site in snapshot["sites"]["mass"]:
         site["complete"] = True
+    pgen = next(unit for unit in snapshot["units"] if unit["role"] == "power_generator")
+    for token in ("90:1", "91:1"):
+        extra = copy.deepcopy(pgen)
+        extra["token"] = token
+        snapshot["units"].append(extra)
+    air_factory = copy.deepcopy(
+        next(unit for unit in snapshot["units"] if unit["role"] == "land_factory")
+    )
+    air_factory.update(token="92:1", role="air_factory")
+    snapshot["units"].append(air_factory)
     if under_contact:
         snapshot["enemyContact"] = {"position": [12, 2, 12], "immediate": True}
 
@@ -686,7 +696,7 @@ def test_one_home_engineer_patrols_completed_local_mexes_for_reclaim(
             for unit in snapshot["units"]
             if unit["token"] == patrols[0]["actorToken"]
         )
-        assert actor["role"] == "engineer"
+        assert actor["role"] == "acu"
 
 
 @pytest.mark.parametrize(

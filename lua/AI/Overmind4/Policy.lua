@@ -1297,7 +1297,17 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         if TableGetn(siteKeys) >= 2 then
             local best = nil
             local bestDistance = nil
-            if TableGetn(engineers) >= 4 then
+            if reclaimPatrolAcu then
+                local claimed = false
+                for _, existing in ipairs(intents) do
+                    if existing.actorToken == reclaimPatrolAcu.token then
+                        claimed = true
+                        break
+                    end
+                end
+                if not claimed then best = reclaimPatrolAcu end
+            end
+            if not best and TableGetn(engineers) >= 4 then
                 for _, engineer in ipairs(engineers) do
                     if not assignedEngineers[engineer.token]
                         and engineer.campaignEngineer ~= true
@@ -1317,16 +1327,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                         end
                     end
                 end
-            end
-            if not best and reclaimPatrolAcu then
-                local claimed = false
-                for _, existing in ipairs(intents) do
-                    if existing.actorToken == reclaimPatrolAcu.token then
-                        claimed = true
-                        break
-                    end
-                end
-                if not claimed then best = reclaimPatrolAcu end
             end
             if best then
                 assignedEngineers[best.token] = true
