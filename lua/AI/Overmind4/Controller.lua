@@ -12303,6 +12303,8 @@ Controller.Step = function(controller)
         end
         local firstIntent = intents[1] or {}
         local placements = observation.placements or {}
+        local directorMacro = observation.macroPlan or {}
+        local directorGrowth = (directorMacro.lanes or {}).factory_growth or {}
         local sites = observation.sites or {}
         local acuPosition = acu and acu.position or {}
         local economy = observation.economy or {}
@@ -12320,6 +12322,12 @@ Controller.Step = function(controller)
                 and acu.canBuild.land_factory == true
                 or false,
             land_factory_placements = TableGetn(placements.land_factory or {}),
+            air_factory_placements = TableGetn(placements.air_factory or {}),
+            director_land_factory_target = tonumber(
+                directorMacro.landFactoryTarget) or 0,
+            director_air_factory_target = tonumber(
+                directorMacro.airFactoryTarget) or 0,
+            director_factory_growth_admitted = directorGrowth.admitted == true,
             mass_markers = TableGetn(sites.mass or {}),
             target_path = observation.targetPath == true,
             policy_intents = TableGetn(intents),
