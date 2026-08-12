@@ -1375,8 +1375,20 @@ local function RefreshReclaim(controller, ownRecords, massSites)
     for _, actorToken in ipairs(SortedKeys(activeByActor)) do
         AddQueryRecord(recordsByToken[actorToken])
     end
-    for _, record in ipairs(sortedRecords) do
-        AddQueryRecord(record)
+    local recordCount = TableGetn(sortedRecords)
+    if recordCount > 0 then
+        local cursor = math.floor(tonumber(controller.reclaimQueryCursor) or 1)
+        cursor = math.mod(math.max(1, cursor) - 1, recordCount) + 1
+        local visited = 0
+        while visited < recordCount
+            and TableGetn(queryRecords) < MAX_RECLAIM_QUERY_ENGINEERS
+        do
+            local index = math.mod(cursor - 1 + visited, recordCount) + 1
+            AddQueryRecord(sortedRecords[index])
+            visited = visited + 1
+        end
+        controller.reclaimQueryCursor =
+            math.mod(cursor - 1 + visited, recordCount) + 1
     end
 
     local activeRefs = {}
@@ -7992,6 +8004,7 @@ Controller.Create = function(brain)
         lastReinforcementTick = -10000,
         lastSnapshotTick = -SNAPSHOT_INTERVAL_TICKS,
         lastReclaimQueryTick = -RECLAIM_QUERY_INTERVAL_TICKS,
+        reclaimQueryCursor = 1,
         lastErrorTick = -REORDER_COOLDOWN_TICKS,
         crossMapOffenseEnabled = false,
     }

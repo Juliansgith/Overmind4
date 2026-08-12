@@ -1811,6 +1811,36 @@ def test_reclaim_query_uses_the_full_live_t1_engineer_vision_radius() -> None:
     assert plain(harness.calls.reclaimQuery)[0] == [-8, 2, 28, 38]
 
 
+def test_reclaim_discovery_rotates_past_first_four_engineers() -> None:
+    harness = make_harness()
+    engineers = [
+        harness.unit(
+            entityId=index,
+            blueprintId="uel0105",
+            position=[10, 2, 20] if index < 5 else [40, 2, 20],
+            blueprintIntel={"VisionRadius": 10},
+        )
+        for index in range(1, 6)
+    ]
+    visible_only_to_fifth = make_reclaim_prop(
+        harness,
+        entityId=105,
+        position=[48, 2, 20],
+        mass=80,
+    )
+    harness.brain.units = harness.lua.table_from(engineers)
+    harness.brain.reclaimables = harness.lua.table_from([visible_only_to_fifth])
+
+    assert not plain(harness.observe()).get("reclaim", [])
+    assert len(harness.calls.reclaimQuery) == 4
+
+    harness.brain.tick = 300
+    candidates = plain(harness.observe()).get("reclaim", [])
+
+    assert [candidate["key"] for candidate in candidates] == ["prop:105"]
+    assert len(harness.calls.reclaimQuery) == 8
+
+
 def test_reclaim_candidates_ignore_units_stale_malformed_noise_and_sort_deterministically() -> None:
     harness = make_harness()
     engineer = harness.unit(
