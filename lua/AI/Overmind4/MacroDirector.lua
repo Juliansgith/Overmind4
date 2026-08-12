@@ -1471,7 +1471,7 @@ MacroDirector.PlanTech = function(snapshot)
             t2MexCount = t2MexCount + 1
         end
     end
-    if not snapshot.t2HqComplete and healthy and funded then
+    if not snapshot.t2HqComplete and t2MexCount >= 2 and healthy and funded then
         if Count(factories) >= 2 and Count(idleFactories) >= 1 then
             plan.hqAction = 'start_t2'
             plan.hqSourceToken = idleFactories[1].token
@@ -1517,8 +1517,8 @@ MacroDirector.PlanTech = function(snapshot)
     local supportUpgradeNeeded = snapshot.t2HqComplete == true
         and supportFactoryCount < 1
         and Count(factories) >= 2
-    local mexUpgradesMayStart = snapshot.t2HqComplete == true
-        and not supportUpgradeNeeded
+    local mexUpgradesMayStart = t2MexCount < 2
+        or (snapshot.t2HqComplete == true and not supportUpgradeNeeded)
     if healthy and mexFunded and mexUpgradesMayStart
         and activeMexUpgrades < mexUpgradeLimit
     then
