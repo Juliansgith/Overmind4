@@ -124,6 +124,56 @@ def test_real_portfolio_funds_opening_factory_before_future_factory_queues() -> 
     assert harness.calls.buildMobile[1].blueprintId == "ueb0101"
 
 
+def test_banked_post_mex_tech_commits_the_first_t2_land_hq_during_a_stall() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute(
+        "local RealBuildPortfolio = MacroDirector.BuildPortfolio; "
+        "MacroDirectorStub.BuildPortfolio = function(snapshot) "
+        "table.insert(calls.macroBuildPortfolio, snapshot); "
+        "return RealBuildPortfolio(snapshot) end"
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    mexes = [
+        harness.unit(entityId=entity_id, blueprintId="ueb1103")
+        for entity_id in range(10, 18)
+    ] + [
+        harness.unit(entityId=18, blueprintId="ueb1202"),
+        harness.unit(entityId=19, blueprintId="ueb1202"),
+    ]
+    factories = [
+        harness.unit(
+            entityId=entity_id,
+            blueprintId="ueb0101",
+            canBuild={"ueb0201": True},
+        )
+        for entity_id in (20, 21)
+    ]
+    harness.brain.units = harness.lua.table_from([*mexes, *factories])
+    harness.brain.massIncome = 2.9
+    harness.brain.massRequested = 3.1
+    harness.brain.massUsage = 2.9
+    harness.brain.massTrend = -0.2
+    harness.brain.massStored = 5000
+    harness.brain.massStoredRatio = 1
+    harness.brain.energyIncome = 29
+    harness.brain.energyRequested = 31
+    harness.brain.energyUsage = 29
+    harness.brain.energyTrend = -2
+    harness.brain.energyStored = 50000
+    harness.brain.energyStoredRatio = 1
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    macro_input = plain(harness.calls.macroBuildPortfolio[1])
+    tech_request = next(
+        request for request in macro_input["requests"] if request["lane"] == "tech"
+    )
+    assert tech_request["required"] is True
+    assert tech_request.get("optional") is not True
+    assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
+
+
 def test_funded_mex_expansion_does_not_claim_the_missing_hydro_builder() -> None:
     harness = make_harness()
     _use_real_macro_expansion_and_job_ledger(harness)

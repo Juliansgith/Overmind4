@@ -8795,7 +8795,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1.017391, energyDrain = 7.913043,
                 massCost = 1170, energyCost = 9100, durationTicks = 1150,
-                allowHybrid = true, optional = true })
+                allowHybrid = true, required = true })
         end
     end
     local commitments = {}
