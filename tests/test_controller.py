@@ -1303,6 +1303,31 @@ def test_incomplete_free_placement_foundation_retains_matching_operation() -> No
     assert harness.controller.pending["2:1"] is not None
 
 
+def test_adjacent_completed_power_generator_does_not_complete_new_placement() -> None:
+    harness = make_harness()
+    engineer = harness.unit(entityId=1, blueprintId="uel0105", canBuild={"ueb1101": True})
+    completed_neighbor = harness.unit(
+        entityId=2,
+        blueprintId="ueb1101",
+        position=[32, 0, 40],
+    )
+    harness.brain.units = harness.lua.table_from([engineer, completed_neighbor])
+    execute_intents(
+        harness,
+        [{
+            "kind": "build_structure",
+            "actorToken": "1:1",
+            "buildRole": "power_generator",
+            "position": [30, 0, 40],
+        }],
+    )
+    harness.brain.tick = 1
+
+    harness.lua.globals().Controller.Reconcile(harness.controller, harness.observe())
+
+    assert harness.controller.pending["1:1"] is not None
+
+
 def test_same_role_factory_completion_releases_only_idle_accepted_factory() -> None:
     harness = make_harness()
     first_factory = harness.unit(entityId=1, blueprintId="ueb0101", canBuild={"uel0201": True})
