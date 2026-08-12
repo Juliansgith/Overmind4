@@ -6286,3 +6286,90 @@ def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> N
     assert {
         tuple(plain(call.position)) for call in harness.calls.aggressive.values()
     } == {(100, 2, 100), (200, 2, 200), (300, 2, 300)}
+
+
+def test_mature_field_force_continuously_pressures_public_enemy_spawn() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    tanks = [
+        harness.unit(entityId=100 + index, blueprintId="uel0201")
+        for index in range(24)
+    ]
+    tokens = [f"{100 + index}:1" for index in range(24)]
+    harness.brain.units = harness.lua.table_from(tanks)
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {},
+            "regions": [
+                {"key": "secured", "state": "secured", "position": [60, 2, 60]}
+            ],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "forcePlan",
+        {
+            "epoch": 1,
+            "assignments": {"field": tokens},
+            "ownershipByToken": {token: "field" for token in tokens},
+            "regionAssignments": {},
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 1
+    assert plain(harness.calls.aggressive[1].position) == plain(
+        harness.controller.targetPosition
+    )
+
+
+def test_visible_ground_cluster_dispatches_regional_response_force() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    responders = [
+        harness.unit(entityId=200 + index, blueprintId="uel0201")
+        for index in range(8)
+    ]
+    response_tokens = [f"{200 + index}:1" for index in range(8)]
+    enemies = [
+        harness.unit(
+            entityId=300 + index,
+            blueprintId="uel0201",
+            blueprintCategories=["MOBILE", "LAND", "DIRECTFIRE", "TECH1"],
+            army=2,
+            position=[200, 2, 200],
+            seenNow=True,
+            onRadar=True,
+        )
+        for index in range(4)
+    ]
+    harness.brain.units = harness.lua.table_from(responders)
+    harness.brain.enemies = harness.lua.table_from(enemies)
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {"valid": True, "epoch": 1, "lanes": {}, "regions": [], "intents": []},
+    )
+    _set_director_result(
+        harness,
+        "forcePlan",
+        {
+            "epoch": 1,
+            "assignments": {"response": response_tokens},
+            "ownershipByToken": {token: "response" for token in response_tokens},
+            "regionAssignments": {},
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 1
+    assert plain(harness.calls.aggressive[1].position) == [200, 2, 200]

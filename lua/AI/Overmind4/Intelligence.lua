@@ -130,7 +130,6 @@ Intelligence.PlanScoutRoute = function(snapshot)
         table.insert(objectives, ranked[index].objective)
         index = index + 1
     end
-    SortByKey(objectives, 'key')
     local result = {
         objectiveKeys = {}, waypoints = {}, coverageAgeTicks = {},
         nextObjectiveKey = nextObjectiveKey,

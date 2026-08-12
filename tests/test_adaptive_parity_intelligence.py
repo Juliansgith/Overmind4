@@ -138,7 +138,8 @@ class TestFairIntel:
 
         assert plan["nextObjectiveKey"] == "spawn:z-enemy"
         assert len(plan["objectiveKeys"]) == 8
-        assert "spawn:z-enemy" in plan["objectiveKeys"]
+        assert plan["objectiveKeys"][0] == "spawn:z-enemy"
+        assert plan["waypoints"][0] == [500, 0, 500]
 
     def test_640_public_objectives_are_permutation_stable_and_bounded_to_32_waypoints(self) -> None:
         objectives = [

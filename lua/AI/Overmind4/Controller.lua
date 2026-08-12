@@ -11054,6 +11054,27 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
         targetIndex = targetIndex + 1
         if targetIndex > TableGetn(raiderTargets) then targetIndex = 1 end
     end
+    local responseTarget = (forcePlan or {}).responseTarget
+    if not (forcePlan or {}).responseIntent
+        and responseTarget and CopyPosition(responseTarget.position)
+    then
+        local responseTokens = {}
+        for _, token in ipairs(
+            ((forcePlan or {}).assignments or {}).response or {}
+        ) do
+            if not reserved[token] and not activeEscorts[token] then
+                TableInsert(responseTokens, token)
+            end
+        end
+        table.sort(responseTokens)
+        if TableGetn(responseTokens) > 0 then
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'regional_response', regionKey = responseTarget.key,
+                actorTokens = responseTokens,
+                position = CopyPosition(responseTarget.position), priority = 1,
+            })
+        end
+    end
     local targetRegion = nil
     local targetDistance = nil
     local targetRank = nil
@@ -11091,6 +11112,14 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
         end
     end
     table.sort(fieldTokens)
+    if TableGetn(fieldTokens) >= 24 and controller.targetPath == true
+        and CopyPosition(controller.targetPosition)
+    then
+        targetRegion = {
+            key = 'enemy_spawn',
+            position = CopyPosition(controller.targetPosition),
+        }
+    end
     if controller.fieldCampaign == nil
         and targetRegion and TableGetn(fieldTokens) > 0
     then
@@ -12059,6 +12088,46 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     ) or forcePlan
     forcePlan = ESCALATION.DeepCopy(forcePlan)
     forcePlan.regions = ESCALATION.DeepCopy(macroPlan.regions or {})
+    local bestGroundThreat = nil
+    local bestGroundThreatCount = 0
+    local bestGroundThreatDistance = nil
+    for _, candidate in ipairs(observation.enemyObservations or {}) do
+        if candidate.currentlyVisual == true and candidate.current == true
+            and COMBAT_ROLES[candidate.role] == true
+            and CopyPosition(candidate.position)
+        then
+            local count = 0
+            for _, neighbor in ipairs(observation.enemyObservations or {}) do
+                if neighbor.currentlyVisual == true and neighbor.current == true
+                    and COMBAT_ROLES[neighbor.role] == true
+                    and CopyPosition(neighbor.position)
+                    and DistanceSquared(candidate.position, neighbor.position)
+                        <= 64 * 64
+                then
+                    count = count + 1
+                end
+            end
+            local distance = DistanceSquared(
+                candidate.position, controller.basePosition
+            )
+            if count >= 4 and (count > bestGroundThreatCount
+                or (count == bestGroundThreatCount
+                    and (bestGroundThreatDistance == nil
+                        or distance < bestGroundThreatDistance)))
+            then
+                bestGroundThreat = candidate
+                bestGroundThreatCount = count
+                bestGroundThreatDistance = distance
+            end
+        end
+    end
+    if bestGroundThreat then
+        forcePlan.responseTarget = {
+            key = 'visual_ground_threat',
+            position = CopyPosition(bestGroundThreat.position),
+            threatCount = bestGroundThreatCount,
+        }
+    end
 
     expansionPlan = ESCALATION.BindExpansionEscorts(
         controller, observation, expansionPlan, forcePlan
@@ -12912,6 +12981,10 @@ Controller.Execute = function(controller, intents, observation)
             elseif intent.kind == 'regional_raider' then
                 issued = ESCALATION.ExecuteForceMove(
                     controller, intent, records, usedActors, 'raider', true
+                )
+            elseif intent.kind == 'regional_response' then
+                issued = ESCALATION.ExecuteForceMove(
+                    controller, intent, records, usedActors, 'response', true
                 )
             elseif intent.kind == 'field_intercept' then
                 issued = ESCALATION.ExecuteFieldIntercept(
