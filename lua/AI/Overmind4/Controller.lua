@@ -3655,6 +3655,124 @@ ESCALATION.ExecuteAirScreen = function(
     return true
 end
 
+ESCALATION.ExecuteAirIntercept = function(
+    controller, intent, records, usedActors, observation
+)
+    if type(intent.actorTokens) ~= 'table'
+        or type(intent.targetToken) ~= 'string'
+        or not IsCampaignPosition(intent.position)
+    then
+        return false
+    end
+    local target = nil
+    for _, contact in ipairs((observation or {}).enemyObservations or {}) do
+        if contact.token == intent.targetToken
+            and contact.currentlyVisual == true
+            and contact.live ~= false
+            and (contact.role == 'interceptor' or contact.role == 'bomber'
+                or contact.role == 'transport' or contact.role == 'air_scout')
+        then
+            target = contact
+            break
+        end
+    end
+    local targetPosition = target and TerrainPosition(target.position) or nil
+    if not targetPosition then return false end
+    local actors = {}
+    local tokens = {}
+    local seen = {}
+    for _, token in ipairs(intent.actorTokens) do
+        local record = records[token]
+        if type(token) ~= 'string' or seen[token] or usedActors[token]
+            or controller.pending[token]
+            or not record or record.role ~= 'interceptor'
+            or record.complete ~= true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, 'interceptor')
+        if not actor then return false end
+        seen[token] = true
+        TableInsert(tokens, token)
+        TableInsert(actors, actor)
+    end
+    if TableGetn(actors) == 0 then return false end
+    if not pcall(function() IssueClearCommands(actors) end) then return false end
+    if not pcall(function() IssueAggressiveMove(actors, targetPosition) end) then
+        pcall(function() IssueClearCommands(actors) end)
+        return false
+    end
+    for _, token in ipairs(tokens) do
+        controller.airAssignments[token] = true
+        usedActors[token] = true
+    end
+    controller.airInterceptMission = {
+        actorTokens = CopyArray(tokens),
+        targetToken = target.token,
+        targetRole = target.role,
+        position = CopyPosition(targetPosition),
+        issuedTick = CurrentTick(controller),
+        lastSeenTick = CurrentTick(controller),
+    }
+    controller.airScreenCount = CountArray(controller.airAssignments)
+    Emit(controller, 'order', {
+        actor = 'air_intercept', command = 'aggressive_move',
+        role = 'interceptor', units = TableGetn(tokens),
+        target = target.token,
+    })
+    return true
+end
+
+ESCALATION.ExecuteAirRecover = function(
+    controller, intent, records, usedActors, observation
+)
+    local mission = controller.airInterceptMission
+    local position = TerrainPosition(intent.position)
+    local basePosition = observation and TerrainPosition(observation.basePosition) or nil
+    local fairPosition = position and basePosition
+        and DistanceSquared(position, basePosition) <= 0.01
+    local campaign = controller.fieldCampaign
+    if not fairPosition and campaign and TerrainPosition(campaign.anchorPosition)
+        and DistanceSquared(position, TerrainPosition(campaign.anchorPosition)) <= 0.01
+    then
+        fairPosition = true
+    end
+    if not mission or not fairPosition or type(intent.actorTokens) ~= 'table' then
+        return false
+    end
+    local actors = {}
+    local tokens = {}
+    for _, token in ipairs(intent.actorTokens) do
+        local record = records[token]
+        if type(token) ~= 'string' or usedActors[token] or controller.pending[token]
+            or not record or record.role ~= 'interceptor'
+            or record.complete ~= true
+        then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, 'interceptor')
+        if not actor then return false end
+        TableInsert(tokens, token)
+        TableInsert(actors, actor)
+    end
+    if TableGetn(actors) == 0 then
+        controller.airInterceptMission = nil
+        return true
+    end
+    if not pcall(function() IssueClearCommands(actors) end) then return false end
+    if not pcall(function() IssuePatrol(actors, position) end) then
+        pcall(function() IssueClearCommands(actors) end)
+        return false
+    end
+    for _, token in ipairs(tokens) do usedActors[token] = true end
+    controller.airInterceptMission = nil
+    Emit(controller, 'order', {
+        actor = 'air_intercept', command = 'recover_patrol',
+        role = 'interceptor', units = TableGetn(tokens),
+    })
+    return true
+end
+
 ESCALATION.ExecuteAirScout = function(
     controller,
     intent,
@@ -8086,6 +8204,7 @@ Controller.Create = function(brain)
         transportDeliveries = {},
         transportCargoRefs = {},
         bomberMissions = {},
+        airInterceptMission = nil,
         enemyRefs = {},
         operationLifecycle = {},
         fundingGrants = {},
@@ -11082,6 +11201,99 @@ ESCALATION.AdaptBomberIntent = function(
     end
 end
 
+ESCALATION.AdaptAirIntercept = function(controller, observation, intents, reserved)
+    local priority = {
+        interceptor = 1, bomber = 2, transport = 3, air_scout = 4,
+    }
+    local targets = {}
+    for _, contact in ipairs(observation.enemyObservations or {}) do
+        if contact.currentlyVisual == true and contact.live ~= false
+            and priority[contact.role] and IsCampaignPosition(contact.position)
+        then
+            TableInsert(targets, contact)
+        end
+    end
+    table.sort(targets, function(a, b)
+        local ap = priority[a.role] or 99
+        local bp = priority[b.role] or 99
+        if ap ~= bp then return ap < bp end
+        local ad = Distance(a.position, controller.basePosition)
+        local bd = Distance(b.position, controller.basePosition)
+        if ad ~= bd then return ad < bd end
+        return tostring(a.token) < tostring(b.token)
+    end)
+    local target = targets[1]
+    local mission = controller.airInterceptMission
+    local tick = CurrentTick(controller)
+    if not target then
+        if not mission or tick - (tonumber(mission.lastSeenTick) or tick) < 100 then
+            return
+        end
+        local recoverTokens = {}
+        for _, token in ipairs(mission.actorTokens or {}) do
+            for _, unit in ipairs(observation.units or {}) do
+                if unit.token == token and unit.role == 'interceptor'
+                    and unit.complete == true and not controller.pending[token]
+                then
+                    TableInsert(recoverTokens, token)
+                    reserved[token] = true
+                    break
+                end
+            end
+        end
+        local recoverPosition = CopyPosition(controller.basePosition)
+        local campaign = controller.fieldCampaign
+        if campaign and campaign.state == 'active'
+            and IsCampaignPosition(campaign.anchorPosition)
+        then
+            recoverPosition = CopyPosition(campaign.anchorPosition)
+        end
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'air_recover', actorTokens = recoverTokens,
+            position = recoverPosition, priority = 1,
+            reason = 'air_contact_expired',
+        })
+        return
+    end
+    if mission and mission.targetToken == target.token then
+        mission.lastSeenTick = tick
+        if tick - (tonumber(mission.issuedTick) or tick) < 50
+            and IsCampaignPosition(mission.position)
+            and DistanceSquared(mission.position, target.position) <= 400
+        then
+            return
+        end
+    end
+    local candidates = {}
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'interceptor' and unit.complete == true
+            and not reserved[unit.token] and not controller.pending[unit.token]
+        then
+            TableInsert(candidates, unit)
+        end
+    end
+    table.sort(candidates, function(a, b)
+        local ad = Distance(a.position, target.position)
+        local bd = Distance(b.position, target.position)
+        if ad ~= bd then return ad < bd end
+        return tostring(a.token) < tostring(b.token)
+    end)
+    local tokens = {}
+    local index = 1
+    while index <= TableGetn(candidates) and index <= 8 do
+        TableInsert(tokens, candidates[index].token)
+        reserved[candidates[index].token] = true
+        index = index + 1
+    end
+    if TableGetn(tokens) == 0 then return end
+    ESCALATION.AppendDirectorIntent(intents, {
+        kind = 'air_intercept', actorTokens = tokens,
+        targetToken = target.token, targetRole = target.role,
+        position = CopyPosition(target.position), priority = 1,
+        reason = 'visible_air_contact',
+    })
+end
+
 ESCALATION.AdaptFieldIntercept = function(controller, observation, intents, reserved)
     local campaign = controller.fieldCampaign
     if not campaign or campaign.state ~= 'active' or campaign.emergency == true
@@ -11772,6 +11984,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         controller, observation, radarIntents, macroPlan, intents, reserved
     )
     ESCALATION.AdaptAirIntents(controller, observation, airPlan, intents, reserved)
+    ESCALATION.AdaptAirIntercept(controller, observation, intents, reserved)
     ESCALATION.AdaptBomberIntent(
         controller, observation, bomberTarget, scoutPlan, intents, reserved
     )
@@ -12525,6 +12738,14 @@ Controller.Execute = function(controller, intents, observation)
                 )
             elseif intent.kind == 'field_intercept' then
                 issued = ESCALATION.ExecuteFieldIntercept(
+                    controller, intent, records, usedActors, observation
+                )
+            elseif intent.kind == 'air_intercept' then
+                issued = ESCALATION.ExecuteAirIntercept(
+                    controller, intent, records, usedActors, observation
+                )
+            elseif intent.kind == 'air_recover' then
+                issued = ESCALATION.ExecuteAirRecover(
                     controller, intent, records, usedActors, observation
                 )
             elseif intent.kind == 'bomber_raid' then

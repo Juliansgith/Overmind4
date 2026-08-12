@@ -1259,6 +1259,55 @@ def test_recent_scout_contact_defers_unescorted_mex_until_intelligence_expires()
     ) == 1
 
 
+def test_interceptors_leave_base_to_engage_visible_air_and_return_after_contact() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    interceptors = [
+        harness.unit(
+            entityId=100 + index,
+            blueprintId="uea0102",
+            position=[10 + index, 20, 20],
+        )
+        for index in range(10)
+    ]
+    enemy_scout = harness.unit(
+        entityId=200,
+        blueprintId="uea0101",
+        army=2,
+        position=[80, 30, 80],
+        seenNow=True,
+        onRadar=True,
+    )
+    enemy_fighter = harness.unit(
+        entityId=201,
+        blueprintId="uea0102",
+        army=2,
+        position=[70, 30, 70],
+        seenNow=True,
+        onRadar=True,
+    )
+    harness.brain.units = harness.lua.table_from(interceptors)
+    harness.brain.enemies = harness.lua.table_from([enemy_scout, enemy_fighter])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.aggressive) == 1
+    intercept_position = plain(harness.calls.aggressive[1].position)
+    assert [intercept_position[0], intercept_position[2]] == [70, 70]
+    mission = plain(harness.controller.airInterceptMission)
+    assert mission["targetToken"] == "201:1"
+    assert len(mission["actorTokens"]) == 8
+
+    harness.brain.enemies = harness.lua.table_from([])
+    harness.brain.tick = 120
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 2
+    assert len(harness.calls.patrol) == 1
+    assert harness.controller.airInterceptMission is None
+
+
 def test_public_bomber_harass_releases_after_route_and_reissues_without_churn() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
