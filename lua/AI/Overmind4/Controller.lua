@@ -3374,6 +3374,7 @@ end
 local function ExecuteStructure(controller, intent, record)
     local strategicConstruction = intent.reason == 'factory_adjacency_power'
         or intent.reason == 'production_saturation'
+        or intent.reason == 'mex_adjacency_storage'
     local preemptReclaimPatrol = strategicConstruction
         and record.role == 'acu'
         and controller.reclaimPatrolAssignments[intent.actorToken] == true

@@ -1355,12 +1355,21 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and tonumber(economy.energyStoredRatio) >= 0.5
         and tonumber(economy.energyTrend) >= 0
     then
-        if AssignPlacement(
+        local assignedStorage = AssignPlacement(
             'mass_storage',
             placementIndex.mass_storage,
             22,
             'mex_adjacency_storage'
-        ) then
+        )
+        if not assignedStorage then
+            assignedStorage = AssignAcuPlacement(
+                'mass_storage',
+                placementIndex.mass_storage,
+                22,
+                'mex_adjacency_storage'
+            )
+        end
+        if assignedStorage then
             plannedMassStorage = true
             counts.mass_storage = (counts.mass_storage or 0) + 1
         end

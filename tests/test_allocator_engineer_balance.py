@@ -717,6 +717,8 @@ def _advanced_mex_storage_snapshot() -> dict[str, Any]:
     snapshot = _policy_allocator_snapshot(
         "mass_extractor_t2",
         *("mass_extractor" for _ in range(8)),
+        "power_generator",
+        "power_generator",
         "engineer",
         "engineer",
     )
@@ -796,6 +798,34 @@ def test_pending_storage_suppresses_duplicate_adjacency_investment() -> None:
         intent
         for intent in intents_of(decide(snapshot), "build_structure")
         if intent.get("buildRole") == "mass_storage"
+    ]
+
+
+def test_idle_acu_builds_advanced_mex_storage_when_engineers_are_committed() -> None:
+    snapshot = _advanced_mex_storage_snapshot()
+    snapshot["pending"] = [{
+        "kind": "build_structure",
+        "actorToken": "99:1",
+        "buildRole": "power_generator",
+        "position": [8, 2, 18],
+        "phase": "building",
+        "accepted": True,
+    }]
+    for unit in snapshot["units"]:
+        if unit["role"] == "engineer":
+            unit["idle"] = False
+        elif unit["role"] == "acu":
+            unit["buildRate"] = 10
+            unit["canBuild"]["mass_storage"] = True
+
+    storage = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "mex_adjacency_storage"
+    ]
+
+    assert [(intent["actorToken"], intent["buildRole"]) for intent in storage] == [
+        ("1:1", "mass_storage")
     ]
 
 
