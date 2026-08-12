@@ -1744,7 +1744,7 @@ def test_terminal_probe_fails_closed_for_hidden_or_stale_public_target(invalid: 
     assert campaign_state(harness)["anchorKey"] == before["anchorKey"]
 
 
-def test_post_proof_bulk_stall_restores_prior_secured_snapshot_instead_of_rebuilding() -> None:
+def test_post_proof_bulk_stall_retires_failed_campaign_for_regional_force_fallback() -> None:
     harness, _, _, _, ready, before = stage_transition_probe()
     proven, commit, _ = prove_transition(harness, ready)
     execute_intents(harness, [commit], proven)
@@ -1754,14 +1754,9 @@ def test_post_proof_bulk_stall_restores_prior_secured_snapshot_instead_of_rebuil
     release = only_campaign_intent(harness, releasing, "route_release")
     execute_intents(harness, [release], releasing)
 
-    state = campaign_state(harness)
-    assert state["kind"] == before["kind"]
-    assert state["clusterKey"] == before["clusterKey"]
-    assert state["memberKeys"] == before["memberKeys"]
-    assert state["anchorKey"] == before["anchorKey"]
-    assert state["anchorPosition"] == before["anchorPosition"]
-    assert state["state"] in {"active", "holding"}
-    assert state.get("rollbackReason") != "repeated_no_progress"
+    assert plain(harness.controller.fieldCampaign) is None
+    assert harness.controller.fieldCampaignEnabled is False
+    assert route_events(harness, "campaign_retired")
 
 
 def test_ian_mass277_to_mass490_stall_never_commits_or_whole_field_orders_before_probe_quorum() -> None:

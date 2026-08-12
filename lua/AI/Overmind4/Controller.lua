@@ -5905,6 +5905,7 @@ ESCALATION.RouteFingerprint = function(route)
         Mix(route.releaseDeadlineTick)
         Mix(route.releaseReason)
         Mix(route.restoreOnRelease == true and 'restore' or 'retain')
+        Mix(route.retireCampaignOnRelease == true and 'retire' or 'continue')
     else
         Mix(route.probeQuorum)
         Mix(route.routeLength)
@@ -6207,6 +6208,7 @@ end
 
 ESCALATION.RouteFinalizeRelease = function(controller, campaign, route, reason)
     local tick = CurrentTick(controller)
+    local retireCampaign = route.retireCampaignOnRelease == true
     if route.restoreOnRelease == true then
         ESCALATION.RouteRestoreSnapshot(campaign, route.source, tick)
     end
@@ -6230,6 +6232,14 @@ ESCALATION.RouteFinalizeRelease = function(controller, campaign, route, reason)
             tick - (tonumber(route.releaseStartedTick) or tick)
         ),
     })
+    if retireCampaign then
+        controller.fieldCampaign = nil
+        controller.fieldCampaignEnabled = false
+        Emit(controller, 'campaign_retired', {
+            reason = 'bulk_route_failed',
+            route = route.routeKey or 'none',
+        })
+    end
 end
 
 ESCALATION.RouteCandidateFromCluster = function(cluster)
@@ -6718,6 +6728,7 @@ ESCALATION.RouteUpdate = function(controller, observation, campaign, readinessRe
                 probeQuorum = 0,
                 releaseTokens = CopyArray(campaign.fieldTokens),
                 restoreOnRelease = true,
+                retireCampaignOnRelease = true,
                 stagedTick = rollback.committedTick,
                 releaseDeadlineTick = (tonumber(rollback.committedTick) or tick)
                     + ESCALATION.ROUTE_PROBE_RELEASE_TICKS,
