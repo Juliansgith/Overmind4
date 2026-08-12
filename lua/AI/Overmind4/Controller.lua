@@ -11113,37 +11113,47 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     local strategicBuilderToken = ESCALATION.StrategicHydroBuilderToken(
         controller, observation, macroPlan
     )
+    local completedEngineerCount = 0
+    local reclaimWorkerLive = controller.reclaimWorkerToken == nil
+    local reclaimWorkerCandidate = nil
+    local reclaimWorkerDistance = nil
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'engineer' and unit.complete == true then
+            completedEngineerCount = completedEngineerCount + 1
+            if unit.token == controller.reclaimWorkerToken then
+                reclaimWorkerLive = true
+            end
+            if unit.attached ~= true
+                and not ESCALATION.TransportTokenClaimed(controller, unit.token)
+            then
+                local distance = DistanceSquared(
+                    unit.position, controller.basePosition
+                )
+                if reclaimWorkerCandidate == nil
+                    or distance < reclaimWorkerDistance
+                    or (distance == reclaimWorkerDistance
+                        and unit.token < reclaimWorkerCandidate.token)
+                then
+                    reclaimWorkerCandidate = unit
+                    reclaimWorkerDistance = distance
+                end
+            end
+        end
+    end
+    if not reclaimWorkerLive then controller.reclaimWorkerToken = nil end
+    if controller.reclaimWorkerToken == nil
+        and completedEngineerCount >= 8
+        and reclaimWorkerCandidate ~= nil
+    then
+        controller.reclaimWorkerToken = reclaimWorkerCandidate.token
+    end
     local reclaimInput = ESCALATION.DirectorReclaimInput(
         controller, observation, macroPlan
     )
-    if controller.reclaimWorkerToken ~= nil
-        and TableGetn(reclaimInput.engineers or {}) == 0
-    then
-        controller.reclaimWorkerToken = nil
-        reclaimInput = ESCALATION.DirectorReclaimInput(
-            controller, observation, macroPlan
-        )
-    end
     local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
         reclaimInput
     ) or { jobs = {} }
     reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
-    local completedEngineerCount = 0
-    for _, unit in ipairs(observation.units or {}) do
-        if unit.role == 'engineer' and unit.complete == true then
-            completedEngineerCount = completedEngineerCount + 1
-        end
-    end
-    if controller.reclaimWorkerToken == nil and completedEngineerCount >= 8 then
-        for _, job in ipairs(reclaimPlan.jobs or {}) do
-            if type(job.actorToken) == 'string'
-                and (controller.reclaimWorkerToken == nil
-                    or job.actorToken < controller.reclaimWorkerToken)
-            then
-                controller.reclaimWorkerToken = job.actorToken
-            end
-        end
-    end
     local reclaimActorTokens = {}
     if type(controller.reclaimWorkerToken) == 'string' then
         reclaimActorTokens[controller.reclaimWorkerToken] = true

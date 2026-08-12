@@ -3851,21 +3851,18 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
             "intents": [],
         },
     )
-    _set_director_result(
-        harness,
-        "reclaimPlan",
-        {
-            "jobs": [
-                {
-                    "id": "reclaim:prop:501",
-                    "actorToken": "12:1",
-                    "targetKey": "prop:501",
-                    "regionKey": "home",
-                    "position": [13, 2, 20],
-                }
-            ]
-        },
-    )
+    reclaim_jobs = []
+    if engineer_count < 8:
+        reclaim_jobs.append(
+            {
+                "id": "reclaim:prop:501",
+                "actorToken": "12:1",
+                "targetKey": "prop:501",
+                "regionKey": "home",
+                "position": [13, 2, 20],
+            }
+        )
+    _set_director_result(harness, "reclaimPlan", {"jobs": reclaim_jobs})
 
     harness.lua.globals().Controller.Step(harness.controller)
 
