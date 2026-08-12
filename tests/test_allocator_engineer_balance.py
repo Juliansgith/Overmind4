@@ -660,6 +660,8 @@ def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy(
         "air_factory",
         "power_generator",
         "power_generator",
+        "power_generator",
+        "power_generator",
         "mass_extractor",
         "mass_extractor",
     )

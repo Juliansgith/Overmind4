@@ -1259,7 +1259,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     end
 
     local adjacencyPowerTarget = math.min(10,
-        math.max(4, completedFactories * 2))
+        math.max(4, completedFactories * 3))
     if not underContact
         and completedMex >= 6
         and (counts.power_generator or 0) < adjacencyPowerTarget
