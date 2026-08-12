@@ -9437,9 +9437,7 @@ ESCALATION.DirectorExpansionInput = function(
     return {
         tick = observation.tick,
         fundedExpansionSlots = tonumber(macroPlan.fundedExpansionSlots) or 0,
-        controlledRadius = math.min(320, math.max(
-            120, ESCALATION.MapSizeKm(controller) * 30
-        )),
+        controlledRadius = 120,
         engineers = engineers,
         escorts = escorts,
         sites = sites,
