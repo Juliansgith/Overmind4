@@ -244,7 +244,7 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
     macro_input = plain(harness.calls.macroBuildPortfolio[1])
     assert macro_input["economy"]["massRequested"] == pytest.approx(0.76)
     assert macro_input["economy"]["energyRequested"] == pytest.approx(10.23)
-    assert not any(
+    assert any(
         request["lane"] == "air_production"
         for request in macro_input["requests"]
     ), macro_input["counts"]

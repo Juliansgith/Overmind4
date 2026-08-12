@@ -315,7 +315,7 @@ class TestAirAndMobility:
                     "visibleRaidTarget": False,
                     "remoteSafeExpansion": False,
                 },
-                None,
+                "interceptor",
             ),
             (
                 {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1},
