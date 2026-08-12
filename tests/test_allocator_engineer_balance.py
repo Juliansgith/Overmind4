@@ -668,6 +668,8 @@ def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy(
             unit["idle"] = False
         elif unit["role"] == "acu":
             unit["buildRate"] = 10
+            unit["idle"] = False
+            unit["reclaimPatrolAssigned"] = True
     snapshot["macro"].update(
         expansionOpportunityCount=12,
         expansionRecurringMassBudget=1.2,
@@ -683,6 +685,43 @@ def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy(
     assert [(intent["actorToken"], intent["buildRole"]) for intent in power] == [
         ("1:1", "power_generator")
     ]
+
+
+@pytest.mark.parametrize("clear_fails", [False, True])
+def test_factory_adjacency_power_safely_preempts_acu_reclaim_patrol(
+    clear_fails: bool,
+) -> None:
+    harness = make_harness()
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        idleState=False,
+        states={"Moving": True},
+        canBuild={"ueb1101": True},
+    )
+    harness.brain.units = harness.lua.table_from([acu])
+    harness.controller.reclaimPatrolAssignments["1:1"] = True
+    harness.calls.failClear = clear_fails
+    observation = harness.observe()
+
+    execute_intents(
+        harness,
+        [
+            {
+                "kind": "build_structure",
+                "actorToken": "1:1",
+                "buildRole": "power_generator",
+                "position": [30, 0, 40],
+                "reason": "factory_adjacency_power",
+            }
+        ],
+        observation,
+    )
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.buildMobile) == (0 if clear_fails else 1)
+    assert (harness.controller.reclaimPatrolAssignments["1:1"] is not None) == clear_fails
+    assert (harness.controller.pending["1:1"] is not None) == (not clear_fails)
 
 
 def test_opening_air_power_is_not_starved_by_future_commitment_reservations() -> None:

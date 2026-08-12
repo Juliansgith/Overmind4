@@ -818,17 +818,20 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local engineers = {}
     local reclaimPatrolActive = false
     local reclaimPatrolAcu = nil
+    local adjacencyPowerAcu = nil
     for _, unit in ipairs(units) do
         if unit.reclaimPatrolAssigned == true then
             reclaimPatrolActive = true
         end
         if unit.role == 'acu'
             and unit.complete == true
-            and unit.idle == true
             and not pendingActors[unit.token]
-            and unit.reclaimPatrolAssigned ~= true
+            and (unit.idle == true or unit.reclaimPatrolAssigned == true)
         then
-            reclaimPatrolAcu = unit
+            adjacencyPowerAcu = unit
+            if unit.idle == true and unit.reclaimPatrolAssigned ~= true then
+                reclaimPatrolAcu = unit
+            end
         end
         if unit.role == 'engineer'
             and unit.complete == true
@@ -1269,12 +1272,12 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             'factory_adjacency_power'
         )
         if not assignedPower
-            and reclaimPatrolAcu
-            and CanBuild(reclaimPatrolAcu, 'power_generator')
+            and adjacencyPowerAcu
+            and CanBuild(adjacencyPowerAcu, 'power_generator')
         then
             local acuClaimed = false
             for _, existing in ipairs(intents or {}) do
-                if existing.actorToken == reclaimPatrolAcu.token then
+                if existing.actorToken == adjacencyPowerAcu.token then
                     acuClaimed = true
                     break
                 end
@@ -1288,13 +1291,17 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 )
                 if position then
                     AddIntent(intents, BuildAtPlacement(
-                        reclaimPatrolAcu,
+                        adjacencyPowerAcu,
                         'power_generator',
                         position,
                         19,
                         'factory_adjacency_power'
                     ))
-                    reclaimPatrolAcu = nil
+                    if reclaimPatrolAcu
+                        and reclaimPatrolAcu.token == adjacencyPowerAcu.token
+                    then
+                        reclaimPatrolAcu = nil
+                    end
                     assignedPower = true
                 end
             end

@@ -3267,9 +3267,12 @@ local function RecordPending(controller, intent, record)
 end
 
 local function ExecuteStructure(controller, intent, record)
+    local preemptReclaimPatrol = intent.reason == 'factory_adjacency_power'
+        and record.role == 'acu'
+        and controller.reclaimPatrolAssignments[intent.actorToken] == true
     if controller.pending[intent.actorToken]
         or record.complete ~= true
-        or record.idle ~= true
+        or (record.idle ~= true and not preemptReclaimPatrol)
         or not record.canBuild
         or record.canBuild[intent.buildRole] ~= true
     then
@@ -3282,9 +3285,11 @@ local function ExecuteStructure(controller, intent, record)
     if not blueprintId then return false end
     local actor = LiveOwnedActor(controller, intent.actorToken, record, record.role)
     if not actor
-        or SafeCall(false, actor.IsIdleState, actor) ~= true
+        or (SafeCall(false, actor.IsIdleState, actor) ~= true
+            and not preemptReclaimPatrol)
         or SafeCall(false, actor.IsUnitState, actor, 'Building') == true
-        or SafeCall(false, actor.IsUnitState, actor, 'Moving') == true
+        or (SafeCall(false, actor.IsUnitState, actor, 'Moving') == true
+            and not preemptReclaimPatrol)
         or not CanUnitBuild(actor, blueprintId)
     then
         return false
@@ -3312,6 +3317,13 @@ local function ExecuteStructure(controller, intent, record)
             BlockSite(controller, blockKey, 'preflight')
         end
         return false
+    end
+
+    if preemptReclaimPatrol then
+        if not pcall(function() IssueClearCommands({ actor }) end) then
+            return false
+        end
+        controller.reclaimPatrolAssignments[intent.actorToken] = nil
     end
 
     intent.position = position
