@@ -276,6 +276,49 @@ def test_twelve_mex_with_positive_partial_bank_prebuild_second_t2_generator() ->
     assert harness.calls.buildMobile[1].blueprintId == "ueb1201"
 
 
+def test_live_fourteen_mex_economy_keeps_t2_engineer_building_after_four_generators() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _healthy_bank(harness)
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="energy_recovery")
+    )
+    mexes = [
+        harness.unit(
+            entityId=100 + index,
+            blueprintId="ueb1202",
+            position=[80 + index * 4, 2, 80],
+        )
+        for index in range(14)
+    ]
+    generators = [
+        harness.unit(
+            entityId=30 + index,
+            blueprintId="ueb1201",
+            position=[70 + index * 8, 2, 60],
+        )
+        for index in range(4)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(entityId=20, blueprintId="ueb0201", position=[40, 2, 40]),
+            harness.unit(
+                entityId=21,
+                blueprintId="uel0208",
+                position=[35, 2, 40],
+                canBuild={"ueb1201": True},
+            ),
+            *generators,
+            *mexes,
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1201"
+
+
 def test_energy_deficit_immediately_adds_next_t2_generator() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

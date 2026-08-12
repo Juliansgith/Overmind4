@@ -9418,6 +9418,10 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         and economy.massTrend >= 0
         and economy.energyStoredRatio >= 0.5
         and economy.energyTrend >= 0
+    if safePowerBank and completedMex >= 12 then
+        t2PowerTarget = math.min(12, math.max(t2PowerTarget,
+            math.ceil(completedMex / 2)))
+    end
     if t2PowerCount < t2PowerTarget
         and TableGetn(t2PowerPositions) > 0
         and energyLane

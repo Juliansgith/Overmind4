@@ -2785,6 +2785,30 @@ class TestRegionalMacro:
         assert blocked["supportAction"] == "hold"
         assert blocked["supportDenialReason"] == "preserve_final_t1_lane"
 
+    def test_live_mass_rich_factory_count_keeps_converting_t1_factories_to_t2_support(
+        self,
+    ) -> None:
+        snapshot = {
+            "economyHealthy": True,
+            "techFunded": True,
+            "t2HqComplete": True,
+            "t2SupportFactoryCount": 1,
+            "landFactories": [
+                {"token": f"land-{index:02d}", "tier": 1, "idle": True}
+                for index in range(13)
+            ],
+            "mex": [
+                {"key": f"mex-{index:02d}", "tier": 3, "upgrading": False}
+                for index in range(7)
+            ],
+            "activeMexUpgrades": 0,
+        }
+
+        plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
+
+        assert plan["supportAction"] == "start_t2_support"
+        assert plan["supportSourceToken"] == "land-00"
+
     @pytest.mark.parametrize(
         ("healthy", "t3_action"),
         [(False, "hold"), (True, "admit")],

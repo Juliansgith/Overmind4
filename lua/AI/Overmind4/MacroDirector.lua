@@ -1446,11 +1446,16 @@ MacroDirector.PlanTech = function(snapshot)
     end
     SortByKey(factories, 'token')
     SortByKey(idleFactories, 'token')
+    local supportFactoryCount = math.max(0,
+        Number(snapshot.t2SupportFactoryCount, 0) or 0)
+    local supportFactoryTarget = math.min(8, math.max(1,
+        math.floor((Count(factories) + supportFactoryCount) * 0.6)))
     local plan = {
         hqAction = 'hold',
         hqDenialReason = 'not_funded_or_healthy',
         supportAction = 'hold',
         supportDenialReason = 'not_funded_or_healthy',
+        supportFactoryTarget = supportFactoryTarget,
         remainingT1ProductionLanes = Count(factories),
         t2ProductionRoles = { 't2_direct_fire', 't2_anti_air' },
         mexUpgradeSiteKeys = {},
@@ -1476,7 +1481,7 @@ MacroDirector.PlanTech = function(snapshot)
         end
     end
     if snapshot.t2HqComplete and healthy and funded
-        and (Number(snapshot.t2SupportFactoryCount, 0) or 0) < 1
+        and supportFactoryCount < supportFactoryTarget
     then
         if Count(factories) >= 2 and Count(idleFactories) >= 1 then
             plan.supportAction = 'start_t2_support'
@@ -1489,7 +1494,7 @@ MacroDirector.PlanTech = function(snapshot)
         else
             plan.supportDenialReason = 'preserve_final_t1_lane'
         end
-    elseif snapshot.t2HqComplete and (Number(snapshot.t2SupportFactoryCount, 0) or 0) >= 1 then
+    elseif snapshot.t2HqComplete and supportFactoryCount >= supportFactoryTarget then
         plan.supportDenialReason = 'support_lane_complete'
     end
     if snapshot.t2HqComplete and healthy and funded
@@ -1507,7 +1512,7 @@ MacroDirector.PlanTech = function(snapshot)
     -- stream keeps the sole tech commitment occupied forever and the army
     -- remains T1 despite a full bank.
     local supportUpgradeNeeded = snapshot.t2HqComplete == true
-        and (Number(snapshot.t2SupportFactoryCount, 0) or 0) < 1
+        and supportFactoryCount < 1
         and Count(factories) >= 2
     local mexUpgradesMayStart = t2MexCount < 2
         or (snapshot.t2HqComplete == true and not supportUpgradeNeeded)
