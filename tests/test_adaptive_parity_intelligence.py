@@ -386,6 +386,50 @@ class TestAirAndMobility:
             assert len(plan["orders"]) == 1
             assert plan["orders"][0]["buildRole"] == expected
 
+    @pytest.mark.parametrize(
+        ("interceptors", "bombers", "slots", "expected"),
+        (
+            (12, 2, 1, ["bomber"]),
+            (12, 3, 1, ["interceptor"]),
+            (12, 2, 3, ["bomber", "interceptor", "bomber"]),
+            (16, 3, 2, ["bomber", "interceptor"]),
+            (32, 7, 3, ["bomber", "interceptor", "bomber"]),
+        ),
+    )
+    def test_funded_air_factories_keep_converting_after_minimum_mix(
+        self,
+        interceptors: int,
+        bombers: int,
+        slots: int,
+        expected: list[str],
+    ) -> None:
+        snapshot = air_snapshot()
+        snapshot["completed"].update(
+            {
+                "air_scout": 1,
+                "interceptor": interceptors,
+                "bomber": bombers,
+                "transport": 1,
+            }
+        )
+        snapshot["needs"].update(
+            {
+                "airThreat": False,
+                "airThreatCount": 0,
+                "visibleRaidTarget": False,
+                "remoteSafeExpansion": False,
+            }
+        )
+        snapshot["fundedSlots"] = slots
+        snapshot["factories"] = [
+            {"token": f"air-{index}", "idle": True, "tier": 1}
+            for index in range(1, slots + 1)
+        ]
+
+        plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
+
+        assert [order["buildRole"] for order in plan["orders"]] == expected
+
     def test_air_slot_selects_idle_factory_deterministically_under_factory_permutation(self) -> None:
         snapshot = air_snapshot()
         snapshot["completed"].update(

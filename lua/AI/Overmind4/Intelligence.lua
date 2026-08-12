@@ -272,6 +272,10 @@ Intelligence.PlanAir = function(snapshot)
                     role = 'interceptor'
                 elseif totals.bomber < 2 then
                     role = 'bomber'
+                elseif totals.bomber * 4 < totals.interceptor then
+                    role = 'bomber'
+                else
+                    role = 'interceptor'
                 end
             end
         end

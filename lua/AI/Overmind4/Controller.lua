@@ -8922,6 +8922,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         bomber = 0,
         transport = 0,
         idleFactories = 0,
+        idleAirFactories = 0,
     }
     local constructionBacklog = 0
     local landBacklog = 0
@@ -8948,6 +8949,11 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
                 and unit.idle == true
             then
                 counts.idleFactories = counts.idleFactories + 1
+                if unit.role == 'air_factory'
+                    and controller.pending[unit.token] == nil
+                then
+                    counts.idleAirFactories = counts.idleAirFactories + 1
+                end
             end
         end
     end
@@ -9014,16 +9020,9 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             visibleRaidTarget = true
         end
     end
-    local interceptorTarget = 12
-    local needsAirProduction = counts.air_scout < 1
-        or counts.interceptor < 2
-        or (counts.transport < 1 and TableGetn(regions or {}) > 1)
-        or counts.interceptor < 4
-        or counts.bomber < 2
-        or counts.interceptor < interceptorTarget
-        or (visibleRaidTarget and counts.bomber * 4 < counts.interceptor)
-    if counts.airFactoriesT1 > 0 and needsAirProduction then
-        TableInsert(requests, { id = 'air-1', lane = 'air_production',
+    local airRequestCount = math.min(4, counts.idleAirFactories)
+    for index = 1, airRequestCount do
+        TableInsert(requests, { id = 'air-' .. tostring(index), lane = 'air_production',
             massDrain = 0.2, energyDrain = 9, massCost = 50,
             energyCost = 2250, required = true })
     end
@@ -10921,8 +10920,19 @@ ESCALATION.DirectorAirInput = function(
         end
     end
     local funded = ((macroPlan.lanes or {}).air_production or {}).admitted == true
+    local fundedSlots = 0
+    if type(macroPlan.grants) == 'table' then
+        for _, grant in ipairs(macroPlan.grants) do
+            if grant.lane == 'air_production' then
+                fundedSlots = fundedSlots + 1
+            end
+        end
+    elseif funded then
+        -- Compatibility for narrow callers that only publish lane admission.
+        fundedSlots = 1
+    end
     return {
-        fundedSlots = funded and math.max(1, TableGetn(factories)) or 0,
+        fundedSlots = math.min(fundedSlots, TableGetn(factories)),
         completed = completed,
         pending = PendingArray(controller),
         needs = {

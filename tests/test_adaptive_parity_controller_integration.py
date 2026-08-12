@@ -439,6 +439,126 @@ def test_two_t2_mex_full_bank_funds_hq_before_more_t1_factory_growth() -> None:
     assert len(harness.calls.upgrade) == 1
 
 
+def test_air_production_request_persists_after_the_opening_air_mix_is_complete() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute(
+        "local RealBuildPortfolio = MacroDirector.BuildPortfolio; "
+        "MacroDirectorStub.BuildPortfolio = function(snapshot) "
+        "table.insert(calls.macroBuildPortfolio, snapshot); "
+        "return RealBuildPortfolio(snapshot) end; "
+        "Policy.Decide = function() return {} end"
+    )
+    air_factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0102",
+        canBuild={"uea0102": True, "uea0103": True},
+    )
+    air_package = [
+        harness.unit(entityId=30, blueprintId="uea0101"),
+        *[
+            harness.unit(entityId=entity_id, blueprintId="uea0102")
+            for entity_id in range(31, 43)
+        ],
+        harness.unit(entityId=43, blueprintId="uea0103"),
+        harness.unit(entityId=44, blueprintId="uea0103"),
+        harness.unit(entityId=45, blueprintId="uea0107"),
+    ]
+    harness.brain.units = harness.lua.table_from([air_factory, *air_package])
+    harness.brain.massIncome = 4.4
+    harness.brain.massRequested = 3.7
+    harness.brain.massUsage = 3.7
+    harness.brain.massTrend = 0.7
+    harness.brain.massStored = 1679
+    harness.brain.massStoredRatio = 1
+    harness.brain.energyIncome = 84
+    harness.brain.energyRequested = 44
+    harness.brain.energyUsage = 44
+    harness.brain.energyTrend = 40
+    harness.brain.energyStored = 4000
+    harness.brain.energyStoredRatio = 1
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    macro_input = plain(harness.calls.macroBuildPortfolio[1])
+    air_requests = [
+        request
+        for request in macro_input["requests"]
+        if request["lane"] == "air_production"
+    ]
+    assert len(air_requests) == 1
+    assert air_requests[0]["required"] is True
+    assert air_requests[0]["massDrain"] == pytest.approx(0.2)
+    assert air_requests[0]["energyDrain"] == pytest.approx(9)
+
+
+@pytest.mark.parametrize(
+    ("grant_count", "expected_orders"),
+    ((0, 0), (1, 1), (2, 2), (4, 3)),
+)
+def test_air_grants_map_one_for_one_to_idle_factory_queues(
+    grant_count: int,
+    expected_orders: int,
+) -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute(
+        "local RealPlanAir = Intelligence.PlanAir; "
+        "IntelligenceStub.PlanAir = function(snapshot) "
+        "table.insert(calls.intelligencePlanAir, snapshot); "
+        "return RealPlanAir(snapshot) end; "
+        "Policy.Decide = function() return {} end"
+    )
+    factories = [
+        harness.unit(
+            entityId=entity_id,
+            blueprintId="ueb0102",
+            canBuild={"uea0102": True, "uea0103": True},
+        )
+        for entity_id in (20, 21, 22)
+    ]
+    air_package = [
+        harness.unit(entityId=30, blueprintId="uea0101"),
+        *[
+            harness.unit(entityId=entity_id, blueprintId="uea0102")
+            for entity_id in range(31, 43)
+        ],
+        harness.unit(entityId=43, blueprintId="uea0103"),
+        harness.unit(entityId=44, blueprintId="uea0103"),
+        harness.unit(entityId=45, blueprintId="uea0107"),
+    ]
+    harness.brain.units = harness.lua.table_from([*factories, *air_package])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"air_production": {"admitted": grant_count > 0}},
+            "grants": [
+                {
+                    "requestId": f"air-{index}",
+                    "lane": "air_production",
+                    "source": "recurring",
+                }
+                for index in range(grant_count)
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    air_input = plain(harness.calls.intelligencePlanAir[1])
+    assert air_input["fundedSlots"] == min(grant_count, 3)
+    assert len(harness.calls.buildFactory) == expected_orders
+    assert all(
+        call.blueprintId in {"uea0102", "uea0103"}
+        for call in harness.calls.buildFactory.values()
+    )
+
+
 def test_ten_km_nearby_expansion_does_not_require_a_remote_escort() -> None:
     harness = make_harness()
     harness.lua.execute("ScenarioInfo.size = { 512, 512 }")
