@@ -3874,6 +3874,12 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
     ]
 
     assert harness.controller.reclaimWorkerToken == expected_worker
+    if expected_worker:
+        assert any(
+            "reclaim_worker=12:1" in line
+            for line in harness.logs
+            if "kind=controller" in line and "event=snapshot" in line
+        )
     harness.controller.pending["12:1"] = None
     _set_director_result(harness, "reclaimPlan", {"jobs": []})
     if expected_worker:

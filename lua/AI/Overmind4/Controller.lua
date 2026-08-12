@@ -12246,7 +12246,24 @@ Controller.Step = function(controller)
         local buildingAa = 0
         local assignedMinTargetDistance = -1
         local assignedMaxTargetDistance = -1
+        local reclaimWorkerState = 'none'
+        local reclaimWorkerPendingKind = 'none'
         for _, unit in ipairs(observation.units) do
+            if unit.token == controller.reclaimWorkerToken then
+                local workerPending = controller.pending[unit.token]
+                if workerPending then
+                    reclaimWorkerState = 'pending'
+                    reclaimWorkerPendingKind = tostring(
+                        workerPending.kind or 'unknown'
+                    )
+                elseif unit.reclaimPatrolAssigned == true then
+                    reclaimWorkerState = 'patrol'
+                elseif unit.idle == true then
+                    reclaimWorkerState = 'idle'
+                else
+                    reclaimWorkerState = 'busy'
+                end
+            end
             if unit.role == 'acu' then
                 acu = unit
             elseif COMBAT_ROLES[unit.role] and unit.complete == true then
@@ -12528,6 +12545,9 @@ Controller.Step = function(controller)
             air_screen = tonumber(macro.airScreenCount) or 0,
             air_scout = tonumber(macro.airScoutCount) or 0,
             reclaim_candidate_value = tonumber(macro.reclaimValue) or -1,
+            reclaim_worker = tostring(controller.reclaimWorkerToken or 'none'),
+            reclaim_worker_state = reclaimWorkerState,
+            reclaim_worker_pending_kind = reclaimWorkerPendingKind,
             reclaim_query_engineers = tonumber(macro.reclaimQueryEngineers) or 0,
             reclaim_raw_props = tonumber(macro.reclaimRawProps) or 0,
             reclaim_normalized_props = tonumber(macro.reclaimNormalizedProps) or 0,
