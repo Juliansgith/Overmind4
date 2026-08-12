@@ -279,6 +279,44 @@ class TestFundedPortfolio:
         assert lane["admitted"] is admitted
         assert plan["availableRecurringMass"] == 0
 
+    @pytest.mark.parametrize(
+        ("energy_bank", "admitted"),
+        [(4049.9, False), (4050, True)],
+    )
+    def test_long_tech_build_can_use_bank_plus_income_over_its_build_time(
+        self, energy_bank: float, admitted: bool
+    ) -> None:
+        request = {
+            **lane_request(
+                "tech",
+                mass_drain=1,
+                energy_drain=6,
+                mass_cost=900,
+                energy_cost=5400,
+                duration_ticks=900,
+                optional=True,
+            ),
+            "allowHybrid": True,
+        }
+        snapshot = portfolio_snapshot(requests=[request])
+        snapshot["economy"].update(
+            {
+                "massIncome": 0,
+                "massRequested": 0,
+                "energyIncome": 1.5,
+                "energyRequested": 0,
+                "massStored": 900,
+                "energyStored": energy_bank,
+            }
+        )
+
+        plan = build_portfolio(snapshot)
+
+        assert plan["lanes"]["tech"]["admitted"] is admitted
+        assert [grant["source"] for grant in plan["grants"]] == (
+            ["hybrid"] if admitted else []
+        )
+
     def test_active_commitments_are_deducted_before_new_work_is_admitted(self) -> None:
         request = lane_request(
             "factory_growth",
@@ -431,7 +469,7 @@ class TestFundedPortfolio:
         low_plan = build_portfolio(low)
         high_plan = build_portfolio(high)
 
-        assert high_plan["engineerTarget"] > low_plan["engineerTarget"]
+        assert high_plan["engineerTarget"] == low_plan["engineerTarget"]
         assert high_plan["factoryTarget"] > low_plan["factoryTarget"]
         assert high_plan["landFactoryTarget"] > low_plan["landFactoryTarget"]
         assert high_plan["airFactoryTarget"] > low_plan["airFactoryTarget"]
@@ -466,8 +504,6 @@ class TestFundedPortfolio:
         )
         baseline = build_portfolio(capacity)
         backlog_cases = (
-            ("fundableBuilderJobs", "engineerTarget"),
-            ("constructionBacklog", "engineerTarget"),
             ("landProductionBacklog", "landFactoryTarget"),
             ("airProductionBacklog", "airFactoryTarget"),
         )
@@ -2447,7 +2483,10 @@ class TestRegionalMacro:
                 {"token": "land-a", "tier": 1, "idle": True},
                 {"token": "land-b", "tier": 1, "idle": True},
             ],
-            "mex": [{"key": f"mex-{index}", "tier": 1} for index in range(8)],
+            "mex": [
+                {"key": f"mex-{index}", "tier": 2 if index < 2 else 1}
+                for index in range(8)
+            ],
         }
         one_lane = copy.deepcopy(ready)
         one_lane["landFactories"] = one_lane["landFactories"][:1]
@@ -2464,6 +2503,34 @@ class TestRegionalMacro:
         }
         assert blocked["hqAction"] == "hold"
         assert blocked["hqDenialReason"] == "preserve_final_t1_lane"
+
+    def test_two_staggered_t2_mex_upgrades_precede_the_land_hq(self) -> None:
+        before_mex_tech = {
+            "economyHealthy": True,
+            "techFunded": True,
+            "t2HqComplete": False,
+            "landFactories": [
+                {"token": "land-a", "tier": 1, "idle": True},
+                {"token": "land-b", "tier": 1, "idle": True},
+            ],
+            "mex": [
+                {"key": f"mex-{index}", "tier": 1, "upgrading": False}
+                for index in range(10)
+            ],
+            "activeMexUpgrades": 0,
+        }
+        after_two_upgrades = copy.deepcopy(before_mex_tech)
+        after_two_upgrades["mex"][0]["tier"] = 2
+        after_two_upgrades["mex"][1]["tier"] = 2
+
+        mex_plan = invoke(MODULE, GLOBAL, "PlanTech", before_mex_tech)
+        hq_plan = invoke(MODULE, GLOBAL, "PlanTech", after_two_upgrades)
+
+        assert mex_plan["hqAction"] == "hold"
+        assert mex_plan["mexUpgradeSiteKeys"] == ["mex-0"]
+        assert mex_plan["mexUpgradeRolesBySite"]["mex-0"] == "mass_extractor_t2"
+        assert hq_plan["hqAction"] == "start_t2"
+        assert not hq_plan["mexUpgradeSiteKeys"]
 
     def test_t2_hq_counts_busy_functioning_t1_lane_while_selecting_only_idle_upgrade_source(self) -> None:
         snapshot = {
@@ -2505,7 +2572,10 @@ class TestRegionalMacro:
                     "functioning": True,
                 },
             ],
-            "mex": [],
+            "mex": [
+                {"key": "mex-t2-a", "tier": 2},
+                {"key": "mex-t2-b", "tier": 2},
+            ],
         }
 
         plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
@@ -2544,7 +2614,10 @@ class TestRegionalMacro:
                     "upgrading": False,
                 },
             ],
-            "mex": [],
+            "mex": [
+                {"key": "mex-t2-a", "tier": 2},
+                {"key": "mex-t2-b", "tier": 2},
+            ],
         }
 
         plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)

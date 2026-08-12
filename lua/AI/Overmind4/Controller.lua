@@ -8762,10 +8762,17 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             energyCost = 2250, required = true })
     end
     if completedMex >= 10 and counts.landFactoriesT1 >= 2 then
-        TableInsert(requests, { id = 'tech-1', lane = 'tech',
-            massDrain = 1.017391, energyDrain = 7.913043,
-            massCost = 1170, energyCost = 9100, durationTicks = 1150,
-            optional = true })
+        if counts.mexT2 < 2 then
+            TableInsert(requests, { id = 'tech-1', lane = 'tech',
+                massDrain = 1, energyDrain = 6,
+                massCost = 900, energyCost = 5400, durationTicks = 900,
+                allowHybrid = true, optional = true })
+        else
+            TableInsert(requests, { id = 'tech-1', lane = 'tech',
+                massDrain = 1.017391, energyDrain = 7.913043,
+                massCost = 1170, energyCost = 9100, durationTicks = 1150,
+                allowHybrid = true, optional = true })
+        end
     end
     local commitments = {}
     local records = RecordByToken(observation.units or {})
@@ -9358,7 +9365,8 @@ ESCALATION.PrepareFundingGrants = function(controller, macroPlan)
             and (grant.requestId or grant.id) or nil
         if type(requestId) == 'string' and requestId ~= ''
             and allowed[grant.lane] == true
-            and (grant.source == 'recurring' or grant.source == 'bank')
+            and (grant.source == 'recurring' or grant.source == 'bank'
+                or grant.source == 'hybrid')
             and controller.fundingGrants[requestId] == nil
         then
             local copy = ESCALATION.DeepCopy(grant)

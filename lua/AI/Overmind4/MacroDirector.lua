@@ -183,11 +183,22 @@ MacroDirector.BuildPortfolio = function(snapshot)
             local energyDrain = Number(request.energyDrain, 0) or 0
             local massCost = Number(request.massCost, 0) or 0
             local energyCost = Number(request.energyCost, 0) or 0
+            local durationTicks = Number(request.durationTicks, 0) or 0
             local recurringFits = recurringMass >= massDrain and recurringEnergy >= energyDrain
             local bankFits = bankMass >= massCost and bankEnergy >= energyCost
+            local hybridMassBank = math.min(bankMass, massCost)
+            local hybridEnergyBank = math.min(bankEnergy, energyCost)
+            local hybridMassRate = durationTicks > 0
+                and math.max(0, massCost - hybridMassBank) / durationTicks or 0
+            local hybridEnergyRate = durationTicks > 0
+                and math.max(0, energyCost - hybridEnergyBank) / durationTicks or 0
+            local hybridFits = request.allowHybrid == true and durationTicks > 0
+                and recurringMass >= hybridMassRate
+                and recurringEnergy >= hybridEnergyRate
             local optionalBlocked = plan.stalled and request.optional == true
-            if (recurringFits or bankFits) and not optionalBlocked then
-                local source = recurringFits and 'recurring' or 'bank'
+            if (recurringFits or bankFits or hybridFits) and not optionalBlocked then
+                local source = recurringFits and 'recurring'
+                    or bankFits and 'bank' or 'hybrid'
                 lane.admitted = true
                 lane.admittedCount = lane.admittedCount + 1
                 committedMass = committedMass + massDrain
@@ -195,9 +206,14 @@ MacroDirector.BuildPortfolio = function(snapshot)
                 if recurringFits then
                     recurringMass = recurringMass - massDrain
                     recurringEnergy = recurringEnergy - energyDrain
-                else
+                elseif bankFits then
                     bankMass = bankMass - massCost
                     bankEnergy = bankEnergy - energyCost
+                else
+                    bankMass = bankMass - hybridMassBank
+                    bankEnergy = bankEnergy - hybridEnergyBank
+                    recurringMass = recurringMass - hybridMassRate
+                    recurringEnergy = recurringEnergy - hybridEnergyRate
                 end
                 table.insert(plan.grants, {
                     requestId = request.id,
@@ -1420,7 +1436,13 @@ MacroDirector.PlanTech = function(snapshot)
         mexUpgradeRolesBySite = {},
         t3Action = 'hold',
     }
-    if not snapshot.t2HqComplete and healthy and funded then
+    local t2MexCount = 0
+    for _, extractor in ipairs(snapshot.mex or {}) do
+        if extractor.tier == 2 or extractor.tier == 3 then
+            t2MexCount = t2MexCount + 1
+        end
+    end
+    if not snapshot.t2HqComplete and t2MexCount >= 2 and healthy and funded then
         if Count(factories) >= 2 and Count(idleFactories) >= 1 then
             plan.hqAction = 'start_t2'
             plan.hqSourceToken = idleFactories[1].token
@@ -1456,8 +1478,9 @@ MacroDirector.PlanTech = function(snapshot)
         plan.t3UpgradeRole = 'land_factory_t3'
         plan.t3ProductionRole = 't3_direct_fire'
     end
-    if snapshot.t2HqComplete and healthy and funded
+    if healthy and funded
         and (Number(snapshot.activeMexUpgrades, 0) or 0) == 0
+        and (snapshot.t2HqComplete or t2MexCount < 2)
     then
         local t1Mex = {}
         local t2Mex = {}
@@ -1472,7 +1495,8 @@ MacroDirector.PlanTech = function(snapshot)
         end
         SortByKey(t1Mex, 'key')
         SortByKey(t2Mex, 'key')
-        local selected = plan.t3Action == 'admit' and t2Mex[1] or nil
+        local selected = snapshot.t2HqComplete
+            and plan.t3Action == 'admit' and t2Mex[1] or nil
         selected = selected or t1Mex[1]
         if selected then
             table.insert(plan.mexUpgradeSiteKeys, selected.key)
