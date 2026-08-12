@@ -357,6 +357,50 @@ def test_first_t2_engineer_clears_rally_and_builds_local_power_immediately() -> 
     assert harness.calls.buildMobile[1].blueprintId == "ueb1201"
 
 
+def test_second_t2_engineer_is_reserved_for_local_power_before_touring() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    harness.brain.massStoredRatio = 0.1
+    harness.brain.massTrend = 0
+    harness.brain.energyStoredRatio = 0.1
+    harness.brain.energyTrend = 0
+    harness.brain.energyIncome = 30
+    harness.brain.energyRequested = 30
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="energy_recovery")
+    )
+    mexes = [
+        harness.unit(
+            entityId=100 + index,
+            blueprintId="ueb1103",
+            position=[80 + index * 4, 2, 80],
+        )
+        for index in range(17)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(entityId=20, blueprintId="ueb0201", position=[40, 2, 40]),
+            harness.unit(entityId=22, blueprintId="ueb1201", position=[31, 2, 40]),
+            harness.unit(
+                entityId=21,
+                blueprintId="uel0208",
+                position=[35, 2, 40],
+                canBuild={"ueb1201": True},
+                idleState=False,
+                states={"Moving": True},
+            ),
+            *mexes,
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.buildMobile) == 1
+    target = plain(harness.calls.buildMobile[1].position)
+    assert (target[0] - 40) ** 2 + (target[2] - 40) ** 2 < 20**2
+
+
 def test_t2_power_uses_nearest_builder_candidate_pair_not_first_factory() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
@@ -488,7 +532,7 @@ def test_pending_or_completed_t2_generator_suppresses_another() -> None:
         )
 
 
-def test_completed_t2_hq_requests_two_separately_funded_tech_slots() -> None:
+def test_completed_t2_hq_funds_cheap_support_upgrade_before_more_mex() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
     harness.brain.units = harness.lua.table_from(
@@ -509,9 +553,14 @@ def test_completed_t2_hq_requests_two_separately_funded_tech_slots() -> None:
     harness.lua.globals().Controller.Step(harness.controller)
 
     requests = plain(harness.calls.macroBuildPortfolio[1])["requests"]
-    assert [
-        request["id"] for request in requests if request["lane"] == "tech"
-    ] == ["tech-1", "tech-2"]
+    tech_requests = [request for request in requests if request["lane"] == "tech"]
+    assert [request["id"] for request in tech_requests] == [
+        "tech-support-1",
+        "tech-mex-1",
+    ]
+    assert tech_requests[0]["massCost"] == 340
+    assert tech_requests[0]["energyCost"] == 2700
+    assert tech_requests[0]["portfolioPriority"] < tech_requests[1]["portfolioPriority"]
 
 
 def test_two_funded_mex_upgrade_slots_issue_two_distinct_upgrades() -> None:

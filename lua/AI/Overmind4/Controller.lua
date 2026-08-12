@@ -9122,6 +9122,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         mexT3 = 0,
         landFactoriesT1 = 0,
         landFactoriesT2 = 0,
+        landFactoriesT2Support = 0,
         airFactoriesT1 = 0,
         air_scout = 0,
         interceptor = 0,
@@ -9146,6 +9147,9 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
                 or unit.role == 'land_factory_t3'
             then
                 counts.landFactoriesT2 = counts.landFactoriesT2 + 1
+            end
+            if unit.role == 'land_factory_t2_support' then
+                counts.landFactoriesT2Support = counts.landFactoriesT2Support + 1
             end
             if unit.role == 'air_factory' then counts.airFactoriesT1 = counts.airFactoriesT1 + 1 end
             if counts[unit.role] ~= nil then counts[unit.role] = counts[unit.role] + 1 end
@@ -9235,24 +9239,30 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     if completedMex >= 9 and counts.landFactoriesT1 >= 2
         and not activeTechUpgrade
     then
-        if counts.mexT2 < 2 then
+        if counts.landFactoriesT2 < 1 and counts.mexT2 < 2 then
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1, energyDrain = 6,
                 massCost = 900, energyCost = 5400, durationTicks = 900,
                 allowHybrid = true, optional = true })
-        else
+        elseif counts.landFactoriesT2 < 1 then
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1.017391, energyDrain = 7.913043,
                 massCost = 1170, energyCost = 9100, durationTicks = 1150,
                 allowHybrid = true, required = true,
                 portfolioPriority = 1.5 })
-            if counts.landFactoriesT2 >= 1 then
-                TableInsert(requests, { id = 'tech-2', lane = 'tech',
-                    massDrain = 1, energyDrain = 6,
-                    massCost = 900, energyCost = 5400,
-                    durationTicks = 900, allowHybrid = true,
-                    optional = true, portfolioPriority = 1.6 })
+        else
+            if counts.landFactoriesT2Support < 1 then
+                TableInsert(requests, { id = 'tech-support-1', lane = 'tech',
+                    massDrain = 0.566667, energyDrain = 4.5,
+                    massCost = 340, energyCost = 2700,
+                    durationTicks = 600, allowHybrid = true,
+                    required = true, portfolioPriority = 1.4 })
             end
+            TableInsert(requests, { id = 'tech-mex-1', lane = 'tech',
+                massDrain = 1, energyDrain = 6,
+                massCost = 900, energyCost = 5400,
+                durationTicks = 900, allowHybrid = true,
+                optional = true, portfolioPriority = 1.6 })
         end
     end
     local commitments = {}
@@ -9381,7 +9391,8 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         end
     end
     local t2PowerTarget = math.min(4, math.max(1, math.ceil(completedMex / 6)))
-    local firstT2Power = t2PowerCount < 1 and completedMex >= 9
+    local localT2PowerBuildout = t2PowerCount < t2PowerTarget
+        and completedMex >= 9
     local urgentEnergyDeficit = completedMex >= 9
         and ESCALATION.FiniteEconomyNumber(economy.energyIncome)
         and ESCALATION.FiniteEconomyNumber(economy.energyRequested)
@@ -9402,7 +9413,7 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         and TableGetn(t2PowerPositions) > 0
         and energyLane
         and (energyLane.admitted == true or energyLane.preserved == true)
-        and (firstT2Power or safePowerBank or urgentEnergyDeficit)
+        and (localT2PowerBuildout or safePowerBank or urgentEnergyDeficit)
     then
         local best = nil
         local bestPosition = nil
