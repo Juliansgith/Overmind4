@@ -55,6 +55,47 @@ def test_live_director_regional_expansion_starts_pressure_front() -> None:
     assert len(campaign_intents(harness, observation)) == 1
 
 
+def test_pressure_front_executes_when_force_director_owns_home_reserve() -> None:
+    harness, _, _, _, _ = start_campaign(
+        reason="regional_expansion",
+        site_key="front-a",
+        cluster_key="front-a",
+        position=[70, 2, 40],
+        extra_markers=[layered_marker("front-b", 80, 50)],
+    )
+    home = campaign_state(harness)["homeTokens"]
+    harness.lua.globals().directorResults.forcePlan = lua_value(
+        harness.lua,
+        {
+            "epoch": 1,
+            "assignments": {
+                "home": home,
+                "garrison": [],
+                "field": [],
+                "response": [],
+                "raider": [],
+                "unassigned": [],
+            },
+            "ownershipByToken": {token: "home" for token in home},
+            "regionAssignments": {},
+            "ratios": {},
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert plain(harness.controller.forcePlan)["ownershipByToken"]
+    assert campaign_state(harness)["state"] == "active"
+    assert len(harness.calls.aggressive) == 1
+
+    harness.brain.tick += 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert campaign_state(harness)["state"] == "active"
+    assert len(harness.calls.aggressive) == 1
+
+
 def put_units(harness: Any, units: list[Any], seed: int = 0) -> None:
     shuffled = list(units)
     random.Random(seed).shuffle(shuffled)

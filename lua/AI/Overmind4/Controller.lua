@@ -11962,8 +11962,7 @@ Controller.Step = function(controller)
             if directorClaims[token] then claimed = true end
         end
         local forceOwned = CountArray((controller.forcePlan or {}).ownershipByToken or {}) > 0
-        local legacyOffense = forceOwned and (intent.kind == 'field_campaign'
-            or intent.kind == 'frontier_screen'
+        local legacyOffense = forceOwned and (intent.kind == 'frontier_screen'
             or intent.kind == 'commander_push'
             or intent.kind == 'mobilize_commander'
             or intent.kind == 'reinforce_commander'
