@@ -374,7 +374,7 @@ end
 local function RegionEligible(region)
     if not region then return true end
     if region.connected == false then return false end
-    return region.state ~= 'suspended'
+    return region.state ~= 'suspended' and region.state ~= 'contested'
 end
 
 local function NormalizedPosition(position)

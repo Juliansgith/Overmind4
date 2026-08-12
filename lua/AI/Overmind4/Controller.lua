@@ -8797,7 +8797,7 @@ ESCALATION.DirectorRegions = function(controller, observation, intelState)
     local previous = (controller.directorState or {}).regions or {}
     local byKey = {}
     for _, site in ipairs((observation.sites or {}).mass or {}) do byKey[site.key] = site end
-    for _, region in ipairs(clustered) do
+    for regionIndex, region in ipairs(clustered) do
         local old = previous[region.key]
         local completed = 0
         local lost = 0
@@ -8829,12 +8829,15 @@ ESCALATION.DirectorRegions = function(controller, observation, intelState)
             and packageRoles.land_factory == true
         local pressured = false
         for _, contact in pairs((intelState or {}).contacts or {}) do
-            if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) <= 60
+            if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) <= 600
                 and Distance(contact.position, region.position) <= region.radius
             then
                 pressured = true
             end
         end
+        intelState.expansionSafety = intelState.expansionSafety or {}
+        intelState.expansionSafety[region.key] = pressured
+            and 'contested' or 'safe'
         if old then
             region.state = old.state
             region.lossCount = old.lossCount
@@ -8851,6 +8854,17 @@ ESCALATION.DirectorRegions = function(controller, observation, intelState)
         else
             region.state = 'planned'
         end
+        if old and old.state == 'contested' and not pressured then
+            if Distance(region.position, controller.basePosition) <= 60 then
+                region.state = 'secured'
+                region.productionAnchor = true
+                region.reclaimAnchor = true
+            elseif completed > 0 then
+                region.state = 'establishing'
+            else
+                region.state = 'planned'
+            end
+        end
         if old and old.state == 'secured' and completed == 0 and lost > 0 then
             region = ESCALATION.directors.macro.AdvanceRegion(region, {
                 event = 'package_lost', tick = observation.tick,
@@ -8861,8 +8875,7 @@ ESCALATION.DirectorRegions = function(controller, observation, intelState)
             region = ESCALATION.directors.macro.AdvanceRegion(region, {
                 event = 'suspension_expired', tick = observation.tick,
             })
-        elseif pressured and (region.state == 'secured'
-                or region.state == 'establishing')
+        elseif pressured and region.state ~= 'suspended'
         then
             region = ESCALATION.directors.macro.AdvanceRegion(region, {
                 event = 'enemy_pressure', tick = observation.tick,
@@ -8880,6 +8893,7 @@ ESCALATION.DirectorRegions = function(controller, observation, intelState)
                 event = 'retake_funded', tick = observation.tick,
             })
         end
+        clustered[regionIndex] = region
     end
     table.sort(clustered, function(a, b) return tostring(a.key) < tostring(b.key) end)
     controller.directorState.regions = {}

@@ -1197,6 +1197,68 @@ def test_visual_mex_preempts_an_active_public_bomber_harass_route() -> None:
     assert mission.get("publicHarass") is not True
 
 
+def test_recent_scout_contact_defers_unescorted_mex_until_intelligence_expires() -> None:
+    harness = make_harness()
+    _use_real_macro_expansion_and_job_ledger(harness)
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute(
+        "IntelligenceStub.UpdateMemory = Intelligence.UpdateMemory; "
+        "MacroDirectorStub.ClusterRegions = MacroDirector.ClusterRegions; "
+        "MacroDirectorStub.AdvanceRegion = MacroDirector.AdvanceRegion"
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    site = plain(harness.controller.markers.mass[1])
+    harness.controller.markers.mass = lua_value(harness.lua, [site])
+    engineer = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[10, 2, 20],
+        canBuild={"ueb1103": True},
+    )
+    enemy_tank = harness.unit(
+        entityId=90,
+        blueprintId="uel0201",
+        army=2,
+        position=site["position"],
+        seenNow=True,
+        onRadar=True,
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    harness.brain.enemies = harness.lua.table_from([enemy_tank])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert not any(
+        call.blueprintId == "ueb1103" for call in harness.calls.buildMobile.values()
+    )
+    safety = plain(harness.controller.intelState)["expansionSafety"]
+    assert set(safety.values()) == {"contested"}
+
+    harness.brain.enemies = harness.lua.table_from([])
+    harness.brain.tick = 100
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert not any(
+        call.blueprintId == "ueb1103" for call in harness.calls.buildMobile.values()
+    )
+
+    harness.brain.tick = 601
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert sum(
+        call.blueprintId == "ueb1103" for call in harness.calls.buildMobile.values()
+    ) == 1
+
+
 def test_public_bomber_harass_releases_after_route_and_reissues_without_churn() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
