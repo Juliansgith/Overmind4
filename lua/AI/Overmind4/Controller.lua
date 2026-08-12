@@ -8804,6 +8804,8 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         TableInsert(requests, { id = 'engineer-1', lane = 'engineers',
             massDrain = 0.2, energyDrain = 2, massCost = 52,
             energyCost = 260 })
+    end
+    if counts.landFactoriesT1 + counts.landFactoriesT2 > 0 then
         TableInsert(requests, { id = 'land-1', lane = 'land_production',
             massDrain = 0.28, energyDrain = 3, massCost = 56,
             energyCost = 600, required = true })

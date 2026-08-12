@@ -325,6 +325,10 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
     assert not any(
         request["lane"] == "engineers" for request in macro_input["requests"]
     )
+    assert any(
+        request["lane"] == "land_production"
+        for request in macro_input["requests"]
+    )
     assert plain(harness.controller.macroPlan)["lanes"]["factory_growth"][
         "admitted"
     ] is True
