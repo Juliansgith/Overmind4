@@ -9379,12 +9379,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     if completedMex >= 9 and counts.landFactoriesT1 >= 2
         and not activeFactoryTechUpgrade
     then
-        if counts.landFactoriesT2 < 1 and counts.mexT2 < 2 then
-            TableInsert(requests, { id = 'tech-1', lane = 'tech',
-                massDrain = 1, energyDrain = 6,
-                massCost = 900, energyCost = 5400, durationTicks = 900,
-                allowHybrid = true, optional = true })
-        elseif counts.landFactoriesT2 < 1 then
+        if counts.landFactoriesT2 < 1 then
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1.017391, energyDrain = 7.913043,
                 massCost = 1170, energyCost = 9100, durationTicks = 1150,

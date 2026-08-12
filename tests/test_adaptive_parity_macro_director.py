@@ -2643,7 +2643,7 @@ class TestRegionalMacro:
         assert blocked["hqAction"] == "hold"
         assert blocked["hqDenialReason"] == "preserve_final_t1_lane"
 
-    def test_first_t2_hq_pauses_new_mex_upgrades_until_the_hq_exists(self) -> None:
+    def test_first_t2_hq_precedes_new_mex_upgrades(self) -> None:
         before_mex_tech = {
             "economyHealthy": True,
             "techFunded": True,
@@ -2665,9 +2665,9 @@ class TestRegionalMacro:
         mex_plan = invoke(MODULE, GLOBAL, "PlanTech", before_mex_tech)
         hq_plan = invoke(MODULE, GLOBAL, "PlanTech", after_two_upgrades)
 
-        assert mex_plan["hqAction"] == "hold"
-        assert mex_plan["mexUpgradeSiteKeys"] == ["mex-0", "mex-1"]
-        assert mex_plan["mexUpgradeRolesBySite"]["mex-0"] == "mass_extractor_t2"
+        assert mex_plan["hqAction"] == "start_t2"
+        assert mex_plan["hqSourceToken"] == "land-a"
+        assert not mex_plan["mexUpgradeSiteKeys"]
         assert hq_plan["hqAction"] == "start_t2"
         assert not hq_plan["mexUpgradeSiteKeys"]
 
