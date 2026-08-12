@@ -1301,7 +1301,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
     end
 
-    local adjacencyPowerTarget = math.min(10,
+    local adjacencyPowerTarget = math.min(24,
         math.max(4, completedFactories * 3))
     if not underContact
         and completedMex >= 6

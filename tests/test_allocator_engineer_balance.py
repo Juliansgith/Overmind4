@@ -683,6 +683,36 @@ def test_factory_count_scales_adjacency_power_before_air_stalls() -> None:
     ]
 
 
+def test_eight_factories_continue_adjacency_power_beyond_the_old_ten_cap() -> None:
+    snapshot = _policy_allocator_snapshot(
+        *("land_factory" for _ in range(6)),
+        "land_factory_t2",
+        "air_factory",
+        *("power_generator" for _ in range(10)),
+        *("mass_extractor" for _ in range(12)),
+        "engineer",
+        "engineer",
+    )
+    snapshot["macro"].update(
+        availableRecurringMass=1,
+        availableRecurringEnergy=8,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=500,
+        oneTimeEnergyReserve=4000,
+        factoryFundedCount=0,
+    )
+
+    power = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "factory_adjacency_power"
+    ]
+
+    assert len(power) == 1
+    assert power[0]["buildRole"] == "power_generator"
+
+
 def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy() -> None:
     snapshot = _policy_allocator_snapshot(
         "air_factory",
