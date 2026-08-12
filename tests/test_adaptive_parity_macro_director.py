@@ -177,7 +177,7 @@ class TestFundedPortfolio:
             "tech",
         }
 
-    def test_live_nine_mex_state_caps_the_engineer_target_below_the_artifact_count(self) -> None:
+    def test_live_nine_mex_state_scales_from_completed_economy_not_raw_markers(self) -> None:
         snapshot = portfolio_snapshot()
         snapshot["economy"].update(
             {
@@ -198,11 +198,11 @@ class TestFundedPortfolio:
 
         plan = build_portfolio(snapshot)
 
-        assert plan["engineerTarget"] == 9
+        assert plan["engineerTarget"] == 13
 
     @pytest.mark.parametrize(
         ("completed_mex", "expected_target"),
-        [(0, 4), (6, 7), (11, 10), (16, 12), (40, 12)],
+        [(0, 4), (6, 10), (11, 15), (16, 16), (40, 16)],
     )
     def test_completed_mex_scales_the_early_engineer_target_to_adaptive_pace(
         self, completed_mex: int, expected_target: int
