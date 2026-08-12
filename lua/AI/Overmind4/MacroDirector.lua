@@ -2,10 +2,10 @@ local LANE_ORDER = {
     'energy_recovery',
     'mex_rebuild',
     'reclaim',
-    'factory_growth',
     'land_production',
     'air_production',
     'engineers',
+    'factory_growth',
     'tech',
 }
 
@@ -13,10 +13,10 @@ local LANE_RANK = {
     energy_recovery = 1,
     mex_rebuild = 2,
     reclaim = 3,
-    factory_growth = 4,
-    land_production = 5,
-    air_production = 6,
-    engineers = 7,
+    land_production = 4,
+    air_production = 5,
+    engineers = 6,
+    factory_growth = 7,
     tech = 8,
 }
 
@@ -242,9 +242,9 @@ MacroDirector.BuildPortfolio = function(snapshot)
         + (Number(counts.mexT2, 0) or 0)
         + (Number(counts.mexT3, 0) or 0)
     plan.engineerTarget = Clamp(math.max(
-        3 + math.floor(completedMex / 2),
+        4 + completedMex,
         2 + plan.fundedExpansionSlots
-    ), 2, 12)
+    ), 4, 20)
     plan.landFactoryTarget = Clamp(1 + Ceil(landBacklog / 3), 1, 12)
     plan.airFactoryTarget = Clamp(1 + Ceil(airBacklog / 3), 1, 4)
     plan.factoryTarget = Clamp(plan.landFactoryTarget + plan.airFactoryTarget, 1, 16)
