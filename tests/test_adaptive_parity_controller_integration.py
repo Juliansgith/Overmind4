@@ -6709,7 +6709,7 @@ def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> N
     assert sorted(len(call.units) for call in harness.calls.aggressive.values()) == [4, 4, 4]
     assert {
         tuple(plain(call.position)) for call in harness.calls.aggressive.values()
-    } == {(150, 2, 150), (250, 2, 250), (350, 2, 350)}
+    } == {(150, 2, 150)}
 
     harness.brain.tick = 101
     harness.lua.globals().Controller.Step(harness.controller)

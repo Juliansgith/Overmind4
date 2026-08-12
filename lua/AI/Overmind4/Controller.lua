@@ -11435,31 +11435,24 @@ ESCALATION.AdaptForceIntents = function(
     end
     table.sort(raiderTargets, function(a, b)
         if a.rank ~= b.rank then return a.rank < b.rank end
-        if (a.seen or -1) ~= (b.seen or -1) then
-            return (a.seen or -1) > (b.seen or -1)
-        end
-        if a.distance ~= b.distance then return a.distance > b.distance end
         return a.key < b.key
     end)
     local raiderTokens = CopyArray(
         ((forcePlan or {}).assignments or {}).raider or {}
     )
     table.sort(raiderTokens)
-    local targetIndex = 1
     while TableGetn(raiderTokens) > 0 and TableGetn(raiderTargets) > 0 do
         local tokens = {}
         for index = 1, 4 do
             local token = table.remove(raiderTokens, 1)
             if token then TableInsert(tokens, token) end
         end
-        local target = raiderTargets[targetIndex]
+        local target = raiderTargets[1]
         ESCALATION.AppendDirectorIntent(intents, {
             kind = 'regional_raider', regionKey = target.key,
             actorTokens = tokens, position = CopyPosition(target.position),
             priority = 5,
         })
-        targetIndex = targetIndex + 1
-        if targetIndex > TableGetn(raiderTargets) then targetIndex = 1 end
     end
     local responseTarget = (forcePlan or {}).responseTarget
     if not (forcePlan or {}).responseIntent
@@ -13438,10 +13431,13 @@ ESCALATION.ExecuteForceMove = function(
         local previous = controller.forceMoveByToken[token]
         local atTarget = CopyPosition(record.position)
             and Distance(record.position, destination) <= 35
-        if (bucket == 'garrison' or bucket == 'raider')
-            and previous and previous.key == moveKey
-            and (atTarget
-                or CurrentTick(controller) - (tonumber(previous.tick) or 0) < 600)
+        local previousAge = previous
+            and CurrentTick(controller) - (tonumber(previous.tick) or 0)
+            or 1000000
+        if (bucket == 'raider' and previous and previous.key == moveKey
+                and (atTarget or previousAge < 600))
+            or (bucket == 'garrison' and previous
+                and (atTarget or previousAge < 600))
         then
             seen[token] = true
         else
