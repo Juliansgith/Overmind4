@@ -64,14 +64,23 @@ local BUILD_ROLES = {
         'mass_storage', 'point_defense', 'power_generator', 'radar',
         'static_anti_air',
     },
+    t2_engineer = {
+        'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor',
+        'mass_storage', 'point_defense', 'power_generator',
+        'power_generator_t2', 'radar', 'static_anti_air',
+    },
     land_factory = {
         'anti_air', 'artillery', 'engineer', 'lab', 'land_factory_t2',
         'land_factory_t2_support',
         'scout', 'tank',
     },
     air_factory = { 'air_scout', 'bomber', 'interceptor', 'transport' },
-    land_factory_t2 = { 'land_factory_t3', 't2_anti_air', 't2_direct_fire' },
-    land_factory_t2_support = { 't2_anti_air', 't2_direct_fire' },
+    land_factory_t2 = {
+        'land_factory_t3', 't2_anti_air', 't2_direct_fire', 't2_engineer',
+    },
+    land_factory_t2_support = {
+        't2_anti_air', 't2_direct_fire', 't2_engineer',
+    },
     land_factory_t3 = { 't3_direct_fire' },
 }
 
@@ -134,7 +143,9 @@ local ESCALATION = {
         mass_extractor_t3 = 'tech',
         mass_storage = 'construction',
         power_generator = 'energy',
+        power_generator_t2 = 'energy',
         engineer = 'engineer',
+        t2_engineer = 'tech',
         anti_air = 'factory',
         artillery = 'factory',
         lab = 'factory',
@@ -156,6 +167,7 @@ local ESCALATION = {
         land_factory_t3 = true,
         mass_storage = true,
         power_generator = true,
+        power_generator_t2 = true,
     },
     placementObstacleRoles = {
         air_factory = true,
@@ -169,6 +181,7 @@ local ESCALATION = {
         mass_extractor_t3 = true,
         mass_storage = true,
         power_generator = true,
+        power_generator_t2 = true,
     },
     factoryProducts = {
         air_factory = {
@@ -179,8 +192,12 @@ local ESCALATION = {
             anti_air = true, artillery = true, engineer = true,
             lab = true, scout = true, tank = true,
         },
-        land_factory_t2 = { t2_anti_air = true, t2_direct_fire = true },
-        land_factory_t2_support = { t2_anti_air = true, t2_direct_fire = true },
+        land_factory_t2 = {
+            t2_anti_air = true, t2_direct_fire = true, t2_engineer = true,
+        },
+        land_factory_t2_support = {
+            t2_anti_air = true, t2_direct_fire = true, t2_engineer = true,
+        },
         land_factory_t3 = { t3_direct_fire = true },
     },
 }
@@ -2714,6 +2731,7 @@ local function PlacementSnapshot(controller, units)
         land_factory = {},
         mass_storage = {},
         power_generator = {},
+        power_generator_t2 = {},
     }
     local claimed = {}
     local occupiedRects = {}
@@ -2772,11 +2790,21 @@ local function PlacementSnapshot(controller, units)
     table.sort(sortedSeeds, function(a, b)
         return tostring(PlacementKey(a) or '') < tostring(PlacementKey(b) or '')
     end)
-    for _, role in ipairs({ 'power_generator', 'land_factory', 'air_factory' }) do
+    local placementRoles = {}
+    for _, unit in ipairs(units or {}) do
+        if unit.complete == true and unit.role == 't2_engineer' then
+            TableInsert(placementRoles, 'power_generator_t2')
+            break
+        end
+    end
+    TableInsert(placementRoles, 'power_generator')
+    TableInsert(placementRoles, 'land_factory')
+    TableInsert(placementRoles, 'air_factory')
+    for _, role in ipairs(placementRoles) do
         roleProbeStart = probes
-        if role == 'power_generator' then
+        if role == 'power_generator' or role == 'power_generator_t2' then
             local generatorSpec = ESCALATION.FootprintSpec(
-                controller, 'power_generator'
+                controller, role
             )
             local factories = {}
             for _, unit in ipairs(units or {}) do
@@ -2818,20 +2846,20 @@ local function PlacementSnapshot(controller, units)
                             if segment < segmentsZ then
                                 local minimumZ = rect[2]
                                     + segment * generatorSpec.skirtZ
-                                Consider('power_generator', PositionFromMinimum(
+                                Consider(role, PositionFromMinimum(
                                     rect[1] - generatorSpec.skirtX, minimumZ
                                 ))
-                                Consider('power_generator', PositionFromMinimum(
+                                Consider(role, PositionFromMinimum(
                                     rect[3], minimumZ
                                 ))
                             end
                             if segment < segmentsX then
                                 local minimumX = rect[1]
                                     + segment * generatorSpec.skirtX
-                                Consider('power_generator', PositionFromMinimum(
+                                Consider(role, PositionFromMinimum(
                                     minimumX, rect[2] - generatorSpec.skirtZ
                                 ))
-                                Consider('power_generator', PositionFromMinimum(
+                                Consider(role, PositionFromMinimum(
                                     minimumX, rect[4]
                                 ))
                             end
@@ -2910,6 +2938,7 @@ local function PlacementSnapshot(controller, units)
         + TableGetn(placements.air_factory)
         + TableGetn(placements.mass_storage)
         + TableGetn(placements.power_generator)
+        + TableGetn(placements.power_generator_t2)
     return placements
 end
 
@@ -8692,7 +8721,8 @@ end
 ESCALATION.DirectorRoleTier = function(role)
     if role == 'mass_extractor_t3' or role == 'land_factory_t3' then return 3 end
     if role == 'mass_extractor_t2' or role == 'land_factory_t2'
-        or role == 'land_factory_t2_support'
+        or role == 'land_factory_t2_support' or role == 't2_engineer'
+        or role == 'power_generator_t2'
     then return 2 end
     return 1
 end
@@ -9105,6 +9135,62 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
     end
 
     local economy = observation.economy or {}
+    local t2PowerPositions = (observation.placements or {}).power_generator_t2 or {}
+    local hasT2Power = false
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'power_generator_t2' then
+            hasT2Power = true
+            break
+        end
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.buildRole == 'power_generator_t2' then
+            hasT2Power = true
+            break
+        end
+    end
+    if not hasT2Power
+        and TableGetn(t2PowerPositions) > 0
+        and energyLane
+        and (energyLane.admitted == true or energyLane.preserved == true)
+        and ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
+        and ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
+        and ESCALATION.FiniteEconomyNumber(economy.energyTrend, true)
+        and economy.massStoredRatio >= 0.95
+        and economy.massTrend >= 0
+        and economy.energyStoredRatio >= 0.5
+        and economy.energyTrend >= 0
+    then
+        local position = t2PowerPositions[1]
+        local best = nil
+        local bestDistance = nil
+        for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+            if unit.role == 't2_engineer' and unit.available == true
+                and (unit.canBuild or {}).power_generator_t2 == true
+            then
+                local distance = DistanceSquared(unit.position, position)
+                if not best or distance < bestDistance
+                    or (distance == bestDistance
+                        and tostring(unit.token) < tostring(best.token))
+                then
+                    best = unit
+                    bestDistance = distance
+                end
+            end
+        end
+        if best then
+            return best.token, {
+                kind = 'build_structure',
+                actorToken = best.token,
+                buildRole = 'power_generator_t2',
+                position = CopyPosition(position),
+                reason = 'factory_adjacency_t2_power',
+                priority = 2,
+            }
+        end
+    end
+
     local storagePositions = (observation.placements or {}).mass_storage or {}
     if TableGetn(storagePositions) == 0
         or not ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
@@ -9806,6 +9892,7 @@ end
 
 ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, techPlan, intents, reserved)
     local currentEngineers = 0
+    local currentT2Engineers = 0
     local currentLand = 0
     local currentAir = 0
     local currentMex = 0
@@ -9814,6 +9901,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     for _, unit in ipairs(observation.units or {}) do
         if unit.complete == true then
             if unit.role == 'engineer' then currentEngineers = currentEngineers + 1 end
+            if unit.role == 't2_engineer' then
+                currentT2Engineers = currentT2Engineers + 1
+            end
             if unit.roleFamily == 'mass_extractor' then currentMex = currentMex + 1 end
             if unit.role == 'power_generator' then currentPower = currentPower + 1 end
             if unit.role == 'hydrocarbon' then currentHydro = currentHydro + 1 end
@@ -9828,6 +9918,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     end
     for _, operation in pairs(controller.pending or {}) do
         if operation.buildRole == 'engineer' then currentEngineers = currentEngineers + 1 end
+        if operation.buildRole == 't2_engineer' then
+            currentT2Engineers = currentT2Engineers + 1
+        end
         if operation.buildRole == 'land_factory' then currentLand = currentLand + 1 end
         if operation.buildRole == 'air_factory' then currentAir = currentAir + 1 end
     end
@@ -9845,6 +9938,22 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         return nil
     end
     local lanes = macroPlan.lanes or {}
+    local techLane = lanes.tech or {}
+    if currentT2Engineers < 1
+        and (techLane.admitted == true or techLane.preserved == true)
+    then
+        local factory = ESCALATION.AvailableT2DirectorActor(
+            controller, observation, 't2_engineer', reserved
+        )
+        if factory then
+            reserved[factory.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'factory_build', actorToken = factory.token,
+                buildRole = 't2_engineer', operationId = 'tech:t2_engineer',
+                reason = 'strategic_t2_builder', priority = 2,
+            })
+        end
+    end
     if (lanes.factory_growth or {}).admitted == true then
         if currentLand < (tonumber(macroPlan.landFactoryTarget) or currentLand) then
             local actor = ESCALATION.AvailableDirectorActor(
@@ -12223,7 +12332,9 @@ ESCALATION.IntentPortfolioLane = function(intent)
         return 'tech'
     end
     if intent.kind == 'build_structure' or intent.kind == 'assist_structure' then
-        if role == 'power_generator' or role == 'hydrocarbon' then
+        if role == 'power_generator' or role == 'power_generator_t2'
+            or role == 'hydrocarbon'
+        then
             return 'energy_recovery'
         end
         if role == 'mass_extractor' or role == 'radar'
@@ -12236,6 +12347,7 @@ ESCALATION.IntentPortfolioLane = function(intent)
         end
     elseif intent.kind == 'factory_build' then
         if role == 'engineer' then return 'engineers' end
+        if role == 't2_engineer' then return 'tech' end
         if role == 'air_scout' or role == 'interceptor'
             or role == 'bomber' or role == 'transport'
         then

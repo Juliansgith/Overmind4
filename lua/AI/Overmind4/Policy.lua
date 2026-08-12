@@ -203,6 +203,8 @@ local function PlacementRect(role, position)
         or role == 'power_generator'
     then
         size = 2
+    elseif role == 'power_generator_t2' then
+        size = 6
     end
     if not size then return nil end
     local half = size * 0.5

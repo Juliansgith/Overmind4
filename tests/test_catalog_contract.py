@@ -8,8 +8,10 @@ from conftest import execute, source
 EXPECTED_IDS = {
     "acu": "uel0001",
     "engineer": "uel0105",
+    "t2_engineer": "uel0208",
     "land_factory": "ueb0101",
     "power_generator": "ueb1101",
+    "power_generator_t2": "ueb1201",
     "hydrocarbon": "ueb1102",
     "mass_extractor": "ueb1103",
     "scout": "uel0101",

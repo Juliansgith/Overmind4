@@ -95,6 +95,12 @@ def make_harness() -> ControllerHarness:
                 Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
                 Economy = { BuildTime = 125, BuildCostMass = 75, BuildCostEnergy = 750, ProductionPerSecondEnergy = 20 },
             },
+            ueb1201 = {
+                BlueprintId = 'ueb1201',
+                Footprint = { SizeX = 3, SizeZ = 3 },
+                Physics = { SkirtSizeX = 6, SkirtSizeZ = 6, SkirtOffsetX = -1.5, SkirtOffsetZ = -1.5 },
+                Economy = { BuildTime = 2198, BuildCostMass = 1200, BuildCostEnergy = 12000, ProductionPerSecondEnergy = 500 },
+            },
             ueb1102 = {
                 BlueprintId = 'ueb1102',
                 Footprint = { SizeX = 3, SizeZ = 3 },
@@ -135,6 +141,7 @@ def make_harness() -> ControllerHarness:
             uel0103 = { BlueprintId = 'uel0103', Economy = { BuildTime = 200, BuildCostMass = 36, BuildCostEnergy = 180 } },
             uel0104 = { BlueprintId = 'uel0104', Economy = { BuildTime = 220, BuildCostMass = 55, BuildCostEnergy = 275 } },
             uel0105 = { BlueprintId = 'uel0105', Economy = { BuildTime = 260, BuildCostMass = 52, BuildCostEnergy = 260, BuildRate = 5 } },
+            uel0208 = { BlueprintId = 'uel0208', Economy = { BuildTime = 650, BuildCostMass = 130, BuildCostEnergy = 650, BuildRate = 13 } },
             uel0106 = { BlueprintId = 'uel0106', Economy = { BuildTime = 120, BuildCostMass = 30, BuildCostEnergy = 120 } },
             uel0201 = { BlueprintId = 'uel0201', Economy = { BuildTime = 300, BuildCostMass = 56, BuildCostEnergy = 266 } },
             uea0101 = { BlueprintId = 'uea0101', Economy = { BuildTime = 200, BuildCostMass = 40, BuildCostEnergy = 580 } },
