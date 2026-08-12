@@ -9059,35 +9059,76 @@ end
 
 ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroPlan)
     local energyLane = ((macroPlan or {}).lanes or {}).energy_recovery
-    if not energyLane
-        or (energyLane.admitted ~= true and energyLane.preserved ~= true)
-    then
-        return nil
-    end
-    for _, unit in ipairs(observation.units or {}) do
-        if unit.role == 'hydrocarbon' then return nil end
-    end
-    for _, operation in pairs(controller.pending or {}) do
-        if operation.buildRole == 'hydrocarbon' then return nil end
-    end
-    local site = nil
-    for _, candidate in ipairs((observation.sites or {}).hydro or {}) do
-        if candidate.complete ~= true and candidate.occupied ~= true
-            and candidate.reserved ~= true and candidate.buildable ~= false
-            and candidate.engineerReachable == true
-        then
-            site = candidate
-            break
+    local hydroNeeded = energyLane
+        and (energyLane.admitted == true or energyLane.preserved == true)
+    if hydroNeeded then
+        for _, unit in ipairs(observation.units or {}) do
+            if unit.role == 'hydrocarbon' then hydroNeeded = false break end
+        end
+        for _, operation in pairs(controller.pending or {}) do
+            if operation.buildRole == 'hydrocarbon' then
+                hydroNeeded = false
+                break
+            end
         end
     end
-    if not site then return nil end
+    if hydroNeeded then
+        local site = nil
+        for _, candidate in ipairs((observation.sites or {}).hydro or {}) do
+            if candidate.complete ~= true and candidate.occupied ~= true
+                and candidate.reserved ~= true and candidate.buildable ~= false
+                and candidate.engineerReachable == true
+            then
+                site = candidate
+                break
+            end
+        end
+        if site then
+            local best = nil
+            local bestDistance = nil
+            for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+                if unit.role == 'engineer' and unit.available == true
+                    and (unit.canBuild or {}).hydrocarbon == true
+                then
+                    local distance = DistanceSquared(unit.position, site.position)
+                    if not best or distance < bestDistance
+                        or (distance == bestDistance
+                            and tostring(unit.token) < tostring(best.token))
+                    then
+                        best = unit
+                        bestDistance = distance
+                    end
+                end
+            end
+            if best then return best.token, nil end
+        end
+    end
+
+    local economy = observation.economy or {}
+    local storagePositions = (observation.placements or {}).mass_storage or {}
+    if TableGetn(storagePositions) == 0
+        or not ESCALATION.FiniteEconomyNumber(economy.massStoredRatio)
+        or not ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
+        or not ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
+        or not ESCALATION.FiniteEconomyNumber(economy.energyTrend, true)
+        or economy.massStoredRatio < 0.95
+        or economy.massTrend < 0
+        or economy.energyStoredRatio < 0.5
+        or economy.energyTrend < 0
+    then
+        return nil, nil
+    end
+    for _, operation in pairs(controller.pending or {}) do
+        if operation.buildRole == 'mass_storage' then return nil, nil end
+    end
+    local position = storagePositions[1]
     local best = nil
     local bestDistance = nil
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
         if unit.role == 'engineer' and unit.available == true
-            and (unit.canBuild or {}).hydrocarbon == true
+            and (unit.canBuild or {}).mass_storage == true
         then
-            local distance = DistanceSquared(unit.position, site.position)
+            local distance = DistanceSquared(unit.position, position)
             if not best or distance < bestDistance
                 or (distance == bestDistance
                     and tostring(unit.token) < tostring(best.token))
@@ -9097,7 +9138,15 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
             end
         end
     end
-    return best and best.token or nil
+    if not best then return nil, nil end
+    return best.token, {
+        kind = 'build_structure',
+        actorToken = best.token,
+        buildRole = 'mass_storage',
+        position = CopyPosition(position),
+        reason = 'mex_adjacency_storage',
+        priority = 4,
+    }
 end
 
 ESCALATION.DirectorExpansionInput = function(
@@ -11188,7 +11237,8 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     macroPlan.intents = macroPlan.intents or {}
     ESCALATION.PrepareFundingGrants(controller, macroPlan)
 
-    local strategicBuilderToken = ESCALATION.StrategicHydroBuilderToken(
+    local strategicBuilderToken, strategicBuilderIntent =
+        ESCALATION.StrategicHydroBuilderToken(
         controller, observation, macroPlan
     )
     local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
@@ -11371,6 +11421,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     local intents = {}
     local reserved = {}
     if strategicBuilderToken then reserved[strategicBuilderToken] = true end
+    ESCALATION.AppendDirectorIntent(intents, strategicBuilderIntent)
     for _, intent in ipairs(macroPlan.intents or {}) do
         ESCALATION.AppendDirectorIntent(intents, intent)
     end

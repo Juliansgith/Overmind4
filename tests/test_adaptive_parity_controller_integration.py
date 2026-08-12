@@ -481,6 +481,65 @@ def test_funded_mex_expansion_does_not_claim_the_missing_hydro_builder() -> None
     assert harness.calls.buildMobile[1].blueprintId == "ueb1102"
 
 
+def test_full_bank_reserves_one_engineer_for_t2_mex_adjacency_before_expansion() -> None:
+    harness = make_harness()
+    _use_real_macro_expansion_and_job_ledger(harness)
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    storage_builder = harness.unit(
+        entityId=72,
+        blueprintId="uel0105",
+        position=[46, 2, 50],
+        canBuild={"ueb1103": True, "ueb1106": True},
+    )
+    expansion_builder = harness.unit(
+        entityId=73,
+        blueprintId="uel0105",
+        position=[12, 2, 20],
+        canBuild={"ueb1103": True, "ueb1106": True},
+    )
+    t2_mex = harness.unit(
+        entityId=40,
+        blueprintId="ueb1202",
+        position=[50, 2, 50],
+    )
+    hydro = harness.unit(entityId=41, blueprintId="ueb1102")
+    harness.brain.units = harness.lua.table_from([
+        storage_builder,
+        expansion_builder,
+        t2_mex,
+        hydro,
+    ])
+    harness.brain.massStored = 1600
+    harness.brain.massStoredRatio = 1
+    harness.brain.massTrend = 1
+    harness.brain.energyStored = 2400
+    harness.brain.energyStoredRatio = 0.6
+    harness.brain.energyTrend = 10
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "fundedExpansionSlots": 1,
+            "lanes": {"mex_rebuild": {"admitted": True}},
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    calls = plain(harness.calls.buildMobile)
+    assert sorted([
+        (call["units"][0]["options"]["entityId"], call["blueprintId"])
+        for call in calls
+    ]) == [
+        (72, "ueb1106"),
+        (73, "ueb1103"),
+    ]
+
+
 def test_controller_assembles_director_snapshot_in_dependency_order_and_persists_state() -> None:
     harness = make_harness()
     _set_director_result(
