@@ -2667,7 +2667,8 @@ class TestRegionalMacro:
 
         assert mex_plan["hqAction"] == "start_t2"
         assert mex_plan["hqSourceToken"] == "land-a"
-        assert not mex_plan["mexUpgradeSiteKeys"]
+        assert mex_plan["mexUpgradeSiteKeys"] == ["mex-0"]
+        assert mex_plan["mexUpgradeRolesBySite"]["mex-0"] == "mass_extractor_t2"
         assert hq_plan["hqAction"] == "start_t2"
         assert not hq_plan["mexUpgradeSiteKeys"]
 

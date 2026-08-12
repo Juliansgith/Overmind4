@@ -1517,8 +1517,11 @@ MacroDirector.PlanTech = function(snapshot)
     local supportUpgradeNeeded = snapshot.t2HqComplete == true
         and supportFactoryCount < 1
         and Count(factories) >= 2
-    local mexUpgradesMayStart = snapshot.t2HqComplete == true
-        and not supportUpgradeNeeded
+    local openingHqUpgrade = snapshot.t2HqComplete ~= true
+        and plan.hqAction == 'start_t2'
+    local openingHqMex = openingHqUpgrade and t2MexCount == 0
+    local mexUpgradesMayStart = (snapshot.t2HqComplete == true
+        and not supportUpgradeNeeded) or openingHqMex
     if healthy and mexFunded and mexUpgradesMayStart
         and activeMexUpgrades < mexUpgradeLimit
     then
@@ -1548,6 +1551,7 @@ MacroDirector.PlanTech = function(snapshot)
             return ad < bd
         end)
         local remaining = mexUpgradeLimit - activeMexUpgrades
+        if openingHqMex then remaining = math.min(1, remaining) end
         if snapshot.t2HqComplete and plan.t3Action == 'admit'
             and t2Mex[1] and remaining > 0
         then
