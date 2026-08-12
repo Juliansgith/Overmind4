@@ -105,6 +105,7 @@ local ESCALATION = {
     ROUTE_PROBE_STUCK_TICKS = 300,
     ROUTE_PROBE_RELEASE_TICKS = 600,
     ROUTE_BLOCK_TICKS = 3600,
+    ROUTE_BULK_BATCH_SIZE = 8,
     MAX_INTEL_ANCHORS = 8,
     ECONOMY_LEDGER_SAMPLES = 30,
     ECONOMY_LEDGER_INTERVAL_TICKS = 10,
@@ -7149,7 +7150,7 @@ local function EmergencyRecallStagesLive(controller, campaign, recordByToken)
     return true
 end
 
-ESCALATION.RouteIssueCached = function(actors, route, release)
+ESCALATION.RouteIssueCached = function(actors, route, release, batchSize)
     local clearOk = pcall(function() IssueClearCommands(actors) end)
     if not clearOk then
         return false, release == true and 'release_clear' or 'clear'
@@ -7168,23 +7169,40 @@ ESCALATION.RouteIssueCached = function(actors, route, release)
     end
     local waypointCount = TableGetn(route.waypoints or {})
     if waypointCount == 0 then return false end
-    for index = 1, waypointCount - 1 do
-        local moveOk = pcall(function()
-            IssueMove(actors, route.waypoints[index])
-        end)
-        if not moveOk then
-            local cleanupOk = pcall(function() IssueClearCommands(actors) end)
-            return false, cleanupOk
-                and 'move_' .. tostring(index)
-                or 'move_' .. tostring(index) .. '_cleanup'
+    local actorGroups = { actors }
+    if type(batchSize) == 'number'
+        and batchSize >= 1
+        and TableGetn(actors) > batchSize
+    then
+        actorGroups = {}
+        local group = nil
+        for actorIndex, actor in ipairs(actors) do
+            if math.mod(actorIndex - 1, batchSize) == 0 then
+                group = {}
+                TableInsert(actorGroups, group)
+            end
+            TableInsert(group, actor)
         end
     end
-    local aggressiveOk = pcall(function()
-        IssueAggressiveMove(actors, route.waypoints[waypointCount])
-    end)
-    if not aggressiveOk then
-        local cleanupOk = pcall(function() IssueClearCommands(actors) end)
-        return false, cleanupOk and 'aggressive' or 'aggressive_cleanup'
+    for _, group in ipairs(actorGroups) do
+        for index = 1, waypointCount - 1 do
+            local moveOk = pcall(function()
+                IssueMove(group, route.waypoints[index])
+            end)
+            if not moveOk then
+                local cleanupOk = pcall(function() IssueClearCommands(actors) end)
+                return false, cleanupOk
+                    and 'move_' .. tostring(index)
+                    or 'move_' .. tostring(index) .. '_cleanup'
+            end
+        end
+        local aggressiveOk = pcall(function()
+            IssueAggressiveMove(group, route.waypoints[waypointCount])
+        end)
+        if not aggressiveOk then
+            local cleanupOk = pcall(function() IssueClearCommands(actors) end)
+            return false, cleanupOk and 'aggressive' or 'aggressive_cleanup'
+        end
     end
     return true
 end
@@ -7321,7 +7339,8 @@ ESCALATION.ExecuteRoute = function(
     local issued, issueFailure = ESCALATION.RouteIssueCached(
         actors,
         route,
-        release
+        release,
+        mode == 'route_commit' and ESCALATION.ROUTE_BULK_BATCH_SIZE or nil
     )
     if not issued then
         local previousFailure = route.lastFailure
