@@ -728,8 +728,10 @@ def test_full_bank_target_factory_prefers_acu_over_available_field_engineer() ->
         if unit["role"] == "acu":
             unit.update(buildRate=10, idle=False, reclaimPatrolAssigned=True)
     snapshot["macro"].update(
-        factoryTarget=4,
-        factoryDemand=4,
+        # The completed air factory is a separate production lane and must not
+        # satisfy the three-land-factory target.
+        factoryTarget=3,
+        factoryDemand=3,
         massSurplusTicks=300,
         availableRecurringMass=0,
         availableRecurringEnergy=0,

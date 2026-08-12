@@ -1265,7 +1265,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     end
     local currentFactories = (counts.land_factory or 0)
         + (counts.land_factory_t2 or 0)
-        + (counts.air_factory or 0)
     local factoryDemand = macro and (tonumber(macro.factoryDemand) or currentFactories)
         or 3
     local sustainedFactory = not macro
@@ -1727,7 +1726,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         then
             local currentFactories = (counts.land_factory or 0)
                 + (counts.land_factory_t2 or 0)
-                + (counts.air_factory or 0)
             local factoryDemand = macro and (tonumber(macro.factoryDemand) or currentFactories) or 3
             local sustained = not macro
                 or (tonumber(macro.massSurplusTicks) or 0) >= 300
