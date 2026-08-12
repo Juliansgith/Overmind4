@@ -10128,6 +10128,66 @@ ESCALATION.AdaptTransportIntent = function(
             local record = records[delivery.actorToken]
             if not record or record.role ~= 'engineer' or record.complete ~= true then
                 controller.transportDeliveries[siteKey] = nil
+            elseif not SafeCall(false, controller.brain.CanBuildStructureAt,
+                    controller.brain, Catalog.IdFor('mass_extractor'),
+                    TerrainPosition(site.position))
+            then
+                local alternatives = {}
+                for _, candidate in ipairs(((observation or {}).sites or {}).mass or {}) do
+                    local candidatePosition = TerrainPosition(candidate.position)
+                    if candidate.key ~= siteKey and candidate.complete ~= true
+                        and candidate.buildable ~= false and candidate.reserved ~= true
+                        and not controller.transportDeliveries[candidate.key]
+                        and not controller.reservations[candidate.key]
+                        and not SiteIsBlocked(controller, candidate.key)
+                        and candidatePosition
+                        and Reachable('Amphibious', record.position, candidatePosition)
+                    then
+                        local safe = true
+                        for _, contact in pairs((controller.intelState or {}).contacts or {}) do
+                            if observation.tick - (tonumber(contact.lastSeenTick) or -1000000) < 300
+                                and Distance(contact.position, candidatePosition) <= 80
+                            then
+                                safe = false
+                            end
+                        end
+                        if safe then
+                            TableInsert(alternatives, {
+                                key = candidate.key,
+                                position = candidatePosition,
+                                distance = DistanceSquared(record.position, candidatePosition),
+                            })
+                        end
+                    end
+                end
+                table.sort(alternatives, function(a, b)
+                    if a.distance == b.distance then return a.key < b.key end
+                    return a.distance < b.distance
+                end)
+                local replacement = nil
+                for index, candidate in ipairs(alternatives) do
+                    if index > 8 then break end
+                    if SafeCall(false, controller.brain.CanBuildStructureAt,
+                        controller.brain, Catalog.IdFor('mass_extractor'),
+                        candidate.position) == true
+                    then
+                        replacement = candidate
+                        break
+                    end
+                end
+                if replacement then
+                    controller.transportDeliveries[siteKey] = nil
+                    delivery.siteKey = replacement.key
+                    delivery.position = CopyPosition(replacement.position)
+                    delivery.clearanceOrdered = false
+                    controller.transportDeliveries[replacement.key] = delivery
+                    Emit(controller, 'airlift_delivery_retarget', {
+                        actor = delivery.actorToken,
+                        from_site = siteKey,
+                        site = replacement.key,
+                    })
+                end
+                return
             elseif controller.pending[delivery.actorToken] or record.idle ~= true then
                 return
             elseif delivery.clearanceOrdered == true

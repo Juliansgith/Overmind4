@@ -2701,7 +2701,7 @@ def test_airlift_unload_reserves_the_exact_drop_mex_without_building_before_deta
     assert mission["deliveryClearanceQueued"] is True
 
 
-def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> None:
+def test_airlift_delivery_retargets_when_the_drop_mex_becomes_blocked() -> None:
     harness = make_harness()
     drop = [300, 2, 300]
     cargo = harness.unit(
@@ -2724,7 +2724,17 @@ def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> Non
                 "localSite": False,
                 "reachable": True,
                 "engineerReachable": True,
-            }
+            },
+            {
+                "key": "alternate",
+                "name": "Alternate",
+                "kind": "mass",
+                "position": [330, 2, 300],
+                "distance": 230,
+                "localSite": False,
+                "reachable": True,
+                "engineerReachable": True,
+            },
         ],
     )
     harness.controller.transportDeliveries["front"] = lua_value(
@@ -2738,11 +2748,21 @@ def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> Non
         },
     )
     harness.lua.execute("Policy.Decide = function() return {} end")
-    harness.lua.execute("brain.canBuildAt = function() return false end")
+    harness.lua.execute(
+        "brain.canBuildAt = function(blueprintId, position) "
+        "return blueprintId ~= 'ueb1103' or position[1] >= 330 end"
+    )
 
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.buildMobile) == 0
+    assert len(harness.calls.move) == 0
+    assert harness.controller.transportDeliveries["front"] is None
+    assert harness.controller.transportDeliveries["alternate"] is not None
+
+    harness.brain.tick = harness.brain.tick + 1
+    harness.lua.globals().Controller.Step(harness.controller)
+
     cargo_move = next(
         call
         for call in harness.calls.move.values()
@@ -2750,17 +2770,6 @@ def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> Non
     )
     cargo.options.position = lua_value(harness.lua, plain(cargo_move.position))
     harness.brain.tick = harness.brain.tick + 9
-    harness.lua.globals().Controller.Step(harness.controller)
-
-    assert not [
-        call
-        for call in harness.calls.buildMobile.values()
-        if call.blueprintId == "ueb1103"
-    ]
-    assert harness.controller.transportDeliveries["front"] is not None
-
-    harness.lua.execute("brain.canBuildAt = function() return true end")
-    harness.brain.tick = harness.brain.tick + 1
     harness.lua.globals().Controller.Step(harness.controller)
 
     mex_orders = [
@@ -2771,14 +2780,14 @@ def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> Non
     assert len(mex_orders) == 1
     assert mex_orders[0].units[1].options.entityId == 32
     assert tuple(plain(mex_orders[0].position)[index] for index in (0, 2)) == (
-        300,
+        330,
         300,
     )
-    assert harness.controller.transportDeliveries["front"] is not None
-    assert harness.controller.blockedSites["front"] is None
+    assert harness.controller.transportDeliveries["alternate"] is not None
+    assert harness.controller.blockedSites["front"] is not None
 
     harness.controller.pending["32:1"].accepted = True
-    cargo.options.position = lua_value(harness.lua, [296, 2, 300])
+    cargo.options.position = lua_value(harness.lua, [326, 2, 300])
     harness.brain.tick = harness.brain.tick + 27
     harness.lua.globals().Controller.Reconcile(
         harness.controller,
@@ -2786,7 +2795,7 @@ def test_airlift_delivery_revalidates_the_mex_after_transport_departure() -> Non
     )
 
     assert harness.controller.pending["32:1"] is not None
-    assert harness.controller.blockedSites["front"] is None
+    assert harness.controller.blockedSites["alternate"] is None
 
 
 def test_airlift_skips_the_nearest_physically_unbuildable_mex() -> None:
