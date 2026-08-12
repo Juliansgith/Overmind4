@@ -1234,6 +1234,31 @@ def test_build_mobile_uses_exact_four_arguments_terrain_height_and_empty_alterna
     )
 
 
+def test_engineer_does_not_accept_distant_non_airlift_construction() -> None:
+    harness = make_harness()
+    engineer = harness.unit(
+        entityId=1,
+        blueprintId="uel0105",
+        position=[10, 2, 10],
+        canBuild={"ueb2101": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+
+    execute_intents(
+        harness,
+        [
+            {
+                "kind": "build_structure",
+                "actorToken": "1:1",
+                "buildRole": "point_defense",
+                "position": [231, 2, 10],
+            }
+        ],
+    )
+
+    assert len(harness.calls.buildMobile) == 0
+
+
 def test_build_rechecks_can_build_at_and_actor_capability_before_order() -> None:
     harness = make_harness()
     acu = harness.unit(entityId=1, blueprintId="uel0001", canBuild={"ueb1101": False})

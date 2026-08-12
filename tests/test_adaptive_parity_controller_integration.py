@@ -6534,7 +6534,7 @@ def test_cross_map_commander_push_and_attack_wave_remain_disabled_in_live_direct
     assert len(harness.calls.aggressive) == 0
 
 
-def test_regional_field_targeting_excludes_inactive_regions_and_prioritizes_contested_permutation_stably() -> None:
+def test_sub_assault_field_stays_assembled_even_when_regions_are_contested() -> None:
     regions = [
         {"key": "a-suspended", "state": "suspended", "position": [500, 2, 500]},
         {"key": "b-planned", "state": "planned", "position": [450, 2, 450]},
@@ -6583,10 +6583,11 @@ def test_regional_field_targeting_excludes_inactive_regions_and_prioritizes_cont
 
         harness.lua.globals().Controller.Step(harness.controller)
 
-        assert len(harness.calls.aggressive) == 1
-        outcomes.append(plain(harness.calls.aggressive[1].position))
+        assert len(harness.calls.aggressive) == 0
+        assert len(harness.calls.move) == 0
+        outcomes.append(len(harness.calls.aggressive))
 
-    assert outcomes == [[100, 2, 100], [100, 2, 100]]
+    assert outcomes == [0, 0]
 
 
 def test_sub_assault_field_does_not_snake_to_friendly_secured_mex() -> None:

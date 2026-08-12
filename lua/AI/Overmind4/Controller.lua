@@ -3567,6 +3567,15 @@ local function ExecuteStructure(controller, intent, record)
         return false
     end
 
+    local buildTravelDistance = Distance(
+        SafeCall(position, actor.GetPosition, actor), position
+    )
+    if buildTravelDistance > 220 and intent.reason ~= 'airlift_mex'
+        and intent.buildRole ~= 'power_generator_t3'
+    then
+        return false
+    end
+
     if preemptReclaimPatrol or preemptStrategicMove then
         if not pcall(function() IssueClearCommands({ actor }) end) then
             return false
@@ -3591,9 +3600,7 @@ local function ExecuteStructure(controller, intent, record)
         command = 'build_structure',
         role = intent.buildRole,
         site = intent.siteKey or 'placement',
-        travel_distance = Distance(
-            SafeCall(position, actor.GetPosition, actor), position
-        ),
+        travel_distance = buildTravelDistance,
     })
     return true
 end
@@ -11598,14 +11605,6 @@ ESCALATION.AdaptForceIntents = function(
             actorTokens = CopyArray(mission.actorTokens),
             position = CopyPosition(mission.rallyPosition), priority = 6,
             assaultSerial = mission.serial,
-        })
-    elseif not mission and controller.fieldCampaign == nil
-        and targetRegion and TableGetn(fieldTokens) > 0
-    then
-        ESCALATION.AppendDirectorIntent(intents, {
-            kind = 'regional_field', regionKey = targetRegion.key,
-            actorTokens = fieldTokens, position = CopyPosition(targetRegion.position),
-            priority = 6,
         })
     end
 end
