@@ -616,6 +616,9 @@ def test_factory_count_scales_adjacency_power_before_air_stalls() -> None:
         "power_generator",
         "mass_extractor",
         "mass_extractor",
+        "engineer",
+        "engineer",
+        "engineer",
     )
     snapshot["macro"].update(
         availableRecurringMass=0,
@@ -635,6 +638,21 @@ def test_factory_count_scales_adjacency_power_before_air_stalls() -> None:
 
     assert len(power) == 1
     assert power[0]["reason"] == "factory_adjacency_power"
+
+    snapshot["pending"] = [
+        {
+            **power[0],
+            "phase": "building",
+            "accepted": True,
+        }
+    ]
+    next_intents = decide(snapshot)
+
+    assert not [
+        intent
+        for intent in intents_of(next_intents, "build_structure")
+        if intent.get("buildRole") == "power_generator"
+    ]
 
 
 def test_opening_air_power_is_not_starved_by_future_commitment_reservations() -> None:

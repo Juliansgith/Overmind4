@@ -875,6 +875,9 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         if operation.kind == 'reclaim' then
             activeReclaimJobs = activeReclaimJobs + 1
         end
+        if operation.buildRole == 'power_generator' then
+            plannedPower = true
+        end
     end
     if macro then
         activeReclaimJobs = math.max(
