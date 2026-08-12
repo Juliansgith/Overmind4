@@ -908,6 +908,8 @@ ESCALATION.EnemyRole = function(blueprint)
         if has('TECH2') then return 'mass_extractor_t2' end
         return 'mass_extractor'
     end
+    if has('STRUCTURE') and has('ANTIAIR') then return 'static_anti_air' end
+    if has('STRUCTURE') and has('FACTORY') then return 'factory' end
     if has('COMMAND') then return 'acu' end
     if has('AIR') then
         if has('TRANSPORTATION') or has('TRANSPORTFOCUS') then return 'transport' end
@@ -10712,27 +10714,43 @@ end
 
 ESCALATION.AdaptScoutIntent = function(controller, observation, scoutPlan, intents, reserved)
     if not scoutPlan or TableGetn(scoutPlan.waypoints or {}) == 0 then return end
-    local scout = ESCALATION.AvailableDirectorActor(
-        controller, observation, 'air_scout', nil, reserved
-    )
-    if not scout or controller.airScoutAssignments[scout.token] then return end
+    local scout = nil
+    for _, candidate in ipairs(observation.units or {}) do
+        if candidate.role == 'air_scout' and candidate.complete == true
+            and candidate.idle == true and not controller.pending[candidate.token]
+            and not reserved[candidate.token]
+            and not controller.airScoutAssignments[candidate.token]
+        then
+            scout = candidate
+            break
+        end
+    end
+    if not scout then return end
     local objectiveKeys = scoutPlan.objectiveKeys or {}
     local routeIndex = (tonumber(controller.airScoutCount) or 0) + 1
-    if routeIndex > TableGetn(objectiveKeys) then routeIndex = 1 end
-    local objectiveKey = objectiveKeys[routeIndex]
+    if routeIndex > 3 then routeIndex = 1 end
+    local routeKeys = {}
+    local routeWaypoints = {}
+    for index, key in ipairs(objectiveKeys) do
+        if ((index - 1) % 3) + 1 == routeIndex then
+            TableInsert(routeKeys, key)
+            TableInsert(routeWaypoints, CopyPosition(scoutPlan.waypoints[index]))
+        end
+    end
+    local objectiveKey = routeKeys[1]
         or scoutPlan.nextObjectiveKey or objectiveKeys[1]
     local position = nil
-    for index, key in ipairs(scoutPlan.objectiveKeys or {}) do
-        if key == objectiveKey then position = scoutPlan.waypoints[index] end
+    for index, key in ipairs(routeKeys) do
+        if key == objectiveKey then position = routeWaypoints[index] end
     end
-    position = position or scoutPlan.waypoints[1]
+    position = position or routeWaypoints[1] or scoutPlan.waypoints[1]
     if not CopyPosition(position) then return end
     reserved[scout.token] = true
     ESCALATION.AppendDirectorIntent(intents, {
         kind = 'scout_route', actorToken = scout.token,
         siteKey = objectiveKey, position = CopyPosition(position),
-        objectiveKeys = CopyArray(scoutPlan.objectiveKeys or {}),
-        waypoints = ESCALATION.DeepCopy(scoutPlan.waypoints or {}),
+        objectiveKeys = CopyArray(routeKeys),
+        waypoints = ESCALATION.DeepCopy(routeWaypoints),
         reason = 'coverage_age', priority = 2,
     })
 end
@@ -11137,7 +11155,7 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
     end
 end
 
-ESCALATION.DirectorScoutInput = function(controller, observation, macroPlan)
+ESCALATION.DirectorScoutInput = function(controller, observation, macroPlan, intelState)
     local objectives = {}
     for _, site in ipairs((observation.sites or {}).mass or {}) do
         if site.complete ~= true and site.occupied ~= true then
@@ -11157,6 +11175,23 @@ ESCALATION.DirectorScoutInput = function(controller, observation, macroPlan)
                 key = 'spawn:' .. tostring(marker.name),
                 position = CopyPosition(marker.position), public = true,
                 strategic = true, priority = 1000000000,
+            })
+        end
+    end
+    local priorCoverage = (controller.directorState or {}).lastCoveredTicks or {}
+    for _, token in ipairs(SortedKeys((intelState or {}).contacts or {})) do
+        local contact = intelState.contacts[token]
+        local stableSince = tonumber(contact.radarStableSinceTick)
+        local key = 'intel:' .. tostring(token)
+        local recentlyCovered = observation.tick
+            - (tonumber(priorCoverage[key]) or -1000000) < 300
+        if contact.source == 'radar' and contact.current == true
+            and stableSince and observation.tick - stableSince >= 30
+            and not recentlyCovered and CopyPosition(contact.position)
+        then
+            TableInsert(objectives, {
+                key = key, position = CopyPosition(contact.position), public = true,
+                strategic = true, priority = 2000000000,
             })
         end
     end
@@ -11240,12 +11275,34 @@ ESCALATION.AdaptBomberIntent = function(
     local rememberedTarget = nil
     if not visualTarget then
         local remembered = {}
+        local antiAirPositions = {}
+        for _, contact in pairs((intelState or {}).contacts or {}) do
+            local age = CurrentTick(controller)
+                - (tonumber(contact.lastSeenTick) or -1000000)
+            if age >= 0 and age < 600 and contact.source == 'vision'
+                and (contact.role == 'anti_air'
+                    or contact.role == 't2_anti_air'
+                    or contact.role == 'static_anti_air')
+                and IsCampaignPosition(contact.position)
+            then
+                TableInsert(antiAirPositions, contact.position)
+            end
+        end
         for token, contact in pairs((intelState or {}).contacts or {}) do
             local age = CurrentTick(controller)
                 - (tonumber(contact.lastSeenTick) or -1000000)
+            local protected = false
+            for _, aaPosition in ipairs(antiAirPositions) do
+                if DistanceSquared(aaPosition, contact.position) <= 60 * 60 then
+                    protected = true
+                    break
+                end
+            end
             if type(token) == 'string' and age >= 0 and age < 600
                 and contact.source == 'vision'
-                and (contact.role == 'mass_extractor'
+                and not protected
+                and (contact.role == 'factory'
+                    or contact.role == 'mass_extractor'
                     or contact.role == 'mass_extractor_t2'
                     or contact.role == 'mass_extractor_t3')
                 and IsCampaignPosition(contact.position)
@@ -11255,8 +11312,8 @@ ESCALATION.AdaptBomberIntent = function(
         end
         table.sort(remembered, function(a, b)
             local priority = {
-                mass_extractor_t3 = 1, mass_extractor_t2 = 2,
-                mass_extractor = 3,
+                mass_extractor_t3 = 1, factory = 2,
+                mass_extractor_t2 = 3, mass_extractor = 4,
             }
             local ap = priority[a.role] or 9
             local bp = priority[b.role] or 9
@@ -12045,11 +12102,12 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     ) or {}
     radarIntents = ESCALATION.DeepCopy(radarIntents)
     local scoutPlan = ESCALATION.directors.intelligence.PlanScoutRoute(
-        ESCALATION.DirectorScoutInput(controller, observation, macroPlan)
+        ESCALATION.DirectorScoutInput(controller, observation, macroPlan, intelState)
     ) or {}
     scoutPlan = ESCALATION.DeepCopy(scoutPlan)
     local bomberTarget = ESCALATION.directors.intelligence.SelectBomberTarget(
-        ESCALATION.DeepCopy(observation.enemyObservations or {})
+        ESCALATION.DeepCopy(observation.enemyObservations or {}),
+        ESCALATION.DeepCopy(intelState.contacts or {})
     )
     bomberTarget = ESCALATION.DeepCopy(bomberTarget)
     local airPlan = ESCALATION.directors.intelligence.PlanAir(
@@ -12271,6 +12329,14 @@ ESCALATION.PublicScoutObjective = function(controller, observation, key, positio
             public = true
         end
     end
+    for token, contact in pairs((controller.intelState or {}).contacts or {}) do
+        if ('intel:' .. tostring(token)) == key and contact.source == 'radar'
+            and contact.current == true
+            and DistanceSquared(contact.position, position) <= 0.01
+        then
+            public = true
+        end
+    end
     return public
 end
 
@@ -12381,7 +12447,8 @@ ESCALATION.ExecuteBomberMemoryRaid = function(
         - (contact and tonumber(contact.lastSeenTick) or -1000000)
     if not contact or age < 0 or age >= 600 or contact.source ~= 'vision'
         or contact.role ~= intent.targetRole
-        or (contact.role ~= 'mass_extractor'
+        or (contact.role ~= 'factory'
+            and contact.role ~= 'mass_extractor'
             and contact.role ~= 'mass_extractor_t2'
             and contact.role ~= 'mass_extractor_t3')
         or not IsCampaignPosition(contact.position)
@@ -12445,7 +12512,7 @@ ESCALATION.ExecuteBomberHarass = function(
         while index > TableGetn(keys) do index = index - TableGetn(keys) end
         local position = TerrainPosition(waypoints[index])
         if not position
-            or not pcall(function() IssueAggressiveMove({ actor }, position) end)
+            or not pcall(function() IssueMove({ actor }, position) end)
         then
             pcall(function() IssueClearCommands({ actor }) end)
             return false

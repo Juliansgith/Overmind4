@@ -192,6 +192,19 @@ Intelligence.UpdateMemory = function(previous, observation)
                 if bestToken then memoryToken = bestToken end
                 radarClaims[memoryToken] = true
             end
+            local prior = contacts[memoryToken]
+            local radarStableSinceTick = nil
+            if contact.source == 'radar' then
+                if prior and prior.source == 'radar'
+                    and DistanceSquared(prior.position, contact.position) <= 16
+                then
+                    radarStableSinceTick = Number(
+                        prior.radarStableSinceTick, prior.lastSeenTick
+                    ) or tick
+                else
+                    radarStableSinceTick = tick
+                end
+            end
             contacts[memoryToken] = {
                 token = memoryToken,
                 role = contact.source == 'radar' and 'unknown_mobile' or contact.role,
@@ -200,6 +213,7 @@ Intelligence.UpdateMemory = function(previous, observation)
                 currentlyVisual = contact.source == 'vision',
                 current = true,
                 lastSeenTick = tick,
+                radarStableSinceTick = radarStableSinceTick,
             }
         end
     end
@@ -304,23 +318,55 @@ Intelligence.PlanAir = function(snapshot)
     return { orders = orders }
 end
 
-Intelligence.SelectBomberTarget = function(observations)
-    local engineers = {}
-    local extractors = {}
-    for _, target in ipairs(observations or {}) do
-        if target.currentlyVisual == true and target.live ~= false and type(target.token) == 'string' then
-            if target.role == 'engineer' then
-                table.insert(engineers, target)
-            elseif target.role == 'mass_extractor' or target.role == 'mass_extractor_t2'
-                or target.role == 'mass_extractor_t3'
-            then
-                table.insert(extractors, target)
-            end
+Intelligence.SelectBomberTarget = function(observations, rememberedContacts)
+    local antiAir = {}
+    local aaRoles = {
+        anti_air = true, t2_anti_air = true, static_anti_air = true,
+    }
+    for _, contact in ipairs(observations or {}) do
+        if contact.currentlyVisual == true and contact.live ~= false
+            and aaRoles[contact.role] and type(contact.position) == 'table'
+        then
+            table.insert(antiAir, contact.position)
         end
     end
-    SortByKey(engineers, 'token')
-    SortByKey(extractors, 'token')
-    local selected = engineers[1] or extractors[1]
+    for _, contact in pairs(rememberedContacts or {}) do
+        if contact.source == 'vision' and aaRoles[contact.role]
+            and type(contact.position) == 'table'
+        then
+            table.insert(antiAir, contact.position)
+        end
+    end
+    local priority = {
+        engineer = 1,
+        mass_extractor_t3 = 2,
+        factory = 3,
+        mass_extractor_t2 = 4,
+        mass_extractor = 5,
+    }
+    local candidates = {}
+    for _, target in ipairs(observations or {}) do
+        if target.currentlyVisual == true and target.live ~= false
+            and type(target.token) == 'string' and priority[target.role]
+            and type(target.position) == 'table'
+        then
+            local protected = false
+            for _, position in ipairs(antiAir) do
+                if DistanceSquared(position, target.position) <= 60 * 60 then
+                    protected = true
+                    break
+                end
+            end
+            if not protected then table.insert(candidates, target) end
+        end
+    end
+    table.sort(candidates, function(a, b)
+        local ap = priority[a.role] or 99
+        local bp = priority[b.role] or 99
+        if ap ~= bp then return ap < bp end
+        return tostring(a.token) < tostring(b.token)
+    end)
+    local selected = candidates[1]
     if not selected then return nil end
     return {
         targetToken = selected.token,

@@ -1142,9 +1142,27 @@ def test_visual_enemy_roles_use_faction_neutral_blueprint_categories_while_radar
         seenNow=False,
         onRadar=True,
     )
+    aeon_factory = harness.unit(
+        entityId=93,
+        blueprintId="uab0101",
+        blueprintCategories=["STRUCTURE", "FACTORY", "LAND", "TECH1"],
+        army=2,
+        position=[70, 2, 70],
+        seenNow=True,
+        onRadar=True,
+    )
+    seraphim_static_aa = harness.unit(
+        entityId=94,
+        blueprintId="xsb2104",
+        blueprintCategories=["STRUCTURE", "DEFENSE", "ANTIAIR", "TECH1"],
+        army=2,
+        position=[80, 2, 80],
+        seenNow=True,
+        onRadar=True,
+    )
     harness.brain.units = harness.lua.table_from([bomber])
     harness.brain.enemies = harness.lua.table_from(
-        [aeon_engineer, seraphim_mex, cybran_radar_only_engineer]
+        [aeon_engineer, seraphim_mex, cybran_radar_only_engineer, aeon_factory, seraphim_static_aa]
     )
 
     observation = harness.observe()
@@ -1154,6 +1172,8 @@ def test_visual_enemy_roles_use_faction_neutral_blueprint_categories_while_radar
     assert roles[("vision", (40, 2, 40))] == "engineer"
     assert roles[("vision", (50, 2, 50))] == "mass_extractor"
     assert roles[("radar", (60, 2, 60))] == "unknown_mobile"
+    assert roles[("vision", (70, 2, 70))] == "factory"
+    assert roles[("vision", (80, 2, 80))] == "static_anti_air"
 
     engineer_contact = next(
         contact for contact in contacts if contact["position"] == [40, 2, 40]
@@ -1197,13 +1217,91 @@ def test_idle_bomber_harasses_public_mass_route_without_visual_target() -> None:
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.clear) == 1
+    assert len(harness.calls.aggressive) == 0
     assert [
         (plain(call.position)[0], plain(call.position)[2])
-        for call in harness.calls.aggressive.values()
+        for call in harness.calls.move.values()
     ] == [(site["position"][0], site["position"][2]) for site in public_sites]
     mission = plain(harness.controller.bomberMissions["30:1"])
     assert mission["publicHarass"] is True
     assert mission["objectiveKeys"] == [site["key"] for site in public_sites]
+
+
+def test_persistent_radar_contact_becomes_a_scout_classification_objective() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute(
+        "IntelligenceStub.UpdateMemory = Intelligence.UpdateMemory; "
+        "local RealPlanScoutRoute = Intelligence.PlanScoutRoute; "
+        "IntelligenceStub.PlanScoutRoute = function(snapshot) "
+        "table.insert(calls.intelligencePlanScoutRoute, snapshot); "
+        "return RealPlanScoutRoute(snapshot) end; "
+        "Policy.Decide = function() return {} end"
+    )
+    radar_contact = harness.unit(
+        entityId=90,
+        blueprintId="uab0101",
+        blueprintCategories=["STRUCTURE", "FACTORY", "LAND", "TECH1"],
+        army=2,
+        position=[180, 2, 180],
+        seenNow=False,
+        onRadar=True,
+    )
+    harness.brain.enemies = harness.lua.table_from([radar_contact])
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    harness.brain.tick = 40
+    scout = harness.unit(entityId=30, blueprintId="uea0101", position=[10, 20, 20])
+    harness.brain.units = harness.lua.table_from([scout])
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    classification = [
+        objective
+        for objective in plain(harness.calls.intelligencePlanScoutRoute[2])["objectives"]
+        if objective["key"].startswith("intel:")
+    ]
+    assert len(classification) == 1
+    assert classification[0]["position"] == [180, 2, 180]
+    assert any(
+        plain(call.position)[0] == 180 and plain(call.position)[2] == 180
+        for call in harness.calls.patrol.values()
+    )
+
+
+def test_three_scouts_receive_disjoint_public_route_sectors() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    scouts = [
+        harness.unit(entityId=30 + index, blueprintId="uea0101", position=[10, 20, 20])
+        for index in range(3)
+    ]
+    harness.brain.units = harness.lua.table_from(scouts)
+    public_sites = [plain(harness.controller.markers.mass[index]) for index in range(1, 4)]
+    _set_director_result(
+        harness,
+        "scoutPlan",
+        {
+            "nextObjectiveKey": public_sites[0]["key"],
+            "objectiveKeys": [site["key"] for site in public_sites],
+            "waypoints": [site["position"] for site in public_sites],
+        },
+    )
+
+    for tick in range(3):
+        harness.brain.tick = tick
+        harness.lua.globals().Controller.Step(harness.controller)
+
+    routes = {}
+    for call in harness.calls.patrol.values():
+        token = f"{call.units[1].options.entityId}:1"
+        routes.setdefault(token, set()).add(
+            (plain(call.position)[0], plain(call.position)[2])
+        )
+    assert set(routes) == {"30:1", "31:1", "32:1"}
+    assert all(len(route) == 1 for route in routes.values())
+    assert set.union(*routes.values()) == {
+        (site["position"][0], site["position"][2]) for site in public_sites
+    }
 
 
 def test_scout_input_targets_enemy_spawn_and_ignores_owned_or_unoccupied_points() -> None:
@@ -1314,6 +1412,41 @@ def test_idle_bomber_attacks_recently_scouted_mex_after_vision_is_lost() -> None
     mission = plain(harness.controller.bomberMissions["30:1"])
     assert mission["targetToken"] == "90:1"
     assert mission["rememberedRaid"] is True
+
+
+def test_idle_bomber_avoids_recently_scouted_mex_under_remembered_aa() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/Intelligence.lua"))
+    harness.lua.execute("IntelligenceStub.UpdateMemory = Intelligence.UpdateMemory")
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    bomber = harness.unit(entityId=30, blueprintId="uea0103", position=[10, 20, 20])
+    harness.brain.units = harness.lua.table_from([bomber])
+    harness.brain.enemies = harness.lua.table_from([])
+    harness.brain.tick = 100
+    harness.controller.intelState = lua_value(
+        harness.lua,
+        {
+            "epoch": 1,
+            "threat": {},
+            "expansionSafety": {},
+            "contacts": {
+                "90:1": {
+                    "token": "90:1", "role": "mass_extractor_t2",
+                    "position": [80, 2, 80], "source": "vision",
+                    "currentlyVisual": False, "current": False, "lastSeenTick": 50,
+                },
+                "91:1": {
+                    "token": "91:1", "role": "static_anti_air",
+                    "position": [90, 2, 80], "source": "vision",
+                    "currentlyVisual": False, "current": False, "lastSeenTick": 50,
+                },
+            },
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 0
 
 
 def test_recent_scout_contact_defers_unescorted_mex_until_intelligence_expires() -> None:
@@ -1451,12 +1584,12 @@ def test_public_bomber_harass_releases_after_route_and_reissues_without_churn() 
     bomber.options.idleState = False
     harness.brain.tick = 9
     harness.lua.globals().Controller.Step(harness.controller)
-    assert len(harness.calls.aggressive) == 1
+    assert len(harness.calls.move) == 1
 
     bomber.options.idleState = True
     harness.brain.tick = 18
     harness.lua.globals().Controller.Step(harness.controller)
-    assert len(harness.calls.aggressive) == 2
+    assert len(harness.calls.move) == 2
 
 
 def test_step_default_merge_adapts_every_planner_output_once_and_persists_lifecycle() -> None:

@@ -502,6 +502,24 @@ class TestAirAndMobility:
         assert (fallback["targetToken"], fallback["targetRole"]) == ("mex", "mass_extractor")
         assert invoke(MODULE, GLOBAL, "SelectBomberTarget", observations[:1]) is None
 
+    def test_bomber_prioritizes_unprotected_economy_and_avoids_recent_aa(self) -> None:
+        observations = [
+            {"token": "tank", "role": "tank", "position": [10, 0, 10], "currentlyVisual": True},
+            {"token": "eng", "role": "engineer", "position": [40, 0, 40], "currentlyVisual": True},
+            {"token": "factory", "role": "factory", "position": [140, 0, 140], "currentlyVisual": True},
+            {"token": "mex-t2", "role": "mass_extractor_t2", "position": [180, 0, 180], "currentlyVisual": True},
+        ]
+        memory = {
+            "aa": {
+                "token": "aa", "role": "static_anti_air", "position": [42, 0, 42],
+                "source": "vision", "lastSeenTick": 100,
+            }
+        }
+
+        selected = invoke(MODULE, GLOBAL, "SelectBomberTarget", observations, memory)
+
+        assert (selected["targetToken"], selected["targetRole"]) == ("factory", "factory")
+
     def test_bomber_execution_revalidates_live_ownership_generation_and_current_vision(self) -> None:
         intent = {
             "bomberToken": "bomber:2",
