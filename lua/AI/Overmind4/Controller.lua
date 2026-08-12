@@ -10435,6 +10435,7 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     local currentMex = 0
     local currentPower = 0
     local currentHydro = 0
+    local powerPending = false
     for _, unit in ipairs(observation.units or {}) do
         if unit.complete == true then
             if unit.role == 'engineer' then currentEngineers = currentEngineers + 1 end
@@ -10468,6 +10469,7 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         if operation.buildRole == 'air_factory' then currentAir = currentAir + 1 end
         if operation.buildRole == 'power_generator' then
             currentPower = currentPower + 1
+            powerPending = true
         end
     end
     local function StrategicAcu(buildRole)
@@ -10511,7 +10513,7 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         math.max(4, (currentLand + currentAir) * 3))
     local factoryPowerReady = currentPower >= factoryPowerTarget
     local energyLane = lanes.energy_recovery or {}
-    if currentMex >= 6 and not factoryPowerReady
+    if currentMex >= 6 and not factoryPowerReady and not powerPending
         and (energyLane.admitted == true or energyLane.preserved == true)
     then
         local actor = ESCALATION.AvailableDirectorActor(
