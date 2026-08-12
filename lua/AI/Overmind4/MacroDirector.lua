@@ -1417,6 +1417,7 @@ MacroDirector.PlanTech = function(snapshot)
     snapshot = snapshot or {}
     local healthy = snapshot.economyHealthy == true
     local funded = snapshot.techFunded == true
+    local mexFunded = funded or snapshot.mexUpgradeFunded == true
     local factories = {}
     local idleFactories = {}
     for _, factory in ipairs(snapshot.landFactories or {}) do
@@ -1486,11 +1487,9 @@ MacroDirector.PlanTech = function(snapshot)
     end
     local activeMexUpgrades = Number(snapshot.activeMexUpgrades, 0) or 0
     local mexCount = Count(snapshot.mex or {})
-    local mexUpgradeLimit = snapshot.t2HqComplete
-        and math.min(4, math.max(2, math.floor(mexCount / 4))) or 1
-    if healthy and funded
+    local mexUpgradeLimit = math.min(4, math.max(1, math.floor(mexCount / 4)))
+    if healthy and mexFunded
         and activeMexUpgrades < mexUpgradeLimit
-        and (snapshot.t2HqComplete or t2MexCount < 2)
     then
         local t1Mex = {}
         local t2Mex = {}

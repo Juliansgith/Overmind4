@@ -5903,6 +5903,44 @@ def test_hybrid_tech_grant_executes_one_staggered_mex_upgrade() -> None:
     assert harness.calls.upgrade[1].blueprintId == "ueb1202"
 
 
+def test_banked_safe_mex_upgrade_does_not_wait_for_hq_tech_grant() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    mex = harness.unit(
+        entityId=20,
+        blueprintId="ueb1103",
+        position=[15, 2, 15],
+        canBuild={"ueb1202": True},
+    )
+    harness.brain.units = harness.lua.table_from([mex])
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"tech": {"admitted": False}},
+            "grants": [],
+            "regions": [],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "techPlan",
+        {
+            "hqAction": "hold",
+            "mexUpgradeSiteKeys": ["20:1"],
+            "mexUpgradeRolesBySite": {"20:1": "mass_extractor_t2"},
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.upgrade) == 1
+    assert harness.calls.upgrade[1].blueprintId == "ueb1202"
+
+
 def test_failed_t3_hq_command_is_rejected_without_false_ordered_phase_and_retries_by_attempt() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

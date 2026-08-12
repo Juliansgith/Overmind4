@@ -2595,7 +2595,7 @@ class TestRegionalMacro:
         assert blocked["hqAction"] == "hold"
         assert blocked["hqDenialReason"] == "preserve_final_t1_lane"
 
-    def test_two_staggered_t2_mex_upgrades_precede_the_land_hq(self) -> None:
+    def test_safe_mex_upgrades_continue_while_the_land_hq_starts(self) -> None:
         before_mex_tech = {
             "economyHealthy": True,
             "techFunded": True,
@@ -2618,10 +2618,10 @@ class TestRegionalMacro:
         hq_plan = invoke(MODULE, GLOBAL, "PlanTech", after_two_upgrades)
 
         assert mex_plan["hqAction"] == "hold"
-        assert mex_plan["mexUpgradeSiteKeys"] == ["mex-0"]
+        assert mex_plan["mexUpgradeSiteKeys"] == ["mex-0", "mex-1"]
         assert mex_plan["mexUpgradeRolesBySite"]["mex-0"] == "mass_extractor_t2"
         assert hq_plan["hqAction"] == "start_t2"
-        assert not hq_plan["mexUpgradeSiteKeys"]
+        assert hq_plan["mexUpgradeSiteKeys"] == ["mex-2", "mex-3"]
 
     def test_t2_hq_counts_busy_functioning_t1_lane_while_selecting_only_idle_upgrade_source(self) -> None:
         snapshot = {
@@ -2787,8 +2787,9 @@ class TestRegionalMacro:
         snapshot = {
             "tick": 12000,
             "economyHealthy": True,
-            "techFunded": True,
-            "t2HqComplete": True,
+            "techFunded": False,
+            "mexUpgradeFunded": True,
+            "t2HqComplete": False,
             "t2MobileCount": 0,
             "landFactories": [
                 {"token": "land-t1", "tier": 1, "idle": True},

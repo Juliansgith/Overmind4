@@ -9544,10 +9544,14 @@ ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
         and (tonumber(economy.energyTrend) or -1) >= 0
         and (tonumber(economy.massStoredRatio) or 0) >= 0.2
         and (tonumber(economy.energyStoredRatio) or 0) >= 0.2
+    local mexUpgradeFunded = healthy
+        and (tonumber(economy.massStoredRatio) or 0) >= 0.8
+        and (tonumber(economy.energyStoredRatio) or 0) >= 0.5
     return {
         tick = observation.tick,
         economyHealthy = healthy,
         techFunded = techLane.admitted == true,
+        mexUpgradeFunded = mexUpgradeFunded,
         hydroAvailable = CountRole(observation.units, 'hydrocarbon') > 0,
         t2HqComplete = CountRole(observation.units, 'land_factory_t2') > 0
             or CountRole(observation.units, 'land_factory_t3') > 0,
@@ -13010,6 +13014,7 @@ ESCALATION.IntentPortfolioLane = function(intent)
     local role = intent.buildRole or intent.upgradeRole
     if intent.reason == 'opening_air_factory' then return nil end
     if intent.reason == 'opening_air_mobility' then return nil end
+    if intent.reason == 'stagger_mex_upgrade' then return nil end
     if intent.kind == 'reclaim' then return 'reclaim' end
     if intent.kind == 'escorted_expansion' then return 'mex_rebuild' end
     if intent.kind == 'transport_load' then return nil end
