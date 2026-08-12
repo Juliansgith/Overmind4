@@ -55,6 +55,24 @@ def test_live_director_regional_expansion_starts_pressure_front() -> None:
     assert len(campaign_intents(harness, observation)) == 1
 
 
+def test_initial_pressure_front_uses_advanced_completed_cluster() -> None:
+    harness, _, _, _, _ = start_campaign(
+        reason="regional_expansion",
+        site_key="remote",
+        cluster_key="remote",
+        position=[70, 2, 40],
+        extra_markers=[
+            layered_marker("secured-a", 3, 4),
+            layered_marker("secured-b", 4, 4),
+        ],
+    )
+
+    state = campaign_state(harness)
+    assert state["clusterKey"] == "secured-a"
+    assert state["memberKeys"] == ["secured-a", "secured-b"]
+    assert state["anchorKey"] == "secured-b"
+
+
 def test_pressure_front_executes_when_force_director_owns_home_reserve() -> None:
     harness, _, _, _, _ = start_campaign(
         reason="regional_expansion",

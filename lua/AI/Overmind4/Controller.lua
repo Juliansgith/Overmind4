@@ -4992,6 +4992,28 @@ end
 local function StartFieldCampaign(controller, observation, operation)
     local cluster = PressureClusterForSite(controller, operation.siteKey)
     if not cluster then return end
+    local graph = BuildPressureGraph(controller)
+    local secured = nil
+    for _, candidate in ipairs((graph and graph.clusters) or {}) do
+        local complete = TableGetn(candidate.memberKeys or {}) > 0
+        for _, siteKey in ipairs(candidate.memberKeys or {}) do
+            local site = CampaignSite(controller, siteKey)
+            if not site or site.complete ~= true then
+                complete = false
+                break
+            end
+        end
+        if complete and (not secured
+            or candidate.anchorTargetDistanceSquared
+                < secured.anchorTargetDistanceSquared
+            or (candidate.anchorTargetDistanceSquared
+                    == secured.anchorTargetDistanceSquared
+                and candidate.key < secured.key))
+        then
+            secured = candidate
+        end
+    end
+    if secured then cluster = secured end
     local records = CampaignCombatRecords(observation.units)
     local field, home, full = InitialCampaignCohorts(records)
     local atAnchor, quorum, forwardDistance = InitialPressureMetrics(
