@@ -10694,30 +10694,9 @@ end
 ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
     local engineer = nil
     local transport = nil
-    local availableEngineers = {}
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-        if unit.role == 'engineer' and unit.available == true then
-            TableInsert(availableEngineers, unit)
-        end
+        if not engineer and unit.role == 'engineer' and unit.available == true then engineer = unit end
         if not transport and unit.role == 'transport' and unit.available == true then transport = unit end
-    end
-    for _, candidate in ipairs(availableEngineers) do
-        if not engineer then
-            engineer = candidate
-        elseif transport then
-            local candidateDistance = DistanceSquared(
-                candidate.position, transport.position
-            )
-            local selectedDistance = DistanceSquared(
-                engineer.position, transport.position
-            )
-            if candidateDistance < selectedDistance
-                or (candidateDistance == selectedDistance
-                    and candidate.token < engineer.token)
-            then
-                engineer = candidate
-            end
-        end
     end
     local site = nil
     local completedTransportSites = {}
