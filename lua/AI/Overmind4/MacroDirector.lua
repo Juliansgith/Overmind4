@@ -19,7 +19,7 @@ local LANE_RANK = {
     air_production = 7,
     engineers = 8,
 }
-local MAX_ENGINEER_WALK_DISTANCE = 220
+local MAX_ENGINEER_WALK_DISTANCE = 120
 
 local function Copy(value)
     if type(value) ~= 'table' then return value end

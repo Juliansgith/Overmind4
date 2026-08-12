@@ -1762,7 +1762,7 @@ class TestRegionalMacro:
             "engineers": [
                 {"token": "eng", "position": [0, 0, 0], "available": True}
             ],
-            "sites": [mass_site("remote", 200, 0, region="remote")],
+            "sites": [mass_site("remote", 100, 0, region="remote")],
             "regions": [{"key": "remote", "state": "planned"}],
         }
 
@@ -1800,7 +1800,7 @@ class TestRegionalMacro:
                 "engineers": [
                     {"token": "eng", "position": [0, 0, 0], "available": True}
                 ],
-                "sites": [mass_site("too-far", 221, 0, region="remote")],
+                "sites": [mass_site("too-far", 218, 0, region="remote")],
                 "regions": [{"key": "remote", "state": "planned"}],
                 "escorts": [
                     {"token": "tank", "role": "tank", "available": True},
