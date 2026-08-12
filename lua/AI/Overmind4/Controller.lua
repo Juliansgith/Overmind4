@@ -9359,6 +9359,14 @@ end
 ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
     local factories = {}
     local mex = {}
+    local regionByMember = {}
+    local regionByKey = {}
+    for _, region in ipairs(macroPlan.regions or {}) do
+        regionByKey[region.key] = region
+        for _, siteKey in ipairs(region.memberKeys or {}) do
+            regionByMember[siteKey] = region.key
+        end
+    end
     local t2Mobile = 0
     local activeMexUpgrades = 0
     local t2SupportFactoryCount = 0
@@ -9379,11 +9387,27 @@ ESCALATION.DirectorTechInput = function(controller, observation, macroPlan)
                 t2SupportFactoryCount = t2SupportFactoryCount + 1
             end
         elseif unit.roleFamily == 'mass_extractor' and unit.complete == true then
+            local siteKey = nil
+            for _, site in ipairs((observation.sites or {}).mass or {}) do
+                if DistanceSquared(unit.position, site.position) <= 16 then
+                    siteKey = site.key
+                    break
+                end
+            end
+            local regionKey = siteKey and regionByMember[siteKey] or nil
+            local region = regionKey and regionByKey[regionKey] or nil
+            local safety = regionKey
+                and ((controller.intelState or {}).expansionSafety or {})[regionKey]
+                or nil
+            local distance = Distance(unit.position, controller.basePosition)
             TableInsert(mex, {
                 key = unit.token,
                 token = unit.token,
                 tier = ESCALATION.DirectorRoleTier(unit.role),
                 upgrading = controller.pending[unit.token] ~= nil,
+                safe = safety ~= 'contested'
+                    and (distance <= 80 or (region and region.state == 'secured')),
+                distance = distance,
             })
             if controller.pending[unit.token] then activeMexUpgrades = activeMexUpgrades + 1 end
         elseif (unit.role == 't2_direct_fire' or unit.role == 't2_anti_air')

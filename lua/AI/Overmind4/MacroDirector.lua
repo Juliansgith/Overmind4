@@ -1485,7 +1485,9 @@ MacroDirector.PlanTech = function(snapshot)
         plan.t3ProductionRole = 't3_direct_fire'
     end
     local activeMexUpgrades = Number(snapshot.activeMexUpgrades, 0) or 0
-    local mexUpgradeLimit = snapshot.t2HqComplete and 2 or 1
+    local mexCount = Count(snapshot.mex or {})
+    local mexUpgradeLimit = snapshot.t2HqComplete
+        and math.min(4, math.max(2, math.floor(mexCount / 4))) or 1
     if healthy and funded
         and activeMexUpgrades < mexUpgradeLimit
         and (snapshot.t2HqComplete or t2MexCount < 2)
@@ -1493,16 +1495,28 @@ MacroDirector.PlanTech = function(snapshot)
         local t1Mex = {}
         local t2Mex = {}
         for _, extractor in ipairs(snapshot.mex or {}) do
-            if extractor.tier == 1 and extractor.upgrading ~= true and type(extractor.key) == 'string' then
+            if extractor.tier == 1 and extractor.upgrading ~= true
+                and extractor.safe ~= false and type(extractor.key) == 'string'
+            then
                 table.insert(t1Mex, extractor)
             elseif extractor.tier == 2 and extractor.upgrading ~= true
-                and type(extractor.key) == 'string'
+                and extractor.safe ~= false and type(extractor.key) == 'string'
             then
                 table.insert(t2Mex, extractor)
             end
         end
-        SortByKey(t1Mex, 'key')
-        SortByKey(t2Mex, 'key')
+        table.sort(t1Mex, function(a, b)
+            local ad = Number(a.distance, 1000000000) or 1000000000
+            local bd = Number(b.distance, 1000000000) or 1000000000
+            if ad == bd then return tostring(a.key) < tostring(b.key) end
+            return ad < bd
+        end)
+        table.sort(t2Mex, function(a, b)
+            local ad = Number(a.distance, 1000000000) or 1000000000
+            local bd = Number(b.distance, 1000000000) or 1000000000
+            if ad == bd then return tostring(a.key) < tostring(b.key) end
+            return ad < bd
+        end)
         local remaining = mexUpgradeLimit - activeMexUpgrades
         if snapshot.t2HqComplete and plan.t3Action == 'admit'
             and t2Mex[1] and remaining > 0

@@ -2782,3 +2782,46 @@ class TestRegionalMacro:
         assert len(with_one_active["mexUpgradeSiteKeys"]) == (
             1 if healthy else 0
         )
+
+    def test_large_economy_upgrades_up_to_four_safe_mex_and_skips_contested_front(self) -> None:
+        snapshot = {
+            "tick": 12000,
+            "economyHealthy": True,
+            "techFunded": True,
+            "t2HqComplete": True,
+            "t2MobileCount": 0,
+            "landFactories": [
+                {"token": "land-t1", "tier": 1, "idle": True},
+                {"token": "land-t2", "tier": 2, "idle": True},
+            ],
+            "mex": [
+                {
+                    "key": f"safe-{index}",
+                    "tier": 1,
+                    "upgrading": False,
+                    "safe": True,
+                    "distance": index,
+                }
+                for index in range(8)
+            ]
+            + [
+                {
+                    "key": f"front-{index}",
+                    "tier": 1,
+                    "upgrading": False,
+                    "safe": False,
+                    "distance": 100 + index,
+                }
+                for index in range(10)
+            ],
+            "activeMexUpgrades": 0,
+        }
+
+        plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
+
+        assert plan["mexUpgradeSiteKeys"] == [
+            "safe-0",
+            "safe-1",
+            "safe-2",
+            "safe-3",
+        ]
