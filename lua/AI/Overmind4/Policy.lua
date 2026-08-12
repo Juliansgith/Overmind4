@@ -2271,12 +2271,24 @@ local function FactoryDecisions(snapshot, units, counts, pendingActors, intents)
             TableInsert(patrol, unit.token)
         end
     end
-    if TableGetn(patrol) > 0 and IsUsablePosition(snapshot.basePosition) then
+    local airScreenPosition = snapshot.basePosition
+    if macro
+        and macro.campaignState == 'active'
+        and FiniteNumber(macro.campaignAnchorX)
+        and FiniteNumber(macro.campaignAnchorZ)
+        and macro.campaignAnchorX >= 0
+        and macro.campaignAnchorZ >= 0
+    then
+        airScreenPosition = {
+            macro.campaignAnchorX, 0, macro.campaignAnchorZ,
+        }
+    end
+    if TableGetn(patrol) > 0 and IsUsablePosition(airScreenPosition) then
         table.sort(patrol)
         AddIntent(intents, {
             kind = 'air_screen',
             actorTokens = patrol,
-            position = snapshot.basePosition,
+            position = airScreenPosition,
             priority = 32,
             reason = 'defensive_air_screen',
         })

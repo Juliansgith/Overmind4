@@ -776,6 +776,24 @@ def test_air_screen_executor_rejects_enemy_target_and_accepts_exact_own_base() -
     assert harness.controller.airAssignments["90:1"] is True
 
 
+def test_active_campaign_sends_new_interceptors_to_the_secured_anchor() -> None:
+    snapshot = economy_policy_snapshot("interceptor", "interceptor")
+    for unit in snapshot["units"]:
+        if unit["role"] == "interceptor":
+            unit.update(idle=True, airAssigned=False)
+    snapshot["macro"].update(
+        campaignEnabled=True,
+        campaignState="active",
+        campaignAnchorX=279.5,
+        campaignAnchorZ=311.5,
+    )
+
+    intent = only(decide(snapshot), "air_screen")
+
+    assert intent["actorTokens"] == sorted(intent["actorTokens"])
+    assert intent["position"] == [279.5, 0, 311.5]
+
+
 @pytest.mark.parametrize("failure", ["clear", "patrol"])
 def test_air_screen_command_failure_is_atomic_and_immediately_retryable(
     failure: str,

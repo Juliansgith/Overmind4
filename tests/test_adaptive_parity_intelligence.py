@@ -389,11 +389,11 @@ class TestAirAndMobility:
     @pytest.mark.parametrize(
         ("interceptors", "bombers", "slots", "expected"),
         (
-            (12, 2, 1, ["bomber"]),
+            (12, 2, 1, ["interceptor"]),
             (12, 3, 1, ["interceptor"]),
-            (12, 2, 3, ["bomber", "interceptor", "bomber"]),
-            (16, 3, 2, ["bomber", "interceptor"]),
-            (32, 7, 3, ["bomber", "interceptor", "bomber"]),
+            (12, 2, 3, ["interceptor", "interceptor", "interceptor"]),
+            (16, 3, 2, ["interceptor", "interceptor"]),
+            (32, 7, 3, ["interceptor", "interceptor", "interceptor"]),
         ),
     )
     def test_funded_air_factories_keep_converting_after_minimum_mix(
