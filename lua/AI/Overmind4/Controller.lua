@@ -11128,7 +11128,13 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         reclaimInput
     ) or { jobs = {} }
     reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
-    if controller.reclaimWorkerToken == nil then
+    local completedEngineerCount = 0
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'engineer' and unit.complete == true then
+            completedEngineerCount = completedEngineerCount + 1
+        end
+    end
+    if controller.reclaimWorkerToken == nil and completedEngineerCount >= 8 then
         for _, job in ipairs(reclaimPlan.jobs or {}) do
             if type(job.actorToken) == 'string'
                 and (controller.reclaimWorkerToken == nil

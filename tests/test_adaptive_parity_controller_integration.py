@@ -3813,13 +3813,24 @@ def test_reclaim_causal_operation_keeps_stable_id_until_observed_completion() ->
     _assert_operation_stream_clean(harness)
 
 
-def test_reclaim_actor_is_reserved_before_expansion_planning() -> None:
+@pytest.mark.parametrize(
+    ("engineer_count", "expected_worker"),
+    [(2, None), (8, "12:1")],
+)
+def test_reclaim_actor_is_reserved_before_expansion_planning(
+    engineer_count: int,
+    expected_worker: str | None,
+) -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
     harness.controller.markers.hydro = harness.lua.table_from([])
     engineers = [
-        harness.unit(entityId=12, blueprintId="uel0105", position=[10, 2, 20]),
-        harness.unit(entityId=13, blueprintId="uel0105", position=[12, 2, 20]),
+        harness.unit(
+            entityId=entity_id,
+            blueprintId="uel0105",
+            position=[10 + 2 * (entity_id - 12), 2, 20],
+        )
+        for entity_id in range(12, 12 + engineer_count)
     ]
     harness.brain.units = harness.lua.table_from(engineers)
     _set_director_result(
@@ -3859,9 +3870,11 @@ def test_reclaim_actor_is_reserved_before_expansion_planning() -> None:
     harness.lua.globals().Controller.Step(harness.controller)
 
     expansion_input = plain(harness.calls.macroPlanExpansion[1])
-    assert [unit["token"] for unit in expansion_input["engineers"]] == ["13:1"]
+    assert [unit["token"] for unit in expansion_input["engineers"]] == [
+        f"{entity_id}:1" for entity_id in range(13, 12 + engineer_count)
+    ]
 
-    assert harness.controller.reclaimWorkerToken == "12:1"
+    assert harness.controller.reclaimWorkerToken == expected_worker
     harness.controller.pending["12:1"] = None
     _set_director_result(harness, "reclaimPlan", {"jobs": []})
     harness.brain.tick = 2
@@ -3869,7 +3882,10 @@ def test_reclaim_actor_is_reserved_before_expansion_planning() -> None:
     harness.lua.globals().Controller.Step(harness.controller)
 
     expansion_input = plain(harness.calls.macroPlanExpansion[2])
-    assert [unit["token"] for unit in expansion_input["engineers"]] == ["13:1"]
+    expected_tokens = range(13 if expected_worker else 12, 12 + engineer_count)
+    assert [unit["token"] for unit in expansion_input["engineers"]] == [
+        f"{entity_id}:1" for entity_id in expected_tokens
+    ]
 
 
 def test_failed_reclaim_command_returns_its_grant_and_never_reports_ordered() -> None:
