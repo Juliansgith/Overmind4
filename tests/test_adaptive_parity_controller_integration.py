@@ -6897,3 +6897,13 @@ def test_visible_ground_cluster_dispatches_regional_response_force() -> None:
 
     assert len(harness.calls.aggressive) == 1
     assert plain(harness.calls.aggressive[1].position) == [200, 2, 200]
+
+    for enemy in enemies:
+        enemy.options.position = harness.lua.table_from([205, 2, 205])
+    harness.brain.tick = 9
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.aggressive) == 1
+
+    harness.brain.tick = 60
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.aggressive) == 2

@@ -13433,6 +13433,8 @@ ESCALATION.ExecuteForceMove = function(
                 and (atTarget or previousAge < 600))
             or (bucket == 'garrison' and previous
                 and (atTarget or previousAge < 600))
+            or (intent.kind == 'regional_response' and previous
+                and previousAge < 50)
         then
             seen[token] = true
         else
