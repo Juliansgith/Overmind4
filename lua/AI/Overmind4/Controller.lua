@@ -9648,7 +9648,10 @@ ESCALATION.DirectorTechInput = function(
             t2Mobile = t2Mobile + 1
         end
     end
-    local techLane = (macroPlan.lanes or {}).tech or {}
+    local techGrantAvailable = false
+    for _, grant in ipairs(macroPlan.grants or {}) do
+        if grant.lane == 'tech' then techGrantAvailable = true end
+    end
     local economy = observation.economy or {}
     local healthy = (tonumber(economy.massTrend) or -1) >= 0
         and (tonumber(economy.energyTrend) or -1) >= 0
@@ -9660,7 +9663,7 @@ ESCALATION.DirectorTechInput = function(
     return {
         tick = observation.tick,
         economyHealthy = healthy,
-        techFunded = techLane.admitted == true,
+        techFunded = techGrantAvailable,
         mexUpgradeFunded = mexUpgradeFunded,
         hydroAvailable = CountRole(observation.units, 'hydrocarbon') > 0,
         t2HqComplete = CountRole(observation.units, 'land_factory_t2') > 0
@@ -10257,9 +10260,12 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         return nil
     end
     local lanes = macroPlan.lanes or {}
-    local techLane = lanes.tech or {}
+    local techGrantAvailable = false
+    for _, grant in ipairs(macroPlan.grants or {}) do
+        if grant.lane == 'tech' then techGrantAvailable = true end
+    end
     if currentT2Engineers < 1
-        and (techLane.admitted == true or techLane.preserved == true)
+        and techGrantAvailable
     then
         local factory = ESCALATION.AvailableT2DirectorActor(
             controller, observation, 't2_engineer', reserved

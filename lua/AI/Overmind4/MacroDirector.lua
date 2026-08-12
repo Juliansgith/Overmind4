@@ -1506,7 +1506,11 @@ MacroDirector.PlanTech = function(snapshot)
     -- upgrades until that HQ exists. Otherwise the continuous mex-upgrade
     -- stream keeps the sole tech commitment occupied forever and the army
     -- remains T1 despite a full bank.
-    local mexUpgradesMayStart = snapshot.t2HqComplete == true or t2MexCount < 2
+    local supportUpgradeNeeded = snapshot.t2HqComplete == true
+        and (Number(snapshot.t2SupportFactoryCount, 0) or 0) < 1
+        and Count(factories) >= 2
+    local mexUpgradesMayStart = t2MexCount < 2
+        or (snapshot.t2HqComplete == true and not supportUpgradeNeeded)
     if healthy and mexFunded and mexUpgradesMayStart
         and activeMexUpgrades < mexUpgradeLimit
     then

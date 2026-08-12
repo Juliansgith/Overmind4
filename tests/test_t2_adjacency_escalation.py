@@ -67,6 +67,33 @@ def test_completed_t2_hq_builds_one_t2_engineer_before_t2_combat() -> None:
     assert harness.calls.buildFactory[1].blueprintId == "uel0208"
 
 
+def test_committed_tech_lane_without_a_new_grant_does_not_idle_t2_hq() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    macro_plan = _macro_plan(lane="land_production")
+    macro_plan["lanes"]["tech"] = {"admitted": True}
+    _set_director_result(harness, "macroPlan", macro_plan)
+    _set_director_result(
+        harness,
+        "techPlan",
+        {"t2ProductionRoles": ["t2_direct_fire", "t2_anti_air"]},
+    )
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(
+                entityId=20,
+                blueprintId="ueb0201",
+                canBuild={"uel0208": True, "uel0202": True, "uel0205": True},
+            )
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].blueprintId == "uel0202"
+
+
 @pytest.mark.parametrize("existing", ["completed", "pending"])
 def test_t2_engineer_is_not_duplicated(existing: str) -> None:
     harness = make_harness()

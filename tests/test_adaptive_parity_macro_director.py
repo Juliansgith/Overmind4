@@ -2656,6 +2656,13 @@ class TestRegionalMacro:
         assert waiting_plan["hqAction"] == "hold"
         assert not waiting_plan["mexUpgradeSiteKeys"]
 
+        waiting_for_support = copy.deepcopy(after_two_upgrades)
+        waiting_for_support["t2HqComplete"] = True
+        waiting_for_support["t2SupportFactoryCount"] = 0
+        support_plan = invoke(MODULE, GLOBAL, "PlanTech", waiting_for_support)
+        assert support_plan["supportAction"] == "start_t2_support"
+        assert not support_plan["mexUpgradeSiteKeys"]
+
     def test_t2_hq_counts_busy_functioning_t1_lane_while_selecting_only_idle_upgrade_source(self) -> None:
         snapshot = {
             "tick": 5700,
