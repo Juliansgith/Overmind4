@@ -519,6 +519,8 @@ class TestAirAndMobility:
         for event, expected in events:
             mission = invoke(MODULE, GLOBAL, "AdvanceTransport", mission, event)
             assert mission["state"] == expected
+            if event["kind"] == "unload_ordered":
+                assert mission["deadlineTick"] == 1310
 
         assert mission["released"] is True
 

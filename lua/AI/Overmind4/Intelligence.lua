@@ -432,7 +432,10 @@ Intelligence.AdvanceTransport = function(mission, event)
         end
     elseif kind == 'unload_ordered' and (result.state == 'loaded' or result.state == 'flying') then
         result.state = 'unloading'
-        result.deadlineTick = tick + 400
+        result.deadlineTick = math.max(
+            Number(result.deadlineTick, 0) or 0,
+            tick + 400
+        )
     elseif kind == 'departed' and result.state == 'loaded' then
         result.state = 'flying'
     elseif kind == 'timeout' then
