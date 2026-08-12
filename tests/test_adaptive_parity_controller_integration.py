@@ -1589,6 +1589,64 @@ def test_one_factory_grant_uses_idle_acu_for_first_air_before_third_land() -> No
     assert order.units[1].options.entityId == 1
 
 
+def test_reclaiming_acu_builds_funded_second_air_when_field_engineers_are_busy() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        idleState=False,
+        states={"Moving": True},
+        canBuild={"ueb0102": True},
+    )
+    land_factories = [
+        harness.unit(entityId=20 + index, blueprintId="ueb0101")
+        for index in range(6)
+    ]
+    air_factory = harness.unit(entityId=30, blueprintId="ueb0102")
+    busy_engineers = [
+        harness.unit(
+            entityId=40 + index,
+            blueprintId="uel0105",
+            idleState=False,
+            states={"Moving": True},
+        )
+        for index in range(8)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [acu, *land_factories, air_factory, *busy_engineers]
+    )
+    harness.controller.reclaimPatrolAssignments["1:1"] = True
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 6,
+            "airFactoryTarget": 4,
+            "lanes": {"factory_growth": {"admitted": True}},
+            "grants": [
+                {
+                    "requestId": "factory-1",
+                    "lane": "factory_growth",
+                    "source": "bank",
+                }
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    order = harness.calls.buildMobile[1]
+    assert order.blueprintId == "ueb0102"
+    assert order.units[1].options.entityId == 1
+    assert harness.controller.reclaimPatrolAssignments["1:1"] is None
+
+
 @pytest.mark.parametrize(
     ("power_count", "has_hydro", "expected_orders"),
     [

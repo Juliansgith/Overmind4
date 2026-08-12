@@ -9725,6 +9725,19 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         if operation.buildRole == 'land_factory' then currentLand = currentLand + 1 end
         if operation.buildRole == 'air_factory' then currentAir = currentAir + 1 end
     end
+    local function StrategicAcu(buildRole)
+        for _, unit in ipairs(observation.units or {}) do
+            if unit.role == 'acu' and unit.complete == true
+                and (unit.idle == true or unit.reclaimPatrolAssigned == true)
+                and not controller.pending[unit.token] and not reserved[unit.token]
+                and not ESCALATION.TransportTokenClaimed(controller, unit.token)
+                and unit.canBuild and unit.canBuild[buildRole] == true
+            then
+                return unit
+            end
+        end
+        return nil
+    end
     local lanes = macroPlan.lanes or {}
     if (lanes.factory_growth or {}).admitted == true then
         if currentLand < (tonumber(macroPlan.landFactoryTarget) or currentLand) then
@@ -9746,8 +9759,11 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
                 and (currentPower >= 4 or (currentPower >= 3 and currentHydro >= 1))
                 and currentMex >= 4
                 and ESCALATION.AvailableDirectorActor(
-                controller, observation, 'acu', 'air_factory', reserved
+                    controller, observation, 'acu', 'air_factory', reserved
             ) or nil
+            if not actor and currentLand >= 4 then
+                actor = StrategicAcu('air_factory')
+            end
             actor = actor or ESCALATION.AvailableDirectorActor(
                 controller, observation, 'engineer', 'air_factory', reserved
             )
@@ -9757,7 +9773,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
                 ESCALATION.AppendDirectorIntent(intents, {
                     kind = 'build_structure', actorToken = actor.token,
                     buildRole = 'air_factory', position = CopyPosition(positions[1]),
-                    reason = 'funded_air_factory_growth', priority = 4,
+                    reason = actor.role == 'acu' and 'production_saturation'
+                        or 'funded_air_factory_growth',
+                    priority = 4,
                 })
             end
         end
