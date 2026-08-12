@@ -2111,11 +2111,14 @@ def test_field_lifecycle_before_activation_reconciles_pending_full_order_to_exac
         assert harness.controller.fieldCampaign.state == "awaiting_order"
 
 
-def test_static_live_runtime_defaults_to_campaign_and_gates_every_legacy_screen_path() -> None:
+def test_static_live_runtime_defaults_to_regional_force_and_keeps_campaign_dormant() -> None:
     controller_source = source("lua/AI/Overmind4/Controller.lua")
     policy_source = source("lua/AI/Overmind4/Policy.lua")
 
-    assert "fieldCampaignEnabled = true" in controller_source
+    assert (
+        "legacyFrontierRetirementPending = false,\n"
+        "        fieldCampaignEnabled = false,"
+    ) in controller_source
     assert "intent.kind == 'frontier_screen'" in controller_source
     assert "or controller.fieldCampaign == nil" in controller_source
     assert "snapshot.macro.campaignEnabled == true" in policy_source
