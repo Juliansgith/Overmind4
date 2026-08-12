@@ -146,7 +146,7 @@ local ESCALATION = {
         power_generator = 'energy',
         power_generator_t2 = 'energy',
         engineer = 'engineer',
-        t2_engineer = 'tech',
+        t2_engineer = 'factory',
         anti_air = 'factory',
         artillery = 'factory',
         lab = 'factory',
@@ -10273,8 +10273,15 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     for _, grant in ipairs(macroPlan.grants or {}) do
         if grant.lane == 'tech' then techGrantAvailable = true end
     end
-    if currentT2Engineers < 1
+    local t2EngineerTarget = math.min(4,
+        math.max(1, math.ceil(currentMex / 6)))
+    local landProductionAvailable = (lanes.land_production or {}).admitted == true
+        or (lanes.land_production or {}).preserved == true
+    local t2EngineerFundingAvailable = currentT2Engineers < 1
         and techGrantAvailable
+        or currentT2Engineers >= 1 and landProductionAvailable
+    if currentT2Engineers < t2EngineerTarget
+        and t2EngineerFundingAvailable
     then
         local factory = ESCALATION.AvailableT2DirectorActor(
             controller, observation, 't2_engineer', reserved
@@ -10284,7 +10291,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             ESCALATION.AppendDirectorIntent(intents, {
                 kind = 'factory_build', actorToken = factory.token,
                 buildRole = 't2_engineer', operationId = 'tech:t2_engineer',
-                reason = 'strategic_t2_builder', priority = 2,
+                reason = currentT2Engineers < 1 and 'strategic_t2_builder'
+                    or 'funded_t2_engineer_growth',
+                priority = 2,
             })
         end
     end
@@ -13440,7 +13449,10 @@ ESCALATION.IntentPortfolioLane = function(intent)
         end
     elseif intent.kind == 'factory_build' then
         if role == 'engineer' then return 'engineers' end
-        if role == 't2_engineer' then return 'tech' end
+        if role == 't2_engineer' then
+            return intent.reason == 'strategic_t2_builder'
+                and 'tech' or 'land_production'
+        end
         if role == 'air_scout' or role == 'interceptor'
             or role == 'bomber' or role == 'transport'
         then

@@ -132,6 +132,40 @@ def test_t2_engineer_is_not_duplicated(existing: str) -> None:
     )
 
 
+def test_mature_mex_economy_scales_to_three_t2_engineers() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="land_production")
+    )
+    _set_director_result(
+        harness,
+        "techPlan",
+        {"t2ProductionRoles": ["t2_direct_fire", "t2_anti_air"]},
+    )
+    factory = harness.unit(
+        entityId=20,
+        blueprintId="ueb0201",
+        canBuild={"uel0208": True, "uel0202": True, "uel0205": True},
+    )
+    mexes = [
+        harness.unit(
+            entityId=100 + index,
+            blueprintId="ueb1202",
+            position=[80 + index * 4, 2, 80],
+        )
+        for index in range(17)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [factory, harness.unit(entityId=21, blueprintId="uel0208"), *mexes]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildFactory) == 1
+    assert harness.calls.buildFactory[1].blueprintId == "uel0208"
+
+
 def test_t2_generator_candidates_touch_factory_skirt_and_require_t2_builder() -> None:
     harness = make_harness()
     factory = harness.unit(
