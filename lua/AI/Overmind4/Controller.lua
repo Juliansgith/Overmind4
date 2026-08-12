@@ -3728,12 +3728,13 @@ ESCALATION.ExecuteReclaimPatrol = function(
     local token = intent.actorToken
     local keys = intent.siteKeys
     local waypoints = intent.waypoints
-    local count = type(keys) == 'table' and TableGetn(keys) or 0
+    local forward = intent.reason == 'forward_reclaim_patrol'
+    local count = type(waypoints) == 'table' and TableGetn(waypoints) or 0
     if type(token) ~= 'string'
         or count < 2
         or count > 4
-        or type(waypoints) ~= 'table'
-        or TableGetn(waypoints) ~= count
+        or (not forward and (type(keys) ~= 'table'
+            or TableGetn(keys) ~= count))
         or usedActors[token]
         or controller.reclaimPatrolAssignments[token]
         or controller.pending[token]
@@ -3742,33 +3743,65 @@ ESCALATION.ExecuteReclaimPatrol = function(
     end
     local record = records[token]
     if not record
-        or (record.role ~= 'engineer' and record.role ~= 'acu')
+        or (forward and record.role ~= 't2_engineer')
+        or (not forward and record.role ~= 'engineer'
+            and record.role ~= 'acu')
         or record.complete ~= true
         or record.idle ~= true
     then
         return false
     end
     local positions = {}
-    for index = 1, count do
-        local key = keys[index]
-        local waypoint = waypoints[index]
-        local site = nil
-        for _, candidate in ipairs(((observation.sites or {}).mass) or {}) do
-            if candidate.key == key then site = candidate break end
+    if forward then
+        local region = nil
+        for _, candidate in ipairs((controller.macroPlan or {}).regions or {}) do
+            if candidate.key == intent.regionKey then
+                region = candidate
+                break
+            end
         end
-        if not site
-            or site.complete ~= true
-            or site.localSite ~= true
-            or not IsCampaignPosition(site.position)
-            or not IsCampaignPosition(waypoint)
-            or DistanceSquared(site.position, waypoint) > 0.01
-            or math.abs(site.position[2] - waypoint[2]) > 0.01
+        local expected = region
+            and ESCALATION.ForwardReclaimWaypoints(region) or {}
+        if not region or region.state ~= 'secured'
+            or region.reclaimAnchor ~= true
+            or region.connected == false
+            or Distance(region.position, controller.basePosition) <= 60
+            or TableGetn(expected) ~= count
         then
             return false
         end
-        local position = TerrainPosition(site.position)
-        if not position then return false end
-        TableInsert(positions, position)
+        for index = 1, count do
+            if not IsCampaignPosition(waypoints[index])
+                or DistanceSquared(waypoints[index], expected[index]) > 0.01
+            then
+                return false
+            end
+            local position = TerrainPosition(expected[index])
+            if not position then return false end
+            TableInsert(positions, position)
+        end
+    else
+        for index = 1, count do
+            local key = keys[index]
+            local waypoint = waypoints[index]
+            local site = nil
+            for _, candidate in ipairs(((observation.sites or {}).mass) or {}) do
+                if candidate.key == key then site = candidate break end
+            end
+            if not site
+                or site.complete ~= true
+                or site.localSite ~= true
+                or not IsCampaignPosition(site.position)
+                or not IsCampaignPosition(waypoint)
+                or DistanceSquared(site.position, waypoint) > 0.01
+                or math.abs(site.position[2] - waypoint[2]) > 0.01
+            then
+                return false
+            end
+            local position = TerrainPosition(site.position)
+            if not position then return false end
+            TableInsert(positions, position)
+        end
     end
     local actor = LiveOwnedActor(controller, token, record, record.role)
     if not actor or SafeCall(false, actor.IsIdleState, actor) ~= true then
@@ -3787,7 +3820,8 @@ ESCALATION.ExecuteReclaimPatrol = function(
         actor = token,
         command = 'patrol',
         role = record.role,
-        reason = 'home_reclaim_patrol',
+        reason = intent.reason or 'home_reclaim_patrol',
+        region = intent.regionKey,
         waypoints = count,
     })
     return true
@@ -8349,7 +8383,8 @@ Controller.Reconcile = function(controller, observation)
     for token, _ in pairs(controller.reclaimPatrolAssignments or {}) do
         local record = records[token]
         if not record
-            or (record.role ~= 'engineer' and record.role ~= 'acu')
+            or (record.role ~= 'engineer' and record.role ~= 'acu'
+                and record.role ~= 't2_engineer')
             or record.complete ~= true
         then
             controller.reclaimPatrolAssignments[token] = nil
@@ -10419,6 +10454,80 @@ ESCALATION.LedgerExpansionPlan = function(jobLedger)
     return result
 end
 
+ESCALATION.ForwardReclaimWaypoints = function(region)
+    local center = region and CopyPosition(region.position) or nil
+    if not center then return {} end
+    local radius = 24
+    return {
+        { center[1] + radius, center[2], center[3] },
+        { center[1], center[2], center[3] + radius },
+        { center[1] - radius, center[2], center[3] },
+        { center[1], center[2], center[3] - radius },
+    }
+end
+
+ESCALATION.AdaptForwardReclaimPatrol = function(
+    controller, observation, macroPlan, intents, reserved
+)
+    local hasT2Power = false
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 'power_generator_t2' and unit.complete == true then
+            hasT2Power = true
+            break
+        end
+    end
+    if not hasT2Power then return end
+
+    local region = nil
+    local regionDistance = nil
+    for _, candidate in ipairs((macroPlan or {}).regions or {}) do
+        local distance = DistanceSquared(candidate.position, controller.basePosition)
+        if candidate.state == 'secured'
+            and candidate.reclaimAnchor == true
+            and candidate.connected ~= false
+            and distance > 60 * 60
+            and (not region or distance > regionDistance
+                or (distance == regionDistance
+                    and tostring(candidate.key) < tostring(region.key)))
+        then
+            region = candidate
+            regionDistance = distance
+        end
+    end
+    if not region then return end
+
+    local actor = nil
+    local actorDistance = nil
+    for _, unit in ipairs(observation.units or {}) do
+        if unit.role == 't2_engineer' and unit.complete == true
+            and unit.idle == true and not reserved[unit.token]
+            and not controller.pending[unit.token]
+            and not controller.reclaimPatrolAssignments[unit.token]
+            and not ESCALATION.TransportTokenClaimed(controller, unit.token)
+        then
+            local distance = DistanceSquared(unit.position, region.position)
+            if not actor or distance < actorDistance
+                or (distance == actorDistance
+                    and tostring(unit.token) < tostring(actor.token))
+            then
+                actor = unit
+                actorDistance = distance
+            end
+        end
+    end
+    if not actor then return end
+
+    reserved[actor.token] = true
+    ESCALATION.AppendDirectorIntent(intents, {
+        kind = 'reclaim_patrol',
+        actorToken = actor.token,
+        reason = 'forward_reclaim_patrol',
+        regionKey = region.key,
+        waypoints = ESCALATION.ForwardReclaimWaypoints(region),
+        priority = 5,
+    })
+end
+
 ESCALATION.AdaptReclaimIntents = function(controller, reclaimPlan, intents, reserved)
     for _, job in ipairs((reclaimPlan or {}).jobs or {}) do
         if type(job.actorToken) == 'string' and not reserved[job.actorToken]
@@ -11570,6 +11679,9 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         )
     end
     ESCALATION.AdaptTechIntents(controller, observation, techPlan, intents, reserved)
+    ESCALATION.AdaptForwardReclaimPatrol(
+        controller, observation, macroPlan, intents, reserved
+    )
     ESCALATION.AdaptScoutIntent(controller, observation, scoutPlan, intents, reserved)
     ESCALATION.AdaptRadarIntents(
         controller, observation, radarIntents, macroPlan, intents, reserved
