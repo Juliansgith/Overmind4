@@ -976,7 +976,9 @@ def test_can_build_missing_error_false_and_nil_results_fail_closed() -> None:
 
 def test_rally_only_queue_is_idle_but_active_build_and_moving_actor_are_busy() -> None:
     harness = make_harness()
-    rally = {"commandType": 2, "type": "Move", "position": [35, 2, 45], "isRally": True}
+    # The live engine queue exposes a factory rally as a Move command without
+    # the test-only isRally annotation.
+    rally = {"commandType": 2, "type": "Move", "position": [35, 2, 45]}
     rallied_factory = harness.unit(
         entityId=1,
         blueprintId="ueb0101",
@@ -1026,7 +1028,7 @@ def test_rally_integration_leaves_factory_eligible_for_production_next_step() ->
 
     harness.lua.globals().Controller.Step(harness.controller)
     assert len(harness.calls.rally) == 1
-    assert factory.options.queue[1].isRally is True
+    assert factory.options.queue[1].commandType == 2
     factory.options.idleState = False
 
     harness.brain.tick = 10

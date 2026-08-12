@@ -188,7 +188,10 @@ ESCALATION.FactoryProductionIdle = function(unit)
     local queue = SafeCall(nil, unit.GetCommandQueue, unit)
     if type(queue) ~= 'table' or TableGetn(queue) < 1 then return false end
     for _, command in ipairs(queue) do
-        if type(command) ~= 'table' or command.isRally ~= true then
+        if type(command) ~= 'table'
+            or (command.isRally ~= true
+                and tonumber(command.commandType) ~= 2)
+        then
             return false
         end
     end
