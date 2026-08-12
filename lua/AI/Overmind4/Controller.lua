@@ -9529,8 +9529,16 @@ ESCALATION.ReconcileDirectorMissions = function(controller, observation)
         local mission = controller.bomberMissions[bomberToken]
         local record = records[bomberToken]
         if not record or record.role ~= 'bomber' or record.complete ~= true
-            or not mission or not controller.enemyRefs[mission.targetToken]
+            or not mission
         then
+            controller.bomberMissions[bomberToken] = nil
+        elseif mission.publicHarass == true then
+            if record.idle == true
+                and observation.tick > (tonumber(mission.issuedTick) or 0)
+            then
+                controller.bomberMissions[bomberToken] = nil
+            end
+        elseif not controller.enemyRefs[mission.targetToken] then
             controller.bomberMissions[bomberToken] = nil
         end
     end
@@ -10948,12 +10956,38 @@ ESCALATION.DirectorAirInput = function(
 end
 
 ESCALATION.AdaptBomberIntent = function(
-    controller, observation, bomberTarget, intents, reserved
+    controller, observation, bomberTarget, scoutPlan, intents, reserved
 )
-    if type(bomberTarget) ~= 'table'
+    local visualTarget = type(bomberTarget) == 'table'
+        and type(bomberTarget.targetToken) == 'string'
+        and type(bomberTarget.targetRole) == 'string'
+        and CopyPosition(bomberTarget.position)
+    local harassKey = type(scoutPlan) == 'table'
+        and (scoutPlan.nextObjectiveKey
+            or (scoutPlan.objectiveKeys or {})[1])
+        or nil
+    local harassPosition = nil
+    if type(harassKey) == 'string' then
+        for index, key in ipairs((scoutPlan or {}).objectiveKeys or {}) do
+            if key == harassKey then
+                harassPosition = CopyPosition((scoutPlan.waypoints or {})[index])
+                break
+            end
+        end
+    end
+    if not visualTarget
+        and (type(harassKey) ~= 'string'
+            or not harassPosition
+            or TableGetn((scoutPlan or {}).objectiveKeys or {}) == 0
+            or TableGetn((scoutPlan or {}).objectiveKeys or {})
+                ~= TableGetn((scoutPlan or {}).waypoints or {}))
+    then
+        return
+    end
+    if visualTarget and (type(bomberTarget) ~= 'table'
         or type(bomberTarget.targetToken) ~= 'string'
         or type(bomberTarget.targetRole) ~= 'string'
-        or not CopyPosition(bomberTarget.position)
+        or not CopyPosition(bomberTarget.position))
     then
         return
     end
@@ -10962,13 +10996,24 @@ ESCALATION.AdaptBomberIntent = function(
     )
     if not bomber or controller.bomberMissions[bomber.token] then return end
     reserved[bomber.token] = true
-    ESCALATION.AppendDirectorIntent(intents, {
-        kind = 'bomber_raid', actorToken = bomber.token,
-        targetToken = bomberTarget.targetToken,
-        targetRole = bomberTarget.targetRole,
-        position = CopyPosition(bomberTarget.position),
-        reason = 'current_visual_raid', priority = 3,
-    })
+    if visualTarget then
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'bomber_raid', actorToken = bomber.token,
+            targetToken = bomberTarget.targetToken,
+            targetRole = bomberTarget.targetRole,
+            position = CopyPosition(bomberTarget.position),
+            reason = 'current_visual_raid', priority = 3,
+        })
+    else
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'bomber_harass', actorToken = bomber.token,
+            siteKey = harassKey,
+            position = harassPosition,
+            objectiveKeys = CopyArray(scoutPlan.objectiveKeys or {}),
+            waypoints = ESCALATION.DeepCopy(scoutPlan.waypoints or {}),
+            reason = 'public_mass_harass', priority = 3,
+        })
+    end
 end
 
 ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
@@ -11602,7 +11647,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     )
     ESCALATION.AdaptAirIntents(controller, observation, airPlan, intents, reserved)
     ESCALATION.AdaptBomberIntent(
-        controller, observation, bomberTarget, intents, reserved
+        controller, observation, bomberTarget, scoutPlan, intents, reserved
     )
     ESCALATION.AdaptGrowthIntents(
         controller, observation, macroPlan, techPlan, intents, reserved
@@ -11774,6 +11819,61 @@ ESCALATION.ExecuteBomberRaid = function(controller, intent, records, usedActors,
         issuedTick = CurrentTick(controller),
     }
     usedActors[intent.actorToken] = true
+    return true
+end
+
+ESCALATION.ExecuteBomberHarass = function(
+    controller, intent, records, usedActors, observation
+)
+    local record = records[intent.actorToken]
+    if usedActors[intent.actorToken] or controller.bomberMissions[intent.actorToken]
+        or not record or record.role ~= 'bomber' or record.complete ~= true
+        or record.idle ~= true or not CopyPosition(intent.position)
+    then
+        return false
+    end
+    local keys = intent.objectiveKeys or { intent.siteKey }
+    local waypoints = intent.waypoints or { intent.position }
+    if TableGetn(keys) == 0 or TableGetn(keys) ~= TableGetn(waypoints) then
+        return false
+    end
+    local startIndex = 1
+    for index, key in ipairs(keys) do
+        if key == intent.siteKey then startIndex = index end
+        if not ESCALATION.PublicScoutObjective(
+            controller, observation, key, waypoints[index])
+        then
+            return false
+        end
+    end
+    local actor = LiveOwnedActor(controller, intent.actorToken, record, 'bomber')
+    if not actor or not pcall(function() IssueClearCommands({ actor }) end) then
+        return false
+    end
+    for offset = 0, TableGetn(keys) - 1 do
+        local index = startIndex + offset
+        while index > TableGetn(keys) do index = index - TableGetn(keys) end
+        local position = TerrainPosition(waypoints[index])
+        if not position
+            or not pcall(function() IssueAggressiveMove({ actor }, position) end)
+        then
+            pcall(function() IssueClearCommands({ actor }) end)
+            return false
+        end
+    end
+    controller.bomberMissions[intent.actorToken] = {
+        bomberToken = intent.actorToken,
+        publicHarass = true,
+        objectiveKeys = CopyArray(keys),
+        issuedTick = CurrentTick(controller),
+    }
+    usedActors[intent.actorToken] = true
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'bomber_harass',
+        role = 'bomber',
+        objectives = TableGetn(keys),
+    })
     return true
 end
 
@@ -12236,6 +12336,10 @@ Controller.Execute = function(controller, intents, observation)
                 )
             elseif intent.kind == 'bomber_raid' then
                 issued = ESCALATION.ExecuteBomberRaid(
+                    controller, intent, records, usedActors, observation
+                )
+            elseif intent.kind == 'bomber_harass' then
+                issued = ESCALATION.ExecuteBomberHarass(
                     controller, intent, records, usedActors, observation
                 )
             elseif intent.kind == 'scout_route' then

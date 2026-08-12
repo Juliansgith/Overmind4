@@ -1101,6 +1101,70 @@ def test_visual_enemy_roles_use_faction_neutral_blueprint_categories_while_radar
     assert len(harness.calls.aggressive) == 1
 
 
+def test_idle_bomber_harasses_public_mass_route_without_visual_target() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    bomber = harness.unit(
+        entityId=30,
+        blueprintId="uea0103",
+        position=[10, 20, 20],
+    )
+    harness.brain.units = harness.lua.table_from([bomber])
+    public_sites = [plain(harness.controller.markers.mass[index]) for index in (1, 2)]
+    _set_director_result(
+        harness,
+        "scoutPlan",
+        {
+            "nextObjectiveKey": public_sites[0]["key"],
+            "objectiveKeys": [site["key"] for site in public_sites],
+            "waypoints": [site["position"] for site in public_sites],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
+    assert [
+        (plain(call.position)[0], plain(call.position)[2])
+        for call in harness.calls.aggressive.values()
+    ] == [(site["position"][0], site["position"][2]) for site in public_sites]
+    mission = plain(harness.controller.bomberMissions["30:1"])
+    assert mission["publicHarass"] is True
+    assert mission["objectiveKeys"] == [site["key"] for site in public_sites]
+
+
+def test_public_bomber_harass_releases_after_route_and_reissues_without_churn() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    bomber = harness.unit(
+        entityId=30,
+        blueprintId="uea0103",
+        position=[10, 20, 20],
+    )
+    harness.brain.units = harness.lua.table_from([bomber])
+    site = plain(harness.controller.markers.mass[1])
+    _set_director_result(
+        harness,
+        "scoutPlan",
+        {
+            "nextObjectiveKey": site["key"],
+            "objectiveKeys": [site["key"]],
+            "waypoints": [site["position"]],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+    bomber.options.idleState = False
+    harness.brain.tick = 9
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.aggressive) == 1
+
+    bomber.options.idleState = True
+    harness.brain.tick = 18
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.aggressive) == 2
+
+
 def test_step_default_merge_adapts_every_planner_output_once_and_persists_lifecycle() -> None:
     harness = make_harness()
     harness.controller.crossMapOffenseEnabled = False
