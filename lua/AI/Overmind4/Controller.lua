@@ -11058,6 +11058,66 @@ ESCALATION.AdaptBomberIntent = function(
     end
 end
 
+ESCALATION.AdaptFieldIntercept = function(controller, observation, intents, reserved)
+    local campaign = controller.fieldCampaign
+    if not campaign or campaign.state ~= 'active' or campaign.emergency == true
+        or campaign.pendingMode ~= nil or campaign.route ~= nil
+        or type(campaign.fieldTokens) ~= 'table'
+        or TableGetn(campaign.fieldTokens) < 4
+    then
+        return
+    end
+    local contacts = {}
+    for _, contact in ipairs(observation.enemyObservations or {}) do
+        if contact.currentlyVisual == true and contact.current == true
+            and COMBAT_ROLES[contact.role] == true
+            and CopyPosition(contact.position)
+        then
+            TableInsert(contacts, contact)
+        end
+    end
+    table.sort(contacts, function(a, b) return tostring(a.token) < tostring(b.token) end)
+    local best = nil
+    for _, seed in ipairs(contacts) do
+        local group = {}
+        local x = 0
+        local z = 0
+        for _, contact in ipairs(contacts) do
+            if Distance(contact.position, seed.position) <= 64 then
+                TableInsert(group, contact)
+                x = x + contact.position[1]
+                z = z + contact.position[3]
+            end
+        end
+        local count = TableGetn(group)
+        local position = count > 0 and TerrainPosition({ x / count, 0, z / count }) or nil
+        local anchorDistance = position and Distance(position, campaign.anchorPosition) or 1000000000000
+        if count >= 8 and anchorDistance <= 240
+            and (not best or count > best.count
+                or (count == best.count and anchorDistance < best.anchorDistance))
+        then
+            best = { count = count, position = position, anchorDistance = anchorDistance }
+        end
+    end
+    if not best then return end
+    local previous = controller.fieldIntercept
+    if previous and observation.tick - (tonumber(previous.issuedTick) or 0) < 100
+        and Distance(previous.position, best.position) <= 40
+    then
+        return
+    end
+    local tokens = CopyArray(campaign.fieldTokens)
+    for _, token in ipairs(tokens) do
+        if reserved[token] then return end
+        reserved[token] = true
+    end
+    ESCALATION.AppendDirectorIntent(intents, {
+        kind = 'field_intercept', actorTokens = tokens,
+        position = CopyPosition(best.position), threatCount = best.count,
+        campaignSerial = campaign.serial, priority = 0,
+    })
+end
+
 ESCALATION.DirectorTransportInput = function(controller, observation, macroPlan)
     local engineer = nil
     local transport = nil
@@ -11697,6 +11757,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     ESCALATION.AdaptTransportIntent(
         controller, observation, transportPlan, intents
     )
+    ESCALATION.AdaptFieldIntercept(controller, observation, intents, reserved)
     ESCALATION.AdaptForceIntents(controller, forcePlan, intents, reserved)
 
     controller.intelState = intelState
@@ -12265,6 +12326,61 @@ ESCALATION.ExecuteForceMove = function(
     return true
 end
 
+ESCALATION.ExecuteFieldIntercept = function(
+    controller, intent, records, usedActors, observation
+)
+    local campaign = controller.fieldCampaign
+    if not campaign or campaign.state ~= 'active' or campaign.emergency == true
+        or campaign.pendingMode ~= nil or campaign.route ~= nil
+        or intent.campaignSerial ~= campaign.serial
+        or TableGetn(intent.actorTokens or {}) ~= TableGetn(campaign.fieldTokens or {})
+        or not CopyPosition(intent.position)
+    then
+        return false
+    end
+    local actors = {}
+    for index, token in ipairs(intent.actorTokens or {}) do
+        if token ~= campaign.fieldTokens[index] or usedActors[token]
+            or not (campaign.fieldTokenSet or {})[token]
+        then
+            return false
+        end
+        local record = records[token]
+        if not record or COMBAT_ROLES[record.role] ~= true or record.complete ~= true then
+            return false
+        end
+        local actor = LiveOwnedActor(controller, token, record, record.role)
+        if not actor then return false end
+        TableInsert(actors, actor)
+    end
+    local liveThreat = 0
+    for _, contact in ipairs(observation.enemyObservations or {}) do
+        if contact.currentlyVisual == true and contact.current == true
+            and COMBAT_ROLES[contact.role] == true
+            and Distance(contact.position, intent.position) <= 80
+        then
+            liveThreat = liveThreat + 1
+        end
+    end
+    if liveThreat < 4 or not pcall(function() IssueClearCommands(actors) end) then
+        return false
+    end
+    if not pcall(function() IssueAggressiveMove(actors, intent.position) end) then
+        return false
+    end
+    controller.fieldIntercept = {
+        issuedTick = CurrentTick(controller),
+        position = CopyPosition(intent.position),
+        threatCount = liveThreat,
+    }
+    for _, token in ipairs(intent.actorTokens) do usedActors[token] = true end
+    Emit(controller, 'order', {
+        command = 'field_intercept', units = TableGetn(intent.actorTokens),
+        threat_count = liveThreat,
+    })
+    return true
+end
+
 ESCALATION.ExecuteEscortedExpansion = function(
     controller, intent, records, usedActors
 )
@@ -12382,6 +12498,10 @@ Controller.Execute = function(controller, intents, observation)
             elseif intent.kind == 'regional_field' then
                 issued = ESCALATION.ExecuteForceMove(
                     controller, intent, records, usedActors, 'field', true
+                )
+            elseif intent.kind == 'field_intercept' then
+                issued = ESCALATION.ExecuteFieldIntercept(
+                    controller, intent, records, usedActors, observation
                 )
             elseif intent.kind == 'bomber_raid' then
                 issued = ESCALATION.ExecuteBomberRaid(

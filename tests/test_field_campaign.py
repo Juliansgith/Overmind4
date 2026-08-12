@@ -380,6 +380,38 @@ def activate_campaign(harness: Any, observation: Any) -> tuple[dict[str, Any], A
     return intents[0], current
 
 
+def test_visible_enemy_formation_near_front_concentrates_the_full_field_group() -> None:
+    harness, _, _, combat, observation = start_campaign()
+    activate_campaign(harness, observation)
+    field, _ = expected_initial_cohorts(24, 2)
+    enemies = [
+        harness.unit(
+            entityId=99000 + index,
+            blueprintId="uel0201",
+            army=2,
+            position=[78 + index, 2, 24 + (index % 2)],
+            seenNow=True,
+            onRadar=True,
+        )
+        for index in range(8)
+    ]
+    harness.brain.enemies = harness.lua.table_from(enemies)
+    harness.brain.tick = 100
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    clear_before = len(harness.calls.clear)
+    aggressive_before = len(harness.calls.aggressive)
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == clear_before + 1
+    assert len(harness.calls.aggressive) == aggressive_before + 1
+    call = harness.calls.aggressive[len(harness.calls.aggressive)]
+    assert actor_tokens_from_call(call) == field
+    position = plain(call.position)
+    assert 81 <= position[0] <= 82
+    assert 24 <= position[2] <= 25
+
+
 @pytest.mark.parametrize("total,aa", itertools.product([24, 25, 122], [2, 3, 14]))
 @pytest.mark.parametrize("seed", range(4))
 def test_campaign_allocates_exact_deterministic_three_quarters_cohorts(
