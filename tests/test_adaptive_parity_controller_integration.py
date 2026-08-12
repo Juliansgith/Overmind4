@@ -2910,13 +2910,7 @@ def test_airlift_unload_reserves_the_exact_drop_mex_without_building_before_deta
         for call in harness.calls.move.values()
         if call.units[1].options.entityId == 32
     ]
-    assert len(cargo_moves) == 1
-    cargo_move_position = plain(cargo_moves[0].position)
-    cargo_clearance = (
-        (cargo_move_position[0] - expected_x) ** 2
-        + (cargo_move_position[2] - 300) ** 2
-    ) ** 0.5
-    assert 18 <= cargo_clearance <= 22
+    assert cargo_moves == []
     mex_orders = [
         call
         for call in harness.calls.buildMobile.values()
@@ -2926,7 +2920,7 @@ def test_airlift_unload_reserves_the_exact_drop_mex_without_building_before_deta
     mission = plain(harness.controller.transportMissions["airlift:front"])
     assert mission["siteKey"] == ("alternate" if retarget else "front")
     assert mission["deliveryBuildQueued"] is False
-    assert mission["deliveryClearanceQueued"] is True
+    assert mission["deliveryClearanceQueued"] is False
 
 
 def test_airlift_delivery_retargets_when_the_drop_mex_becomes_blocked() -> None:
