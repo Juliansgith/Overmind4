@@ -6293,9 +6293,9 @@ def test_mature_field_force_continuously_pressures_public_enemy_spawn() -> None:
     harness.lua.execute("Policy.Decide = function() return {} end")
     tanks = [
         harness.unit(entityId=100 + index, blueprintId="uel0201")
-        for index in range(24)
+        for index in range(40)
     ]
-    tokens = [f"{100 + index}:1" for index in range(24)]
+    tokens = [f"{100 + index}:1" for index in range(40)]
     harness.brain.units = harness.lua.table_from(tanks)
     _set_director_result(
         harness,

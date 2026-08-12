@@ -10716,7 +10716,11 @@ ESCALATION.AdaptScoutIntent = function(controller, observation, scoutPlan, inten
         controller, observation, 'air_scout', nil, reserved
     )
     if not scout or controller.airScoutAssignments[scout.token] then return end
-    local objectiveKey = scoutPlan.nextObjectiveKey or (scoutPlan.objectiveKeys or {})[1]
+    local objectiveKeys = scoutPlan.objectiveKeys or {}
+    local routeIndex = (tonumber(controller.airScoutCount) or 0) + 1
+    if routeIndex > TableGetn(objectiveKeys) then routeIndex = 1 end
+    local objectiveKey = objectiveKeys[routeIndex]
+        or scoutPlan.nextObjectiveKey or objectiveKeys[1]
     local position = nil
     for index, key in ipairs(scoutPlan.objectiveKeys or {}) do
         if key == objectiveKey then position = scoutPlan.waypoints[index] end
@@ -11015,10 +11019,12 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
         local rank = nil
         if region.state == 'contested' or region.state == 'retake' then
             rank = 1
-        elseif region.state == 'planned' or region.state == 'establishing' then
+        elseif (region.state == 'planned' or region.state == 'establishing'
+                or region.state == 'secured')
+            and DistanceSquared(region.position, controller.targetPosition)
+                < DistanceSquared(region.position, controller.basePosition)
+        then
             rank = 2
-        elseif region.state == 'secured' then
-            rank = 3
         end
         if rank and CopyPosition(region.position) then
             TableInsert(raiderTargets, {
@@ -11112,7 +11118,7 @@ ESCALATION.AdaptForceIntents = function(controller, forcePlan, intents, reserved
         end
     end
     table.sort(fieldTokens)
-    if TableGetn(fieldTokens) >= 24 and controller.targetPath == true
+    if TableGetn(fieldTokens) >= 40 and controller.targetPath == true
         and CopyPosition(controller.targetPosition)
     then
         targetRegion = {

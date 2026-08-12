@@ -264,6 +264,11 @@ Intelligence.PlanAir = function(snapshot)
             role = 'interceptor'
         elseif totals.interceptor < 4 then
             role = 'interceptor'
+        elseif totals.air_scout < 3 and totals.bomber >= 1
+            and needs.airThreat ~= true
+            and (Number(needs.airThreatCount, 0) or 0) <= 0
+        then
+            role = 'air_scout'
         elseif totals.bomber < 1 and needs.visibleRaidTarget == true then
             role = 'bomber'
         else
