@@ -9345,7 +9345,6 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     TableInsert(requests, {
         id = 'factory-1', lane = 'factory_growth', massDrain = 0.4,
         energyDrain = 3.5, massCost = 240, energyCost = 2100,
-        durationTicks = 600, allowHybrid = true,
         required = counts.landFactoriesT1 + counts.landFactoriesT2 < 1,
         optional = counts.landFactoriesT1 + counts.landFactoriesT2 >= 1,
     })
