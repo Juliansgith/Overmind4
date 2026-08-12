@@ -174,7 +174,7 @@ def test_banked_post_mex_tech_commits_the_first_t2_land_hq_during_a_stall() -> N
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
-def test_macro_portfolio_uses_rolling_demand_instead_of_one_busy_tick_for_first_t2_mex() -> None:
+def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
     harness = make_harness()
     harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
     harness.lua.execute(
@@ -190,7 +190,7 @@ def test_macro_portfolio_uses_rolling_demand_instead_of_one_busy_tick_for_first_
             blueprintId="ueb1103",
             canBuild={"ueb1202": True},
         )
-        for entity_id in range(10, 20)
+        for entity_id in range(10, 19)
     ]
     factories = [
         harness.unit(entityId=entity_id, blueprintId="ueb0101")

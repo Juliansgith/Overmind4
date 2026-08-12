@@ -8785,7 +8785,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             massDrain = 0.2, energyDrain = 9, massCost = 50,
             energyCost = 2250, required = true })
     end
-    if completedMex >= 10 and counts.landFactoriesT1 >= 2 then
+    if completedMex >= 9 and counts.landFactoriesT1 >= 2 then
         if counts.mexT2 < 2 then
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1, energyDrain = 6,
