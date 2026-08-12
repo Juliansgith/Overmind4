@@ -722,7 +722,6 @@ local function NormalizeOwnUnit(controller, unit)
         airAssigned = controller.airAssignments[token] == true,
         airScoutAssigned = controller.airScoutAssignments[token] == true,
         reclaimPatrolAssigned = controller.reclaimPatrolAssignments[token] == true,
-        reclaimWorker = controller.reclaimWorkerToken == token,
         fieldCohort = fieldCohort == true,
         homeCohort = homeCohort == true,
         campaignEngineer = campaignEngineer == true,
@@ -7968,7 +7967,6 @@ Controller.Create = function(brain)
         airScoutAssignments = {},
         airScoutCount = 0,
         reclaimPatrolAssignments = {},
-        reclaimWorkerToken = nil,
         intelState = { epoch = 0, contacts = {}, threat = {}, expansionSafety = {} },
         macroPlan = { epoch = 0, valid = false, lanes = {}, regions = {}, intents = {} },
         jobLedger = { epoch = 0, jobs = {}, releasedActorTokens = {} },
@@ -9098,12 +9096,7 @@ ESCALATION.DirectorReclaimInput = function(controller, observation, macroPlan)
     end
     local engineers = {}
     for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-        if unit.role == 'engineer'
-            and (controller.reclaimWorkerToken == nil
-                or unit.token == controller.reclaimWorkerToken)
-        then
-            TableInsert(engineers, unit)
-        end
+        if unit.role == 'engineer' then TableInsert(engineers, unit) end
     end
     return {
         tick = observation.tick,
@@ -11113,51 +11106,11 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     local strategicBuilderToken = ESCALATION.StrategicHydroBuilderToken(
         controller, observation, macroPlan
     )
-    local completedEngineerCount = 0
-    local reclaimWorkerLive = controller.reclaimWorkerToken == nil
-    local reclaimWorkerCandidate = nil
-    local reclaimWorkerDistance = nil
-    for _, unit in ipairs(observation.units or {}) do
-        if unit.role == 'engineer' and unit.complete == true then
-            completedEngineerCount = completedEngineerCount + 1
-            if unit.token == controller.reclaimWorkerToken then
-                reclaimWorkerLive = true
-            end
-            if unit.attached ~= true
-                and not ESCALATION.TransportTokenClaimed(controller, unit.token)
-            then
-                local distance = DistanceSquared(
-                    unit.position, controller.basePosition
-                )
-                if reclaimWorkerCandidate == nil
-                    or distance < reclaimWorkerDistance
-                    or (distance == reclaimWorkerDistance
-                        and unit.token < reclaimWorkerCandidate.token)
-                then
-                    reclaimWorkerCandidate = unit
-                    reclaimWorkerDistance = distance
-                end
-            end
-        end
-    end
-    if not reclaimWorkerLive then controller.reclaimWorkerToken = nil end
-    if controller.reclaimWorkerToken == nil
-        and completedEngineerCount >= 8
-        and reclaimWorkerCandidate ~= nil
-    then
-        controller.reclaimWorkerToken = reclaimWorkerCandidate.token
-    end
-    local reclaimInput = ESCALATION.DirectorReclaimInput(
-        controller, observation, macroPlan
-    )
     local reclaimPlan = ESCALATION.directors.macro.PlanReclaim(
-        reclaimInput
+        ESCALATION.DirectorReclaimInput(controller, observation, macroPlan)
     ) or { jobs = {} }
     reclaimPlan = ESCALATION.DeepCopy(reclaimPlan)
     local reclaimActorTokens = {}
-    if type(controller.reclaimWorkerToken) == 'string' then
-        reclaimActorTokens[controller.reclaimWorkerToken] = true
-    end
     for _, job in ipairs(reclaimPlan.jobs or {}) do
         if type(job.actorToken) == 'string' then
             reclaimActorTokens[job.actorToken] = true
@@ -11337,61 +11290,6 @@ ESCALATION.UpdateDirectors = function(controller, observation)
         ESCALATION.AppendDirectorIntent(intents, intent)
     end
     ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
-    if type(controller.reclaimWorkerToken) == 'string'
-        and TableGetn(reclaimPlan.jobs or {}) == 0
-        and controller.reclaimPatrolAssignments[controller.reclaimWorkerToken] ~= true
-    then
-        local worker = nil
-        for _, unit in ipairs(observation.units or {}) do
-            if unit.token == controller.reclaimWorkerToken
-                and unit.role == 'engineer'
-                and unit.complete == true
-                and unit.idle == true
-            then
-                worker = unit
-                break
-            end
-        end
-        if worker then
-            local patrolSites = {}
-            for _, site in ipairs((observation.sites or {}).mass or {}) do
-                if site.complete == true
-                    and site.localSite == true
-                    and type(site.key) == 'string'
-                    and type(site.position) == 'table'
-                then
-                    TableInsert(patrolSites, site)
-                end
-            end
-            table.sort(patrolSites, function(a, b)
-                local aDistance = DistanceSquared(worker.position, a.position)
-                local bDistance = DistanceSquared(worker.position, b.position)
-                if aDistance ~= bDistance then return aDistance < bDistance end
-                return a.key < b.key
-            end)
-            local siteKeys = {}
-            local waypoints = {}
-            for _, site in ipairs(patrolSites) do
-                if TableGetn(siteKeys) < 4 then
-                    TableInsert(siteKeys, site.key)
-                    TableInsert(waypoints, CopyPosition(site.position))
-                end
-            end
-            if TableGetn(siteKeys) >= 2 then
-                ESCALATION.AppendDirectorIntent(intents, {
-                    kind = 'reclaim_patrol',
-                    actorToken = controller.reclaimWorkerToken,
-                    siteKeys = siteKeys,
-                    waypoints = waypoints,
-                    priority = 49,
-                    reason = 'dedicated_reclaim_patrol',
-                })
-            end
-        end
-    end
-    if type(controller.reclaimWorkerToken) == 'string' then
-        reserved[controller.reclaimWorkerToken] = true
-    end
     ESCALATION.RecordExpansionDenials(controller, expansionPlan.denials)
     ESCALATION.AdaptExpansionIntents(
         controller, ledgerExpansionPlan, forcePlan, intents, reserved
@@ -12206,9 +12104,6 @@ Controller.Step = function(controller)
     local policyIntents = Policy.Decide(observation) or {}
     local intents = {}
     local directorClaims = {}
-    if type(controller.reclaimWorkerToken) == 'string' then
-        directorClaims[controller.reclaimWorkerToken] = true
-    end
     for _, job in pairs((controller.jobLedger or {}).jobs or {}) do
         if type(job.actorToken) == 'string'
             and job.phase ~= 'completed' and job.phase ~= 'retryable'
@@ -12298,24 +12193,7 @@ Controller.Step = function(controller)
         local buildingAa = 0
         local assignedMinTargetDistance = -1
         local assignedMaxTargetDistance = -1
-        local reclaimWorkerState = 'none'
-        local reclaimWorkerPendingKind = 'none'
         for _, unit in ipairs(observation.units) do
-            if unit.token == controller.reclaimWorkerToken then
-                local workerPending = controller.pending[unit.token]
-                if workerPending then
-                    reclaimWorkerState = 'pending'
-                    reclaimWorkerPendingKind = tostring(
-                        workerPending.kind or 'unknown'
-                    )
-                elseif unit.reclaimPatrolAssigned == true then
-                    reclaimWorkerState = 'patrol'
-                elseif unit.idle == true then
-                    reclaimWorkerState = 'idle'
-                else
-                    reclaimWorkerState = 'busy'
-                end
-            end
             if unit.role == 'acu' then
                 acu = unit
             elseif COMBAT_ROLES[unit.role] and unit.complete == true then
@@ -12597,9 +12475,6 @@ Controller.Step = function(controller)
             air_screen = tonumber(macro.airScreenCount) or 0,
             air_scout = tonumber(macro.airScoutCount) or 0,
             reclaim_candidate_value = tonumber(macro.reclaimValue) or -1,
-            reclaim_worker = tostring(controller.reclaimWorkerToken or 'none'),
-            reclaim_worker_state = reclaimWorkerState,
-            reclaim_worker_pending_kind = reclaimWorkerPendingKind,
             reclaim_query_engineers = tonumber(macro.reclaimQueryEngineers) or 0,
             reclaim_raw_props = tonumber(macro.reclaimRawProps) or 0,
             reclaim_normalized_props = tonumber(macro.reclaimNormalizedProps) or 0,

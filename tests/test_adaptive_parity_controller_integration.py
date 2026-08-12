@@ -3813,69 +3813,15 @@ def test_reclaim_causal_operation_keeps_stable_id_until_observed_completion() ->
     _assert_operation_stream_clean(harness)
 
 
-@pytest.mark.parametrize(
-    ("engineer_count", "expected_worker"),
-    [(2, None), (8, "12:1")],
-)
-def test_reclaim_actor_is_reserved_before_expansion_planning(
-    engineer_count: int,
-    expected_worker: str | None,
-) -> None:
+def test_reclaim_actor_is_reserved_before_expansion_planning() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
     harness.controller.markers.hydro = harness.lua.table_from([])
     engineers = [
-        harness.unit(
-            entityId=entity_id,
-            blueprintId="uel0105",
-            position=[10 + 2 * (entity_id - 12), 2, 20],
-        )
-        for entity_id in range(12, 12 + engineer_count)
+        harness.unit(entityId=12, blueprintId="uel0105", position=[10, 2, 20]),
+        harness.unit(entityId=13, blueprintId="uel0105", position=[12, 2, 20]),
     ]
-    owned_mex = []
-    if expected_worker:
-        patrol_sites = [
-            {
-                "key": "remote-owned",
-                "name": "Remote owned",
-                "kind": "mass",
-                "position": [10, 2, 20],
-                "distance": 1,
-                "localSite": False,
-                "reachable": True,
-                "engineerReachable": True,
-            },
-            {
-                "key": "local-owned-a",
-                "name": "Local owned A",
-                "kind": "mass",
-                "position": [12, 2, 20],
-                "distance": 2,
-                "localSite": True,
-                "reachable": True,
-                "engineerReachable": True,
-            },
-            {
-                "key": "local-owned-b",
-                "name": "Local owned B",
-                "kind": "mass",
-                "position": [14, 2, 20],
-                "distance": 3,
-                "localSite": True,
-                "reachable": True,
-                "engineerReachable": True,
-            },
-        ]
-        harness.controller.markers.mass = lua_value(harness.lua, patrol_sites)
-        for index, site in enumerate(patrol_sites):
-            owned_mex.append(
-                harness.unit(
-                    entityId=100 + index,
-                    blueprintId="ueb1103",
-                    position=site["position"],
-                )
-            )
-    harness.brain.units = harness.lua.table_from([*engineers, *owned_mex])
+    harness.brain.units = harness.lua.table_from(engineers)
     _set_director_result(
         harness,
         "macroPlan",
@@ -3894,64 +3840,26 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
             "intents": [],
         },
     )
-    reclaim_jobs = []
-    if engineer_count < 8:
-        reclaim_jobs.append(
-            {
-                "id": "reclaim:prop:501",
-                "actorToken": "12:1",
-                "targetKey": "prop:501",
-                "regionKey": "home",
-                "position": [13, 2, 20],
-            }
-        )
-    _set_director_result(harness, "reclaimPlan", {"jobs": reclaim_jobs})
-    _set_director_result(harness, "expansionPlan", {"jobs": [], "denials": []})
-    _set_director_result(harness, "jobLedger", {"epoch": 1, "jobs": {}})
+    _set_director_result(
+        harness,
+        "reclaimPlan",
+        {
+            "jobs": [
+                {
+                    "id": "reclaim:prop:501",
+                    "actorToken": "12:1",
+                    "targetKey": "prop:501",
+                    "regionKey": "home",
+                    "position": [13, 2, 20],
+                }
+            ]
+        },
+    )
 
     harness.lua.globals().Controller.Step(harness.controller)
 
     expansion_input = plain(harness.calls.macroPlanExpansion[1])
-    assert [unit["token"] for unit in expansion_input["engineers"]] == [
-        f"{entity_id}:1" for entity_id in range(13, 12 + engineer_count)
-    ]
-
-    assert harness.controller.reclaimWorkerToken == expected_worker
-    if expected_worker:
-        assert any(
-            "reclaim_worker=12:1" in line
-            for line in harness.logs
-            if "kind=controller" in line and "event=snapshot" in line
-        )
-    harness.controller.pending["12:1"] = None
-    _set_director_result(harness, "reclaimPlan", {"jobs": []})
-    if expected_worker:
-        _set_director_result(
-            harness,
-            "macroPlan",
-            {
-                "valid": False,
-                "epoch": 0,
-                "fundedExpansionSlots": 2,
-                "regions": [],
-                "intents": [],
-            },
-        )
-    harness.brain.tick = 2
-
-    harness.lua.globals().Controller.Step(harness.controller)
-
-    expansion_input = plain(harness.calls.macroPlanExpansion[2])
-    expected_tokens = range(13 if expected_worker else 12, 12 + engineer_count)
-    assert [unit["token"] for unit in expansion_input["engineers"]] == [
-        f"{entity_id}:1" for entity_id in expected_tokens
-    ]
-    if expected_worker:
-        assert len(harness.calls.patrol) == 2
-        assert all(
-            call.units[1].options.entityId == 12
-            for call in harness.calls.patrol.values()
-        )
+    assert [unit["token"] for unit in expansion_input["engineers"]] == ["13:1"]
 
 
 def test_failed_reclaim_command_returns_its_grant_and_never_reports_ordered() -> None:
