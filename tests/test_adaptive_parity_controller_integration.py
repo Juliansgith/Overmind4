@@ -251,6 +251,37 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
+def test_lost_mex_backlog_publishes_up_to_four_independent_rebuild_grants() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    fourth_site = {
+        "occupiedSpawn": False,
+        "distance": 50,
+        "engineerReachable": True,
+        "kind": "mass",
+        "key": "Mass:50000:50000",
+        "position": [50, 3, 50],
+        "reachable": True,
+        "landReachable": True,
+        "localSite": True,
+        "name": "Fourth Mass",
+    }
+    harness.controller.markers.mass[4] = lua_value(harness.lua, fourth_site)
+    for site in plain(harness.controller.markers.mass):
+        harness.controller.mexHistory[site["key"]] = lua_value(
+            harness.lua, {"everOwned": True, "lost": True}
+        )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    macro_input = plain(harness.calls.macroBuildPortfolio[1])
+    assert [
+        request["id"]
+        for request in macro_input["requests"]
+        if request["lane"] == "mex_rebuild"
+    ] == ["mex-1", "mex-2", "mex-3", "mex-4"]
+
+
 def test_full_bank_factory_growth_precedes_optional_engineer_and_air_reserves() -> None:
     harness = make_harness()
     harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))

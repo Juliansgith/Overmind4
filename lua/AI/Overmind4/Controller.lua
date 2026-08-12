@@ -9200,11 +9200,17 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     local requests = {
         { id = 'energy-1', lane = 'energy_recovery', massDrain = 0.05,
             energyDrain = 0, massCost = 75, energyCost = 0, required = true },
-        { id = 'mex-1', lane = 'mex_rebuild', massDrain = 0.3,
-            energyDrain = 3, massCost = 36, energyCost = 360, required = true },
-        { id = 'reclaim-1', lane = 'reclaim', massDrain = 0,
-            energyDrain = 0, massCost = 0, energyCost = 0, required = true },
     }
+    local mexRequestCount = math.max(1,
+        math.min(4, tonumber(controller.lostMexCount) or 0))
+    for index = 1, mexRequestCount do
+        TableInsert(requests, { id = 'mex-' .. tostring(index),
+            lane = 'mex_rebuild', massDrain = 0.3, energyDrain = 3,
+            massCost = 36, energyCost = 360, required = true })
+    end
+    TableInsert(requests, { id = 'reclaim-1', lane = 'reclaim',
+        massDrain = 0, energyDrain = 0, massCost = 0, energyCost = 0,
+        required = true })
     TableInsert(requests, {
         id = 'factory-1', lane = 'factory_growth', massDrain = 0.4,
         energyDrain = 3.5, massCost = 240, energyCost = 2100,
