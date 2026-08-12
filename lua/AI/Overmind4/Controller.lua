@@ -420,7 +420,9 @@ end
 
 local function BlockSite(controller, siteKey, reason)
     if not siteKey then return end
+    controller.blockedSiteReasons = controller.blockedSiteReasons or {}
     controller.blockedSites[siteKey] = CurrentTick(controller) + SITE_BACKOFF_TICKS
+    controller.blockedSiteReasons[siteKey] = reason or 'unknown'
     Emit(controller, 'site_blocked', {
         reason = reason or 'unknown',
         site = siteKey,
@@ -432,9 +434,17 @@ local function SiteIsBlocked(controller, siteKey)
     if not blockedUntil then return false end
     if CurrentTick(controller) >= blockedUntil then
         controller.blockedSites[siteKey] = nil
+        if controller.blockedSiteReasons then
+            controller.blockedSiteReasons[siteKey] = nil
+        end
         return false
     end
     return true
+end
+
+local function ExpansionRetryBlocked(controller, siteKey)
+    return SiteIsBlocked(controller, siteKey)
+        and ((controller.blockedSiteReasons or {})[siteKey] ~= 'command_error')
 end
 
 local function MarkerArray(kind)
@@ -8045,6 +8055,7 @@ Controller.Create = function(brain)
         reclaimRefs = {},
         reclaimFreshness = {},
         blockedSites = {},
+        blockedSiteReasons = {},
         rallied = {},
         waveAssignments = {},
         frontierAssignments = {},
@@ -10256,6 +10267,8 @@ end
 ESCALATION.AdaptExpansionIntents = function(controller, expansionPlan, forcePlan, intents, reserved)
     for _, job in ipairs((expansionPlan or {}).jobs or {}) do
         local id = type(job.id) == 'string' and job.id or nil
+        local siteBlocked = type(job.siteKey) == 'string'
+            and ExpansionRetryBlocked(controller, job.siteKey)
         local pending = type(job.actorToken) == 'string'
             and controller.pending[job.actorToken] or nil
         local lifecycle = id and controller.operationLifecycle[id] or nil
@@ -10266,7 +10279,7 @@ ESCALATION.AdaptExpansionIntents = function(controller, expansionPlan, forcePlan
         local alreadyIssued = job.orderedActorToken == job.actorToken
             and (tonumber(job.orderedAttempt) or 0) == (attempt or 0)
         if attemptLifecycle and attemptLifecycle.ordered == true then alreadyIssued = true end
-        if id and not alreadyActive and not alreadyIssued then
+        if id and not siteBlocked and not alreadyActive and not alreadyIssued then
             ESCALATION.EmitOperationPhase(controller, id, 'opportunity')
             local rejection = nil
             if type(job.siteKey) ~= 'string' then rejection = 'invalid_site' end
@@ -11297,7 +11310,10 @@ ESCALATION.DirectorJobInput = function(controller, observation, expansionPlan)
             and (controller.jobLedger.jobs or {})[job.id]
             or nil
         local admitted, reset = ESCALATION.JobRestartDecision(existing, job)
-        if admitted and not selectedIds[job.id] then
+        local siteKey = ESCALATION.JobSiteKey(job)
+        if admitted and not selectedIds[job.id]
+            and not ExpansionRetryBlocked(controller, siteKey)
+        then
             local candidate = ESCALATION.DeepCopy(job)
             if existing then
                 local retryCount = math.max(
