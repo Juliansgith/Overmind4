@@ -317,6 +317,66 @@ class TestFundedPortfolio:
             ["hybrid"] if admitted else []
         )
 
+    def test_ten_mex_tech_preempts_surplus_air_after_the_initial_air_package(self) -> None:
+        requests = [
+            lane_request(
+                "energy_recovery", mass_drain=0.05, energy_drain=0,
+                mass_cost=75, energy_cost=0, required=True,
+            ),
+            lane_request(
+                "mex_rebuild", mass_drain=0.3, energy_drain=3,
+                mass_cost=36, energy_cost=360, required=True,
+            ),
+            lane_request(
+                "reclaim", mass_drain=0, energy_drain=0,
+                mass_cost=0, energy_cost=0, required=True,
+            ),
+            lane_request(
+                "land_production", mass_drain=0.28, energy_drain=3,
+                mass_cost=56, energy_cost=600, required=True,
+            ),
+            lane_request(
+                "air_production", mass_drain=0.2, energy_drain=9,
+                mass_cost=50, energy_cost=2250, required=True,
+            ),
+            lane_request(
+                "engineers", mass_drain=0.2, energy_drain=2,
+                mass_cost=52, energy_cost=260,
+            ),
+            lane_request(
+                "factory_growth", mass_drain=0.4, energy_drain=3.5,
+                mass_cost=240, energy_cost=2100, optional=True,
+            ),
+            {
+                **lane_request(
+                    "tech", mass_drain=1, energy_drain=6,
+                    mass_cost=900, energy_cost=5400,
+                    duration_ticks=900, optional=True,
+                ),
+                "allowHybrid": True,
+            },
+        ]
+        snapshot = portfolio_snapshot(requests=requests)
+        snapshot["economy"].update(
+            {
+                "massIncome": 2.1,
+                "massRequested": 0.76,
+                "energyIncome": 20,
+                "energyRequested": 10.23,
+                "massStored": 1110,
+                "energyStored": 4000,
+                "massTrend": 1.34,
+                "energyTrend": 9.77,
+                "commitmentsIncludedInRequested": True,
+            }
+        )
+
+        plan = build_portfolio(snapshot)
+
+        assert plan["lanes"]["land_production"]["admitted"] is True
+        assert plan["lanes"]["tech"]["admitted"] is True
+        assert plan["lanes"]["air_production"]["admitted"] is False
+
     def test_active_commitments_are_deducted_before_new_work_is_admitted(self) -> None:
         request = lane_request(
             "factory_growth",
