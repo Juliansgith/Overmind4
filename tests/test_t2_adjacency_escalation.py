@@ -176,6 +176,41 @@ def test_healthy_t2_engineer_builds_one_adjacent_t2_generator() -> None:
     assert pending["21:1"]["reason"] == "factory_adjacency_t2_power"
 
 
+def test_sixteen_completed_mex_scale_to_a_second_t2_generator() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _healthy_bank(harness)
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="energy_recovery")
+    )
+    mexes = [
+        harness.unit(
+            entityId=100 + index,
+            blueprintId="ueb1103",
+            position=[80 + index * 4, 2, 80],
+        )
+        for index in range(16)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(entityId=20, blueprintId="ueb0201", position=[40, 2, 40]),
+            harness.unit(entityId=22, blueprintId="ueb1201", position=[50, 2, 40]),
+            harness.unit(
+                entityId=21,
+                blueprintId="uel0208",
+                position=[35, 2, 40],
+                canBuild={"ueb1201": True},
+            ),
+            *mexes,
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1201"
+
+
 def test_t2_power_uses_nearest_builder_candidate_pair_not_first_factory() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

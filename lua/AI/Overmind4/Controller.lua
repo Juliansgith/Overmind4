@@ -9293,20 +9293,22 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
 
     local economy = observation.economy or {}
     local t2PowerPositions = (observation.placements or {}).power_generator_t2 or {}
-    local hasT2Power = false
+    local t2PowerCount = 0
+    local completedMex = 0
     for _, unit in ipairs(observation.units or {}) do
         if unit.role == 'power_generator_t2' then
-            hasT2Power = true
-            break
+            t2PowerCount = t2PowerCount + 1
+        elseif unit.roleFamily == 'mass_extractor' and unit.complete == true then
+            completedMex = completedMex + 1
         end
     end
     for _, operation in pairs(controller.pending or {}) do
         if operation.buildRole == 'power_generator_t2' then
-            hasT2Power = true
-            break
+            t2PowerCount = t2PowerCount + 1
         end
     end
-    if not hasT2Power
+    local t2PowerTarget = math.min(4, math.max(1, math.floor(completedMex / 8)))
+    if t2PowerCount < t2PowerTarget
         and TableGetn(t2PowerPositions) > 0
         and energyLane
         and (energyLane.admitted == true or energyLane.preserved == true)
