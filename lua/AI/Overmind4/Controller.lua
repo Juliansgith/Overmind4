@@ -8772,6 +8772,9 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     end
     for _, operation in pairs(controller.pending or {}) do
         if StructureOperation(operation) then constructionBacklog = constructionBacklog + 1 end
+        if operation.buildRole == 'engineer' then
+            counts.engineers = counts.engineers + 1
+        end
         if counts[operation.buildRole] ~= nil then
             counts[operation.buildRole] = counts[operation.buildRole] + 1
         end
@@ -8794,7 +8797,10 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         required = counts.landFactoriesT1 + counts.landFactoriesT2 < 1,
         optional = counts.landFactoriesT1 + counts.landFactoriesT2 >= 1,
     })
-    if counts.landFactoriesT1 + counts.landFactoriesT2 > 0 then
+    local engineerTarget = math.min(20, 4 + completedMex)
+    if counts.landFactoriesT1 + counts.landFactoriesT2 > 0
+        and counts.engineers < engineerTarget
+    then
         TableInsert(requests, { id = 'engineer-1', lane = 'engineers',
             massDrain = 0.2, energyDrain = 2, massCost = 52,
             energyCost = 260 })

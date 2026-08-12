@@ -251,6 +251,82 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
+def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute(
+        "local RealBuildPortfolio = MacroDirector.BuildPortfolio; "
+        "MacroDirectorStub.BuildPortfolio = function(snapshot) "
+        "table.insert(calls.macroBuildPortfolio, snapshot); "
+        "return RealBuildPortfolio(snapshot) end"
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    mexes = [
+        harness.unit(entityId=entity_id, blueprintId="ueb1103")
+        for entity_id in range(10, 20)
+    ] + [harness.unit(entityId=20, blueprintId="ueb1202")]
+    engineers = [
+        harness.unit(entityId=entity_id, blueprintId="uel0105")
+        for entity_id in range(100, 115)
+    ]
+    factories = [
+        harness.unit(entityId=30, blueprintId="ueb0101"),
+        harness.unit(entityId=31, blueprintId="ueb0101"),
+        harness.unit(entityId=32, blueprintId="ueb0102"),
+    ]
+    air_package = [
+        harness.unit(entityId=200, blueprintId="uea0101"),
+        *[
+            harness.unit(entityId=entity_id, blueprintId="uea0102")
+            for entity_id in range(201, 205)
+        ],
+        harness.unit(entityId=205, blueprintId="uea0103"),
+        harness.unit(entityId=206, blueprintId="uea0107"),
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [*mexes, *engineers, *factories, *air_package]
+    )
+    harness.brain.tick = 5815
+    harness.brain.massIncome = 2.7
+    harness.brain.massRequested = 1.56
+    harness.brain.massUsage = 1.56
+    harness.brain.massTrend = 1.14
+    harness.brain.massStored = 1040
+    harness.brain.massStoredRatio = 1
+    harness.brain.energyIncome = 30
+    harness.brain.energyRequested = 15.3
+    harness.brain.energyUsage = 15.3
+    harness.brain.energyTrend = 14.7
+    harness.brain.energyStored = 4000
+    harness.brain.energyStoredRatio = 1
+    harness.controller.economyLedger = lua_value(
+        harness.lua,
+        {
+            "valid": True,
+            "inputValid": True,
+            "lastTick": 5815,
+            "recurringMassIncome": 2.7,
+            "recurringEnergyIncome": 30,
+            "massRequested": 1.56,
+            "energyRequested": 15.3,
+            "massDemandSatisfaction": 1,
+            "energyDemandSatisfaction": 1,
+            "oneTimeMassReserve": 1040,
+            "oneTimeEnergyReserve": 4000,
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    macro_input = plain(harness.calls.macroBuildPortfolio[1])
+    assert not any(
+        request["lane"] == "engineers" for request in macro_input["requests"]
+    )
+    assert plain(harness.controller.macroPlan)["lanes"]["factory_growth"][
+        "admitted"
+    ] is True
+
+
 def test_ten_km_nearby_expansion_does_not_require_a_remote_escort() -> None:
     harness = make_harness()
     harness.lua.execute("ScenarioInfo.size = { 512, 512 }")
