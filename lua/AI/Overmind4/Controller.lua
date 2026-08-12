@@ -10484,17 +10484,12 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         return nil
     end
     local lanes = macroPlan.lanes or {}
-    local techGrantAvailable = false
-    for _, grant in ipairs(macroPlan.grants or {}) do
-        if grant.lane == 'tech' then techGrantAvailable = true end
-    end
     local t2EngineerTarget = math.min(4,
         math.max(1, math.ceil(currentMex / 6)))
     local landProductionAvailable = (lanes.land_production or {}).admitted == true
         or (lanes.land_production or {}).preserved == true
     local t2EngineerFundingAvailable = currentT2Engineers < 1
-        and techGrantAvailable
-        or currentT2Engineers >= 1 and landProductionAvailable
+        or landProductionAvailable
     if currentT2Engineers < t2EngineerTarget
         and t2EngineerFundingAvailable
     then

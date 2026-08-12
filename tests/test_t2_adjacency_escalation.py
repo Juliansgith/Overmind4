@@ -169,7 +169,11 @@ def test_mature_mex_economy_scales_to_three_t2_engineers() -> None:
 def test_first_completed_t3_factory_builds_a_t3_engineer_before_t3_combat() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
-    _set_director_result(harness, "macroPlan", _macro_plan(lane="tech"))
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {"valid": True, "epoch": 1, "lanes": {}, "regions": [], "intents": []},
+    )
     _set_director_result(
         harness, "techPlan", {"t3ProductionRole": "t3_direct_fire"}
     )
