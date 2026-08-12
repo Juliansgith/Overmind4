@@ -174,6 +174,68 @@ def test_banked_post_mex_tech_commits_the_first_t2_land_hq_during_a_stall() -> N
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
+def test_macro_portfolio_uses_rolling_demand_instead_of_one_busy_tick_for_first_t2_mex() -> None:
+    harness = make_harness()
+    harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
+    harness.lua.execute(
+        "local RealBuildPortfolio = MacroDirector.BuildPortfolio; "
+        "MacroDirectorStub.BuildPortfolio = function(snapshot) "
+        "table.insert(calls.macroBuildPortfolio, snapshot); "
+        "return RealBuildPortfolio(snapshot) end"
+    )
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    mexes = [
+        harness.unit(
+            entityId=entity_id,
+            blueprintId="ueb1103",
+            canBuild={"ueb1202": True},
+        )
+        for entity_id in range(10, 20)
+    ]
+    factories = [
+        harness.unit(entityId=entity_id, blueprintId="ueb0101")
+        for entity_id in (20, 21, 22)
+    ]
+    air_factory = harness.unit(entityId=23, blueprintId="ueb0102")
+    harness.brain.units = harness.lua.table_from([*mexes, *factories, air_factory])
+    harness.brain.tick = 5815
+    harness.brain.massIncome = 2.1
+    harness.brain.massRequested = 4.46
+    harness.brain.massUsage = 4.46
+    harness.brain.massTrend = 1.34
+    harness.brain.massStored = 1110
+    harness.brain.massStoredRatio = 1
+    harness.brain.energyIncome = 20
+    harness.brain.energyRequested = 36.79
+    harness.brain.energyUsage = 36.79
+    harness.brain.energyTrend = 9.77
+    harness.brain.energyStored = 4000
+    harness.brain.energyStoredRatio = 1
+    harness.controller.economyLedger = lua_value(
+        harness.lua,
+        {
+            "valid": True,
+            "inputValid": True,
+            "lastTick": 5815,
+            "recurringMassIncome": 2.1,
+            "recurringEnergyIncome": 20,
+            "massRequested": 0.76,
+            "energyRequested": 10.23,
+            "massDemandSatisfaction": 1,
+            "energyDemandSatisfaction": 1,
+            "oneTimeMassReserve": 1110,
+            "oneTimeEnergyReserve": 4000,
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    macro_input = plain(harness.calls.macroBuildPortfolio[1])
+    assert macro_input["economy"]["massRequested"] == pytest.approx(0.76)
+    assert macro_input["economy"]["energyRequested"] == pytest.approx(10.23)
+    assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
+
+
 def test_ten_km_nearby_expansion_does_not_require_a_remote_escort() -> None:
     harness = make_harness()
     harness.lua.execute("ScenarioInfo.size = { 512, 512 }")

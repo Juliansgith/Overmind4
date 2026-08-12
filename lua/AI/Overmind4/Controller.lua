@@ -8820,6 +8820,17 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
         end
     end
     local directorEconomy = ESCALATION.DeepCopy(observation.economy or {})
+    if directorEconomy.ledgerValid == true
+        and ESCALATION.FiniteEconomyNumber(directorEconomy.recurringMassIncome)
+        and ESCALATION.FiniteEconomyNumber(directorEconomy.recurringEnergyIncome)
+        and ESCALATION.FiniteEconomyNumber(directorEconomy.rollingMassRequested)
+        and ESCALATION.FiniteEconomyNumber(directorEconomy.rollingEnergyRequested)
+    then
+        directorEconomy.massIncome = directorEconomy.recurringMassIncome
+        directorEconomy.energyIncome = directorEconomy.recurringEnergyIncome
+        directorEconomy.massRequested = directorEconomy.rollingMassRequested
+        directorEconomy.energyRequested = directorEconomy.rollingEnergyRequested
+    end
     directorEconomy.commitmentsIncludedInRequested = true
     return {
         tick = observation.tick,
