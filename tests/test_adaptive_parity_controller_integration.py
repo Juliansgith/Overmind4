@@ -2140,12 +2140,12 @@ def test_reclaiming_acu_builds_funded_second_air_when_field_engineers_are_busy()
 @pytest.mark.parametrize(
     ("power_count", "has_hydro", "expected_orders"),
     [
-        (3, True, 1),
-        (3, False, 0),
-        (4, False, 1),
+        (1, True, 0),
+        (2, False, 1),
+        (2, True, 1),
     ],
 )
-def test_acu_first_air_accepts_hydro_backed_three_generator_opening(
+def test_acu_first_air_starts_after_two_generators_with_or_without_hydro(
     power_count: int,
     has_hydro: bool,
     expected_orders: int,
@@ -2200,7 +2200,7 @@ def test_acu_first_air_accepts_hydro_backed_three_generator_opening(
         assert order.units[1].options.entityId == 1
 
 
-def test_acu_finishes_local_power_and_mex_before_starting_first_air() -> None:
+def test_acu_starts_first_air_after_two_power_and_local_mex() -> None:
     harness = make_harness()
     mass_positions = [[12 + index * 4, 2, 20] for index in range(4)]
     harness.controller.markers.mass = lua_value(
@@ -2279,7 +2279,9 @@ def test_acu_finishes_local_power_and_mex_before_starting_first_air() -> None:
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.buildMobile) == 1
-    assert harness.calls.buildMobile[1].blueprintId == "ueb1101"
+    order = harness.calls.buildMobile[1]
+    assert order.blueprintId == "ueb0102"
+    assert order.units[1].options.entityId == 1
 
 
 def test_acu_completes_first_land_factory_before_starting_first_air() -> None:

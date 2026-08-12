@@ -308,14 +308,14 @@ class TestAirAndMobility:
         ("scouts", "interceptors", "transports", "expected"),
         [
             (0, 0, 0, "air_scout"),
-            (1, 0, 0, "interceptor"),
-            (1, 1, 0, "interceptor"),
-            (1, 2, 0, "transport"),
+            (1, 0, 0, "transport"),
+            (1, 0, 1, "interceptor"),
+            (1, 1, 1, "interceptor"),
             (1, 2, 1, "interceptor"),
             (1, 4, 1, "bomber"),
         ],
     )
-    def test_air_mix_builds_scout_two_interceptors_transport_then_full_screen(
+    def test_air_mix_builds_scout_transport_then_interceptors_and_full_screen(
         self,
         scouts: int,
         interceptors: int,
