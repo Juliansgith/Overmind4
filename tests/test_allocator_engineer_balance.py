@@ -829,6 +829,26 @@ def test_idle_acu_builds_advanced_mex_storage_when_engineers_are_committed() -> 
     ]
 
 
+def test_physical_full_banks_fund_storage_despite_remote_ledger_reservations() -> None:
+    snapshot = _advanced_mex_storage_snapshot()
+    snapshot["macro"].update(
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        oneTimeMassReserve=0,
+        oneTimeEnergyReserve=0,
+        rollingMassStoredRatio=1,
+        rollingEnergyStoredRatio=0.6,
+    )
+
+    storage = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "mex_adjacency_storage"
+    ]
+
+    assert len(storage) == 1
+
+
 def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy() -> None:
     snapshot = _policy_allocator_snapshot(
         "air_factory",

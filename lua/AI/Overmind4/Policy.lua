@@ -2691,6 +2691,7 @@ Policy.expansionPlanningTicks = 12000
 Policy.ApplyAllocator = function(snapshot, intents)
     local macro = type(snapshot.macro) == 'table' and snapshot.macro or nil
     if not macro or macro.allocatorEnabled ~= true then return intents end
+    local economy = type(snapshot.economy) == 'table' and snapshot.economy or {}
     local accepted = {}
     local availableMass = math.max(0,
         tonumber(macro.availableRecurringMass) or 0)
@@ -2904,6 +2905,17 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 and role == 'power_generator'
                 and (intent.reason == 'factory_adjacency_power'
                     or intent.reason == 'opening_air_power')
+            local strategicStorage = structureRequest
+                and role == 'mass_storage'
+                and intent.reason == 'mex_adjacency_storage'
+                and FiniteNumber(economy.massStoredRatio)
+                and FiniteNumber(economy.massTrend)
+                and FiniteNumber(economy.energyStoredRatio)
+                and FiniteNumber(economy.energyTrend)
+                and tonumber(economy.massStoredRatio) >= 0.95
+                and tonumber(economy.massTrend) >= 0
+                and tonumber(economy.energyStoredRatio) >= 0.5
+                and tonumber(economy.energyTrend) >= 0
             local strategicFactory = structureRequest
                 and role == 'land_factory'
                 and intent.reason == 'production_saturation'
@@ -3017,7 +3029,8 @@ Policy.ApplyAllocator = function(snapshot, intents)
                     energyFit = availableEnergy + fitTolerance >= requestEnergyDrain
                         and energyFit
                 end
-                allowed = strategicHydro or strategicPower or strategicFactory
+                allowed = strategicHydro or strategicPower or strategicStorage
+                    or strategicFactory
                     or overflowCombat or sustainedCombat
                     or (massFit and energyFit)
             end
