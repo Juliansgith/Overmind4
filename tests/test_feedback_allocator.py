@@ -103,6 +103,7 @@ def _engineer(harness: Any, entity_id: int, x: float, z: float = 20) -> Any:
             "ueb1102": True,
             "ueb0101": True,
             "ueb0102": True,
+            "ueb1106": True,
         },
     )
 

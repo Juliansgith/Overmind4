@@ -713,6 +713,92 @@ def test_eight_factories_continue_adjacency_power_beyond_the_old_ten_cap() -> No
     assert power[0]["buildRole"] == "power_generator"
 
 
+def _advanced_mex_storage_snapshot() -> dict[str, Any]:
+    snapshot = _policy_allocator_snapshot(
+        "mass_extractor_t2",
+        *("mass_extractor" for _ in range(8)),
+        "engineer",
+        "engineer",
+    )
+    snapshot["placements"]["mass_storage"] = [
+        [48, 2, 50],
+        [50, 2, 48],
+        [50, 2, 52],
+        [52, 2, 50],
+    ]
+    for unit in snapshot["units"]:
+        if unit["role"] == "engineer":
+            unit["canBuild"]["mass_storage"] = True
+    snapshot["economy"].update(
+        massStoredRatio=1,
+        massTrend=1,
+        energyStoredRatio=1,
+        energyTrend=10,
+    )
+    snapshot["macro"].update(
+        rollingMassStoredRatio=1,
+        rollingEnergyStoredRatio=1,
+        oneTimeMassReserve=800,
+        oneTimeEnergyReserve=6000,
+    )
+    return snapshot
+
+
+def test_full_bank_invests_in_one_adjacent_storage_for_advanced_mex() -> None:
+    snapshot = _advanced_mex_storage_snapshot()
+
+    storage = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "mex_adjacency_storage"
+    ]
+
+    assert len(storage) == 1
+    assert storage[0]["buildRole"] == "mass_storage"
+    assert storage[0]["position"] in snapshot["placements"]["mass_storage"]
+
+
+@pytest.mark.parametrize(
+    ("change", "value"),
+    [
+        ("massStoredRatio", 0.949),
+        ("massTrend", -0.01),
+        ("energyStoredRatio", 0.499),
+        ("energyTrend", -0.01),
+    ],
+)
+def test_advanced_mex_storage_fails_closed_without_healthy_full_banks(
+    change: str,
+    value: float,
+) -> None:
+    snapshot = _advanced_mex_storage_snapshot()
+    snapshot["economy"][change] = value
+
+    assert not [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("buildRole") == "mass_storage"
+    ]
+
+
+def test_pending_storage_suppresses_duplicate_adjacency_investment() -> None:
+    snapshot = _advanced_mex_storage_snapshot()
+    snapshot["pending"] = [{
+        "kind": "build_structure",
+        "actorToken": "90:1",
+        "buildRole": "mass_storage",
+        "position": [48, 2, 50],
+        "phase": "building",
+        "accepted": True,
+    }]
+
+    assert not [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("buildRole") == "mass_storage"
+    ]
+
+
 def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy() -> None:
     snapshot = _policy_allocator_snapshot(
         "air_factory",

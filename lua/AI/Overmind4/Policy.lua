@@ -198,7 +198,10 @@ local function PlacementRect(role, position)
         size = 8
     elseif role == 'hydrocarbon' then
         size = 6
-    elseif role == 'mass_extractor' or role == 'power_generator' then
+    elseif role == 'mass_extractor'
+        or role == 'mass_storage'
+        or role == 'power_generator'
+    then
         size = 2
     end
     if not size then return nil end
@@ -861,6 +864,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local plannedPower = false
     local plannedFactory = false
     local plannedAirFactory = false
+    local plannedMassStorage = false
     local constructionPlanned = false
     local reclaimCandidates = CopyArray(snapshot.reclaim or {})
     table.sort(reclaimCandidates, function(a, b)
@@ -880,6 +884,8 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         end
         if operation.buildRole == 'power_generator' then
             plannedPower = true
+        elseif operation.buildRole == 'mass_storage' then
+            plannedMassStorage = true
         end
     end
     if macro then
@@ -892,6 +898,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         power_generator = (counts.power_generator or 0) + 1,
         land_factory = (counts.land_factory or 0) + 1,
         air_factory = (counts.air_factory or 0) + 1,
+        mass_storage = 1,
     }
     local campaignActive = macro
         and macro.campaignEnabled == true
@@ -1188,6 +1195,7 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
     local completedLand = 0
     local completedHydro = 0
     local completedFactories = 0
+    local completedAdvancedMex = 0
     for _, unit in ipairs(units or {}) do
         if unit.complete == true then
             if (unit.roleFamily or unit.role) == 'mass_extractor' then
@@ -1205,6 +1213,11 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
                 completedFactories = completedFactories + 1
             end
             if unit.role == 'hydrocarbon' then completedHydro = completedHydro + 1 end
+            if unit.role == 'mass_extractor_t2'
+                or unit.role == 'mass_extractor_t3'
+            then
+                completedAdvancedMex = completedAdvancedMex + 1
+            end
         end
     end
     if not underContact and (counts.hydrocarbon or 0) < 1 then
@@ -1326,6 +1339,30 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             plannedPower = true
             placementIndex.power_generator = placementIndex.power_generator + 1
             counts.power_generator = (counts.power_generator or 0) + 1
+        end
+    end
+
+    if not underContact
+        and completedAdvancedMex > 0
+        and (counts.mass_storage or 0) < completedAdvancedMex * 4
+        and not plannedMassStorage
+        and FiniteNumber(economy.massStoredRatio)
+        and FiniteNumber(economy.massTrend)
+        and FiniteNumber(economy.energyStoredRatio)
+        and FiniteNumber(economy.energyTrend)
+        and tonumber(economy.massStoredRatio) >= 0.95
+        and tonumber(economy.massTrend) >= 0
+        and tonumber(economy.energyStoredRatio) >= 0.5
+        and tonumber(economy.energyTrend) >= 0
+    then
+        if AssignPlacement(
+            'mass_storage',
+            placementIndex.mass_storage,
+            22,
+            'mex_adjacency_storage'
+        ) then
+            plannedMassStorage = true
+            counts.mass_storage = (counts.mass_storage or 0) + 1
         end
     end
 
@@ -2624,6 +2661,7 @@ Policy = {}
 Policy.requestEconomy = {
     mass_extractor = { massDrain = 0.3, energyDrain = 3, massCost = 36, energyCost = 360, duration = 120 },
     power_generator = { massDrain = 0.3, energyDrain = 3, massCost = 75, energyCost = 750, duration = 250 },
+    mass_storage = { massDrain = 0.4, energyDrain = 3, massCost = 200, energyCost = 1500, duration = 500 },
     hydrocarbon = { massDrain = 0.2, energyDrain = 1, massCost = 160, energyCost = 800, duration = 800 },
     land_factory = { massDrain = 0.4, energyDrain = 3.5, massCost = 240, energyCost = 2100, duration = 600 },
     air_factory = { massDrain = 0.35, energyDrain = 4, massCost = 210, energyCost = 2400, duration = 600 },

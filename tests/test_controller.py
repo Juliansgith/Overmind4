@@ -107,14 +107,24 @@ def make_harness() -> ControllerHarness:
                 Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
                 Economy = { BuildTime = 60, BuildCostMass = 36, BuildCostEnergy = 360, ProductionPerSecondMass = 2, MaintenanceConsumptionPerSecondEnergy = 2 },
             },
+            ueb1106 = {
+                BlueprintId = 'ueb1106',
+                Footprint = { SizeX = 1, SizeZ = 1 },
+                Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
+                Economy = { BuildTime = 250, BuildCostMass = 200, BuildCostEnergy = 1500 },
+            },
             ueb1202 = {
                 BlueprintId = 'ueb1202',
                 General = { UpgradesFrom = 'ueb1103' },
+                Footprint = { SizeX = 1, SizeZ = 1 },
+                Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
                 Economy = { BuildTime = 900, BuildCostMass = 900, BuildCostEnergy = 5400 },
             },
             ueb1302 = {
                 BlueprintId = 'ueb1302',
                 General = { UpgradesFrom = 'ueb1202' },
+                Footprint = { SizeX = 1, SizeZ = 1 },
+                Physics = { SkirtSizeX = 2, SkirtSizeZ = 2, SkirtOffsetX = -0.5, SkirtOffsetZ = -0.5 },
                 Economy = { BuildTime = 2875, BuildCostMass = 4600, BuildCostEnergy = 31600 },
             },
             ueb2101 = { BlueprintId = 'ueb2101', Economy = { BuildTime = 500, BuildCostMass = 250, BuildCostEnergy = 2500 } },
@@ -1417,6 +1427,75 @@ def test_accepted_free_placement_returning_idle_is_temporarily_removed() -> None
     harness.brain.tick = 305
     expired = plain(harness.observe().placements.power_generator)
     assert position in expired
+
+
+def test_mass_storage_placements_touch_each_side_of_completed_t2_mex() -> None:
+    harness = make_harness()
+    mex = harness.unit(
+        entityId=40,
+        blueprintId="ueb1202",
+        position=[50, 2, 50],
+    )
+    harness.brain.units = harness.lua.table_from([mex])
+
+    placements = plain(harness.observe().placements.mass_storage)
+
+    assert sorted((position[0], position[2]) for position in placements) == [
+        (48.0, 50.0),
+        (50.0, 48.0),
+        (50.0, 52.0),
+        (52.0, 50.0),
+    ]
+
+
+def test_mass_storage_adjacency_ignores_t1_mex_and_occupied_side() -> None:
+    harness = make_harness()
+    t1_mex = harness.unit(
+        entityId=40,
+        blueprintId="ueb1103",
+        position=[30, 2, 30],
+    )
+    t2_mex = harness.unit(
+        entityId=41,
+        blueprintId="ueb1202",
+        position=[50, 2, 50],
+    )
+    storage = harness.unit(
+        entityId=42,
+        blueprintId="ueb1106",
+        position=[48, 2, 50],
+    )
+    harness.brain.units = harness.lua.table_from([t1_mex, t2_mex, storage])
+
+    placements = plain(harness.observe().placements.mass_storage)
+    horizontal = sorted((position[0], position[2]) for position in placements)
+
+    assert horizontal == [(50.0, 48.0), (50.0, 52.0), (52.0, 50.0)]
+    assert all(abs(x - 30) + abs(z - 30) > 2 for x, z in horizontal)
+
+
+def test_engineer_executes_mass_storage_with_exact_catalog_blueprint() -> None:
+    harness = make_harness()
+    engineer = harness.unit(
+        entityId=7,
+        blueprintId="uel0105",
+        canBuild={"ueb1106": True},
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    observation = harness.observe()
+
+    execute_intents(harness, [{
+        "kind": "build_structure",
+        "actorToken": "7:1",
+        "buildRole": "mass_storage",
+        "position": [48, 2, 50],
+        "reason": "mex_adjacency_storage",
+    }], observation)
+
+    calls = plain(harness.calls.buildMobile)
+    assert len(calls) == 1
+    assert calls[0]["blueprintId"] == "ueb1106"
+    assert plain(harness.controller.pending)["7:1"]["buildRole"] == "mass_storage"
 
 
 def test_site_reservation_deduplicates_and_releases_on_death_capture_and_occupation() -> None:

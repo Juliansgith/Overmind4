@@ -55,10 +55,14 @@ local TableInsert = table.insert
 local LiveOwnedActor
 
 local BUILD_ROLES = {
-    acu = { 'air_factory', 'land_factory', 'power_generator', 'mass_extractor' },
+    acu = {
+        'air_factory', 'land_factory', 'mass_extractor', 'mass_storage',
+        'power_generator',
+    },
     engineer = {
         'air_factory', 'hydrocarbon', 'land_factory', 'mass_extractor',
-        'point_defense', 'power_generator', 'radar', 'static_anti_air',
+        'mass_storage', 'point_defense', 'power_generator', 'radar',
+        'static_anti_air',
     },
     land_factory = {
         'anti_air', 'artillery', 'engineer', 'lab', 'land_factory_t2',
@@ -128,6 +132,7 @@ local ESCALATION = {
         mass_extractor = 'expansion',
         mass_extractor_t2 = 'tech',
         mass_extractor_t3 = 'tech',
+        mass_storage = 'construction',
         power_generator = 'energy',
         engineer = 'engineer',
         anti_air = 'factory',
@@ -149,6 +154,7 @@ local ESCALATION = {
         land_factory_t2 = true,
         land_factory_t2_support = true,
         land_factory_t3 = true,
+        mass_storage = true,
         power_generator = true,
     },
     placementObstacleRoles = {
@@ -159,6 +165,9 @@ local ESCALATION = {
         land_factory_t2_support = true,
         land_factory_t3 = true,
         mass_extractor = true,
+        mass_extractor_t2 = true,
+        mass_extractor_t3 = true,
+        mass_storage = true,
         power_generator = true,
     },
     factoryProducts = {
@@ -2703,6 +2712,7 @@ local function PlacementSnapshot(controller, units)
     local placements = {
         air_factory = {},
         land_factory = {},
+        mass_storage = {},
         power_generator = {},
     }
     local claimed = {}
@@ -2850,9 +2860,55 @@ local function PlacementSnapshot(controller, units)
             radius = radius + 7
         end
     end
+    roleProbeStart = probes
+    local storageSpec = ESCALATION.FootprintSpec(controller, 'mass_storage')
+    if storageSpec then
+        local advancedMex = {}
+        for _, unit in ipairs(units or {}) do
+            if unit.complete == true
+                and (unit.role == 'mass_extractor_t2'
+                    or unit.role == 'mass_extractor_t3')
+            then
+                TableInsert(advancedMex, unit)
+            end
+        end
+        table.sort(advancedMex, function(a, b)
+            local aTier = a.role == 'mass_extractor_t3' and 3 or 2
+            local bTier = b.role == 'mass_extractor_t3' and 3 or 2
+            if aTier ~= bTier then return aTier > bTier end
+            return tostring(a.token or '') < tostring(b.token or '')
+        end)
+        local function StoragePosition(minimumX, minimumZ)
+            return {
+                minimumX + storageSpec.footX * 0.5 - storageSpec.offsetX,
+                0,
+                minimumZ + storageSpec.footZ * 0.5 - storageSpec.offsetZ,
+            }
+        end
+        for _, mex in ipairs(advancedMex) do
+            local rect = ESCALATION.PlacementRect(
+                controller, mex.role, mex.position
+            )
+            if rect then
+                Consider('mass_storage', StoragePosition(
+                    rect[1] - storageSpec.skirtX, rect[2]
+                ))
+                Consider('mass_storage', StoragePosition(
+                    rect[3], rect[2]
+                ))
+                Consider('mass_storage', StoragePosition(
+                    rect[1], rect[2] - storageSpec.skirtZ
+                ))
+                Consider('mass_storage', StoragePosition(
+                    rect[1], rect[4]
+                ))
+            end
+        end
+    end
     controller.lastPlacementProbeCount = probes
     controller.lastPlacementCapacity = TableGetn(placements.land_factory)
         + TableGetn(placements.air_factory)
+        + TableGetn(placements.mass_storage)
         + TableGetn(placements.power_generator)
     return placements
 end

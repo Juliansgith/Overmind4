@@ -6,6 +6,7 @@ local IdByRole = {
     land_factory_t2 = 'ueb0201',
     land_factory_t2_support = 'zeb9501',
     power_generator = 'ueb1101',
+    mass_storage = 'ueb1106',
     hydrocarbon = 'ueb1102',
     mass_extractor = 'ueb1103',
     scout = 'uel0101',
