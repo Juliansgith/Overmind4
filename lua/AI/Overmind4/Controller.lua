@@ -10510,7 +10510,7 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         end
     end
     local factoryPowerTarget = math.min(24,
-        math.max(4, (currentLand + currentAir) * 3))
+        math.max(4, (currentLand + currentAir) * 2))
     local factoryPowerReady = currentPower >= factoryPowerTarget
     local energyLane = lanes.energy_recovery or {}
     if currentMex >= 6 and not factoryPowerReady and not powerPending

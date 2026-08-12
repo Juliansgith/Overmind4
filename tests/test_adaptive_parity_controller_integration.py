@@ -2429,12 +2429,12 @@ def test_single_factory_grant_fills_larger_air_deficit_before_more_land() -> Non
     )
     land = [
         harness.unit(entityId=20 + index, blueprintId="ueb0101")
-        for index in range(3)
+        for index in range(4)
     ]
     air = harness.unit(entityId=30, blueprintId="ueb0102")
     power = [
         harness.unit(entityId=40 + index, blueprintId="ueb1101")
-        for index in range(12)
+        for index in range(10)
     ]
     harness.brain.units = harness.lua.table_from([engineer, *land, air, *power])
     _set_director_result(
@@ -2443,7 +2443,7 @@ def test_single_factory_grant_fills_larger_air_deficit_before_more_land() -> Non
         {
             "valid": True,
             "epoch": 1,
-            "landFactoryTarget": 6,
+            "landFactoryTarget": 4,
             "airFactoryTarget": 3,
             "lanes": {"factory_growth": {"admitted": True}},
             "grants": [
