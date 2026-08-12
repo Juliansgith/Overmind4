@@ -197,12 +197,12 @@ def test_proven_bulk_route_dispatches_small_disjoint_groups_instead_of_one_large
     aggressive_calls = calls(harness.calls.aggressive)[aggressive_before:]
     assert len(clear_calls) == 1
     assert actor_tokens_from_call(clear_calls[0]) == bulk
-    assert len(aggressive_calls) == math.ceil(len(bulk) / 4)
+    assert len(aggressive_calls) == len(bulk)
     groups = [actor_tokens_from_call(call) for call in aggressive_calls]
-    assert all(1 <= len(group) <= 4 for group in groups)
+    assert all(len(group) == 1 for group in groups)
     assert sorted(token for group in groups for token in group) == bulk
     assert len({token for group in groups for token in group}) == len(bulk)
-    assert groups == [bulk[index : index + 4] for index in range(0, len(bulk), 4)]
+    assert groups == [[token] for token in bulk]
     assert len(move_calls) == len(aggressive_calls) * (len(NORMAL_ROUTE) - 1)
     for group_index, group in enumerate(groups):
         group_moves = move_calls[
