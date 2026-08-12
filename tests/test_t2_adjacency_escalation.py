@@ -176,6 +176,34 @@ def test_healthy_t2_engineer_builds_one_adjacent_t2_generator() -> None:
     assert pending["21:1"]["reason"] == "factory_adjacency_t2_power"
 
 
+def test_factory_rally_does_not_leave_t2_builder_moving_past_the_power_window() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _healthy_bank(harness)
+    _set_director_result(
+        harness, "macroPlan", _macro_plan(lane="energy_recovery")
+    )
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(entityId=20, blueprintId="ueb0201", position=[40, 2, 40]),
+            harness.unit(
+                entityId=21,
+                blueprintId="uel0208",
+                position=[35, 2, 40],
+                canBuild={"ueb1201": True},
+                idleState=False,
+                states={"Moving": True},
+            ),
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1201"
+
+
 @pytest.mark.parametrize(
     ("mass_ratio", "energy_ratio"),
     [(0.949, 1), (1, 0.499)],

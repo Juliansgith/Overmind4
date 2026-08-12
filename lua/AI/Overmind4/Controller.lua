@@ -3407,9 +3407,13 @@ local function ExecuteStructure(controller, intent, record)
     local preemptReclaimPatrol = strategicConstruction
         and record.role == 'acu'
         and controller.reclaimPatrolAssignments[intent.actorToken] == true
+    local preemptStrategicMove = intent.reason == 'factory_adjacency_t2_power'
+        and record.role == 't2_engineer'
+        and record.moving == true
     if controller.pending[intent.actorToken]
         or record.complete ~= true
-        or (record.idle ~= true and not preemptReclaimPatrol)
+        or (record.idle ~= true and not preemptReclaimPatrol
+            and not preemptStrategicMove)
         or not record.canBuild
         or record.canBuild[intent.buildRole] ~= true
     then
@@ -3423,10 +3427,10 @@ local function ExecuteStructure(controller, intent, record)
     local actor = LiveOwnedActor(controller, intent.actorToken, record, record.role)
     if not actor
         or (SafeCall(false, actor.IsIdleState, actor) ~= true
-            and not preemptReclaimPatrol)
+            and not preemptReclaimPatrol and not preemptStrategicMove)
         or SafeCall(false, actor.IsUnitState, actor, 'Building') == true
         or (SafeCall(false, actor.IsUnitState, actor, 'Moving') == true
-            and not preemptReclaimPatrol)
+            and not preemptReclaimPatrol and not preemptStrategicMove)
         or not CanUnitBuild(actor, blueprintId)
     then
         return false
@@ -3456,11 +3460,13 @@ local function ExecuteStructure(controller, intent, record)
         return false
     end
 
-    if preemptReclaimPatrol then
+    if preemptReclaimPatrol or preemptStrategicMove then
         if not pcall(function() IssueClearCommands({ actor }) end) then
             return false
         end
-        controller.reclaimPatrolAssignments[intent.actorToken] = nil
+        if preemptReclaimPatrol then
+            controller.reclaimPatrolAssignments[intent.actorToken] = nil
+        end
     end
 
     intent.position = position
@@ -8753,6 +8759,7 @@ ESCALATION.DirectorUnits = function(controller, observation)
             live = true,
             owned = true,
             idle = unit.idle == true,
+            moving = unit.moving == true,
             available = unit.complete == true and unit.idle == true
                 and controller.pending[unit.token] == nil
                 and not ESCALATION.TransportTokenClaimed(controller, unit.token),
@@ -9166,7 +9173,10 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         local best = nil
         local bestDistance = nil
         for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-            if unit.role == 't2_engineer' and unit.available == true
+            if unit.role == 't2_engineer'
+                and (unit.available == true or unit.moving == true)
+                and controller.pending[unit.token] == nil
+                and not ESCALATION.TransportTokenClaimed(controller, unit.token)
                 and (unit.canBuild or {}).power_generator_t2 == true
             then
                 local distance = DistanceSquared(unit.position, position)
