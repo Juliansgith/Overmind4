@@ -713,6 +713,42 @@ def test_eight_factories_continue_adjacency_power_beyond_the_old_ten_cap() -> No
     assert power[0]["buildRole"] == "power_generator"
 
 
+def test_idle_acu_fills_factory_power_deficit_before_more_factory_growth() -> None:
+    snapshot = _policy_allocator_snapshot(
+        *("land_factory" for _ in range(2)),
+        *("air_factory" for _ in range(3)),
+        *("power_generator" for _ in range(7)),
+        *("mass_extractor" for _ in range(12)),
+        *("engineer" for _ in range(14)),
+    )
+    for unit in snapshot["units"]:
+        if unit["role"] == "engineer":
+            unit["idle"] = False
+        elif unit["role"] == "acu":
+            unit["buildRate"] = 10
+    snapshot["macro"].update(
+        factoryTarget=9,
+        factoryDemand=9,
+        factoryFundedCount=0,
+        massSurplusTicks=300,
+        availableRecurringMass=0,
+        availableRecurringEnergy=0,
+        expansionRecurringMassBudget=0,
+        expansionRecurringEnergyBudget=0,
+        oneTimeMassReserve=500,
+        oneTimeEnergyReserve=4000,
+    )
+
+    structures = intents_of(decide(snapshot), "build_structure")
+    acu_builds = [
+        intent for intent in structures if intent.get("actorToken") == "1:1"
+    ]
+
+    assert [
+        (intent["buildRole"], intent["reason"]) for intent in acu_builds
+    ] == [("power_generator", "factory_adjacency_power")]
+
+
 def _advanced_mex_storage_snapshot() -> dict[str, Any]:
     snapshot = _policy_allocator_snapshot(
         "mass_extractor_t2",

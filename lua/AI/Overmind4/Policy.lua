@@ -1278,6 +1278,34 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             counts.air_factory = 1
         end
     end
+    local adjacencyPowerTarget = math.min(24,
+        math.max(4, completedFactories * 3))
+    if not underContact
+        and completedMex >= 6
+        and (counts.power_generator or 0) < adjacencyPowerTarget
+        and not plannedPower
+    then
+        local assignedPower = AssignPlacement(
+            'power_generator',
+            placementIndex.power_generator,
+            19,
+            'factory_adjacency_power'
+        )
+        if not assignedPower then
+            assignedPower = AssignAcuPlacement(
+                'power_generator',
+                placementIndex.power_generator,
+                19,
+                'factory_adjacency_power'
+            )
+        end
+        if assignedPower then
+            plannedPower = true
+            placementIndex.power_generator = placementIndex.power_generator + 1
+            counts.power_generator = (counts.power_generator or 0) + 1
+        end
+    end
+
     local currentFactories = (counts.land_factory or 0)
         + (counts.land_factory_t2 or 0)
     local factoryDemand = macro and (tonumber(macro.factoryDemand) or currentFactories)
@@ -1313,34 +1341,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             plannedFactory = true
             placementIndex.land_factory = placementIndex.land_factory + 1
             counts.land_factory = (counts.land_factory or 0) + 1
-        end
-    end
-
-    local adjacencyPowerTarget = math.min(24,
-        math.max(4, completedFactories * 3))
-    if not underContact
-        and completedMex >= 6
-        and (counts.power_generator or 0) < adjacencyPowerTarget
-        and not plannedPower
-    then
-        local assignedPower = AssignPlacement(
-            'power_generator',
-            placementIndex.power_generator,
-            19,
-            'factory_adjacency_power'
-        )
-        if not assignedPower then
-            assignedPower = AssignAcuPlacement(
-                'power_generator',
-                placementIndex.power_generator,
-                19,
-                'factory_adjacency_power'
-            )
-        end
-        if assignedPower then
-            plannedPower = true
-            placementIndex.power_generator = placementIndex.power_generator + 1
-            counts.power_generator = (counts.power_generator or 0) + 1
         end
     end
 
