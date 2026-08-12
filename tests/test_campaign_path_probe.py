@@ -1291,6 +1291,38 @@ def test_successful_release_returns_live_probe_to_source_and_selects_determinist
     assert intent["clusterKey"] == "forward-far"
 
 
+def test_probe_attrition_blocks_failed_destination_and_selects_live_alternate() -> None:
+    harness, _, _, _, ready, before = stage_transition_probe()
+    probe = execute_probe(harness, ready)
+    additions = [
+        harness.unit(
+            entityId=88100 + index,
+            blueprintId="uel0104" if index < 2 else "uel0201",
+            position=SOURCE_ANCHOR,
+        )
+        for index in range(8)
+    ]
+    put_units(harness, [*list(harness.brain.units.values()), *additions])
+    for token in probe["actorTokens"][:3]:
+        harness.controller.unitRefs[token].Dead = True
+
+    harness.brain.tick = 161
+    releasing_observation = reconcile(harness)
+    release = only_campaign_intent(harness, releasing_observation, "route_release")
+
+    assert campaign_state(harness)["anchorKey"] == before["anchorKey"]
+    assert campaign_state(harness).get("routeBlockedCount", 0) == 1
+    execute_intents(harness, [release], releasing_observation)
+
+    configure_route(harness, [[95, 95.85, 85]], count=1, length=90)
+    harness.brain.tick = 461
+    reconcile(harness)
+    harness.brain.tick = 462
+    alternate = reconcile(harness)
+    intent = only_campaign_intent(harness, alternate, "route_probe")
+    assert intent["clusterKey"] == "forward-far"
+
+
 @pytest.mark.parametrize("mutation", ["dead", "captured", "recycled"])
 def test_release_prunes_stale_generation_reseals_and_cleans_remaining_exact_actors(
     mutation: str,

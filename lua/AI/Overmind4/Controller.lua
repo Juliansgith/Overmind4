@@ -6573,7 +6573,7 @@ ESCALATION.RouteUpdate = function(controller, observation, campaign, readinessRe
                     campaign,
                     route,
                     'probe_attrition',
-                    false
+                    true
                 )
                 return true
             end
