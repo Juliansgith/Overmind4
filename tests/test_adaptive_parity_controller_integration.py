@@ -251,7 +251,7 @@ def test_nine_mex_macro_uses_rolling_demand_for_the_first_t2_upgrade() -> None:
     assert plain(harness.controller.macroPlan)["lanes"]["tech"]["admitted"] is True
 
 
-def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
+def test_full_bank_factory_growth_precedes_optional_engineer_and_air_reserves() -> None:
     harness = make_harness()
     harness.lua.execute(source("lua/AI/Overmind4/MacroDirector.lua"))
     harness.lua.execute(
@@ -265,12 +265,16 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
         harness.unit(entityId=entity_id, blueprintId="ueb1103")
         for entity_id in range(10, 20)
     ] + [harness.unit(entityId=20, blueprintId="ueb1202")]
-    # The live 10-minute artifact had 11 completed mex.  Ten T1 engineers plus
-    # the ACU is enough construction capacity; the old 4+mex target requested
-    # five more engineers and starved both land factories of combat production.
+    # The live 10-minute artifact had 11 completed mex, nine engineers, eight
+    # interceptors and a full mass bank, but optional air/engineer grants
+    # consumed the remaining energy reserve before funded factory growth.
     engineers = [
-        harness.unit(entityId=entity_id, blueprintId="uel0105")
-        for entity_id in range(100, 110)
+        harness.unit(
+            entityId=entity_id,
+            blueprintId="uel0105",
+            canBuild={"ueb0101": True, "ueb0102": True},
+        )
+        for entity_id in range(100, 109)
     ]
     factories = [
         harness.unit(entityId=30, blueprintId="ueb0101"),
@@ -281,25 +285,25 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
         harness.unit(entityId=200, blueprintId="uea0101"),
         *[
             harness.unit(entityId=entity_id, blueprintId="uea0102")
-            for entity_id in range(201, 205)
+            for entity_id in range(201, 209)
         ],
-        harness.unit(entityId=205, blueprintId="uea0103"),
-        harness.unit(entityId=206, blueprintId="uea0107"),
+        harness.unit(entityId=209, blueprintId="uea0103"),
+        harness.unit(entityId=210, blueprintId="uea0107"),
     ]
     harness.brain.units = harness.lua.table_from(
         [*mexes, *engineers, *factories, *air_package]
     )
     harness.brain.tick = 5815
-    harness.brain.massIncome = 2.7
-    harness.brain.massRequested = 1.56
-    harness.brain.massUsage = 1.56
-    harness.brain.massTrend = 1.14
-    harness.brain.massStored = 1040
-    harness.brain.massStoredRatio = 1
+    harness.brain.massIncome = 2.1
+    harness.brain.massRequested = 1.9466667
+    harness.brain.massUsage = 1.9466667
+    harness.brain.massTrend = 0.1533333
+    harness.brain.massStored = 635
+    harness.brain.massStoredRatio = 0.945
     harness.brain.energyIncome = 30
-    harness.brain.energyRequested = 15.3
-    harness.brain.energyUsage = 15.3
-    harness.brain.energyTrend = 14.7
+    harness.brain.energyRequested = 24.1843
+    harness.brain.energyUsage = 24.1843
+    harness.brain.energyTrend = 5.8157
     harness.brain.energyStored = 4000
     harness.brain.energyStoredRatio = 1
     harness.controller.economyLedger = lua_value(
@@ -308,13 +312,13 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
             "valid": True,
             "inputValid": True,
             "lastTick": 5815,
-            "recurringMassIncome": 2.7,
+            "recurringMassIncome": 2.1,
             "recurringEnergyIncome": 30,
-            "massRequested": 1.56,
-            "energyRequested": 15.3,
+            "massRequested": 1.9466667,
+            "energyRequested": 24.1843,
             "massDemandSatisfaction": 1,
             "energyDemandSatisfaction": 1,
-            "oneTimeMassReserve": 1040,
+            "oneTimeMassReserve": 635,
             "oneTimeEnergyReserve": 4000,
         },
     )
@@ -322,7 +326,7 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
     harness.lua.globals().Controller.Step(harness.controller)
 
     macro_input = plain(harness.calls.macroBuildPortfolio[1])
-    assert not any(
+    assert any(
         request["lane"] == "engineers" for request in macro_input["requests"]
     )
     assert any(
@@ -332,6 +336,10 @@ def test_met_engineer_target_does_not_starve_full_bank_factory_growth() -> None:
     assert plain(harness.controller.macroPlan)["lanes"]["factory_growth"][
         "admitted"
     ] is True
+    assert any(
+        call.blueprintId == "ueb0101"
+        for call in harness.calls.buildMobile.values()
+    )
 
 
 def test_ten_km_nearby_expansion_does_not_require_a_remote_escort() -> None:

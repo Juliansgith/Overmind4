@@ -3,10 +3,10 @@ local LANE_ORDER = {
     'mex_rebuild',
     'reclaim',
     'land_production',
+    'factory_growth',
     'tech',
     'air_production',
     'engineers',
-    'factory_growth',
 }
 
 local LANE_RANK = {
@@ -14,10 +14,10 @@ local LANE_RANK = {
     mex_rebuild = 2,
     reclaim = 3,
     land_production = 4,
-    tech = 5,
-    air_production = 6,
-    engineers = 7,
-    factory_growth = 8,
+    factory_growth = 5,
+    tech = 6,
+    air_production = 7,
+    engineers = 8,
 }
 
 local function Copy(value)
