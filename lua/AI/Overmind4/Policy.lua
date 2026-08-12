@@ -1354,9 +1354,13 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and (counts.mass_storage or 0) < completedAdvancedMex * 4
         and not plannedMassStorage
         and FiniteNumber(economy.massStoredRatio)
+        and FiniteNumber(economy.massTrend)
         and FiniteNumber(economy.energyStoredRatio)
+        and FiniteNumber(economy.energyTrend)
         and tonumber(economy.massStoredRatio) >= 0.5
+        and tonumber(economy.massTrend) >= 0
         and tonumber(economy.energyStoredRatio) >= 0.5
+        and tonumber(economy.energyTrend) >= 0
     then
         local assignedStorage = AssignPlacement(
             'mass_storage',
@@ -2924,9 +2928,13 @@ Policy.ApplyAllocator = function(snapshot, intents)
                 and role == 'mass_storage'
                 and intent.reason == 'mex_adjacency_storage'
                 and FiniteNumber(economy.massStoredRatio)
+                and FiniteNumber(economy.massTrend)
                 and FiniteNumber(economy.energyStoredRatio)
+                and FiniteNumber(economy.energyTrend)
                 and tonumber(economy.massStoredRatio) >= 0.5
+                and tonumber(economy.massTrend) >= 0
                 and tonumber(economy.energyStoredRatio) >= 0.5
+                and tonumber(economy.energyTrend) >= 0
             local strategicFactory = structureRequest
                 and role == 'land_factory'
                 and intent.reason == 'production_saturation'
