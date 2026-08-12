@@ -309,8 +309,13 @@ class TestAirAndMobility:
         (
             (
                 {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1},
-                {"visibleRaidTarget": False, "remoteSafeExpansion": False},
-                "interceptor",
+                {
+                    "airThreat": False,
+                    "airThreatCount": 0,
+                    "visibleRaidTarget": False,
+                    "remoteSafeExpansion": False,
+                },
+                None,
             ),
             (
                 {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1},
@@ -355,8 +360,11 @@ class TestAirAndMobility:
 
         plan = invoke(MODULE, GLOBAL, "PlanAir", snapshot)
 
-        assert len(plan["orders"]) == 1
-        assert plan["orders"][0]["buildRole"] == expected
+        if expected is None:
+            assert not plan["orders"]
+        else:
+            assert len(plan["orders"]) == 1
+            assert plan["orders"][0]["buildRole"] == expected
 
     def test_air_slot_selects_idle_factory_deterministically_under_factory_permutation(self) -> None:
         snapshot = air_snapshot()
@@ -364,7 +372,12 @@ class TestAirAndMobility:
             {"air_scout": 1, "interceptor": 4, "bomber": 1, "transport": 1}
         )
         snapshot["needs"].update(
-            {"airThreat": False, "visibleRaidTarget": False, "remoteSafeExpansion": False}
+            {
+                "airThreat": True,
+                "airThreatCount": 1,
+                "visibleRaidTarget": False,
+                "remoteSafeExpansion": False,
+            }
         )
         snapshot["fundedSlots"] = 1
         snapshot["factories"] = [

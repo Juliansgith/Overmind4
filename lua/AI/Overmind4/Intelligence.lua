@@ -270,13 +270,11 @@ Intelligence.PlanAir = function(snapshot)
                     and totals.bomber * 4 < totals.interceptor
                 then
                     role = 'bomber'
-                else
-                    role = 'interceptor'
                 end
             end
         end
         local factory = factories[index]
-        if factory then
+        if factory and role then
             table.insert(orders, {
                 kind = 'factory_build',
                 actorToken = factory.token,
