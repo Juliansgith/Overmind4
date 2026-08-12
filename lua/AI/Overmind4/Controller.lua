@@ -11538,6 +11538,7 @@ ESCALATION.ExecuteTransportLoad = function(controller, intent, records, usedActo
     if not transport or transportRecord.idle ~= true then return false end
     local cargo = {}
     local seen = {}
+    local pickupPosition = nil
     for _, token in ipairs(intent.cargoTokens or {}) do
         local record = records[token]
         if type(token) ~= 'string' or seen[token] or usedActors[token]
@@ -11548,6 +11549,7 @@ ESCALATION.ExecuteTransportLoad = function(controller, intent, records, usedActo
         end
         local actor = LiveOwnedActor(controller, token, record, 'engineer')
         if not actor then return false end
+        if not pickupPosition then pickupPosition = CopyPosition(record.position) end
         seen[token] = true
         TableInsert(cargo, actor)
     end
@@ -11559,11 +11561,25 @@ ESCALATION.ExecuteTransportLoad = function(controller, intent, records, usedActo
     if type(intent.siteKey) == 'string' and controller.reservations[intent.siteKey] then
         return false
     end
-    local ok = pcall(function() IssueTransportLoad(cargo, transport) end)
+    local pickupDistance = pickupPosition
+        and Distance(transportRecord.position, pickupPosition) or 0
+    local ok = pcall(function()
+        if pickupDistance > 20 then
+            IssueMove({ transport }, CopyPosition(pickupPosition))
+        end
+        IssueTransportLoad(cargo, transport)
+    end)
     if not ok then return false end
     mission = ESCALATION.directors.intelligence.AdvanceTransport(
         mission, { kind = 'load_ordered', tick = CurrentTick(controller) }
     ) or mission
+    if pickupDistance > 20 then
+        mission.deadlineTick = math.max(
+            tonumber(mission.deadlineTick) or 0,
+            CurrentTick(controller) + math.min(3600,
+                math.ceil(pickupDistance * 10 / 12) + 200)
+        )
+    end
     controller.transportMissions[intent.missionId] = ESCALATION.DeepCopy(mission)
     local cargoRefs = {}
     for index, token in ipairs(intent.cargoTokens or {}) do
