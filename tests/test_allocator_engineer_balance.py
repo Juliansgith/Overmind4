@@ -821,10 +821,28 @@ def test_full_bank_invests_in_one_adjacent_storage_for_advanced_mex() -> None:
     assert storage[0]["position"] in snapshot["placements"]["mass_storage"]
 
 
+def test_live_twenty_minute_bank_invests_in_advanced_mex_storage() -> None:
+    snapshot = _advanced_mex_storage_snapshot()
+    snapshot["economy"].update(
+        massStoredRatio=0.66,
+        massTrend=0.1,
+        energyStoredRatio=0.94,
+        energyTrend=1,
+    )
+
+    storage = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "mex_adjacency_storage"
+    ]
+
+    assert len(storage) == 1
+
+
 @pytest.mark.parametrize(
     ("change", "value"),
     [
-        ("massStoredRatio", 0.949),
+        ("massStoredRatio", 0.499),
         ("massTrend", -0.01),
         ("energyStoredRatio", 0.499),
         ("energyTrend", -0.01),
