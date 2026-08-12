@@ -1802,6 +1802,8 @@ def test_reclaim_snapshot_reports_each_discovery_filter_stage() -> None:
     )
     harness.brain.units = harness.lua.table_from([engineer])
     harness.brain.reclaimables = harness.lua.table_from([wreck])
+    wreck.IsProp = True
+    harness.lua.globals().IsProp = None
 
     observation = plain(harness.observe())
 

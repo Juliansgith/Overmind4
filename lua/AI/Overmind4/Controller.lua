@@ -1258,8 +1258,14 @@ local function ReclaimPropLiveness(prop)
     return 'alive'
 end
 
+local function IsReclaimProp(prop)
+    if not prop then return false end
+    if prop.IsProp ~= nil then return prop.IsProp == true end
+    return SafeCall(false, IsProp, prop) == true
+end
+
 local function ReclaimPropKey(prop)
-    if SafeCall(false, IsProp, prop) ~= true then return nil end
+    if not IsReclaimProp(prop) then return nil end
     local entityId = SafeCall(nil, prop.GetEntityId, prop) or prop.EntityId
     if entityId == nil then return nil end
     return 'prop:' .. tostring(entityId)
@@ -4052,7 +4058,7 @@ local function ExecuteReclaim(controller, intent, record)
         or not actorRadius
         or not observerRadius
         or not PropAlive(target)
-        or SafeCall(false, IsProp, target) ~= true
+        or not IsReclaimProp(target)
         or not targetPosition
         or Distance(actorPosition, targetPosition) > actorRadius
         or Distance(observerPosition, targetPosition) > observerRadius
