@@ -176,10 +176,14 @@ def test_healthy_t2_engineer_builds_one_adjacent_t2_generator() -> None:
     assert pending["21:1"]["reason"] == "factory_adjacency_t2_power"
 
 
-def test_sixteen_completed_mex_scale_to_a_second_t2_generator() -> None:
+def test_twelve_mex_with_positive_partial_bank_prebuild_second_t2_generator() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
     _healthy_bank(harness)
+    harness.brain.massStoredRatio = 0.9
+    harness.brain.massTrend = 0.5
+    harness.brain.energyStoredRatio = 0.37
+    harness.brain.energyTrend = 0.03
     _set_director_result(
         harness, "macroPlan", _macro_plan(lane="energy_recovery")
     )
@@ -189,7 +193,7 @@ def test_sixteen_completed_mex_scale_to_a_second_t2_generator() -> None:
             blueprintId="ueb1103",
             position=[80 + index * 4, 2, 80],
         )
-        for index in range(16)
+        for index in range(12)
     ]
     harness.brain.units = harness.lua.table_from(
         [

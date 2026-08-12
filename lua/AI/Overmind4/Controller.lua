@@ -9307,7 +9307,7 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
             t2PowerCount = t2PowerCount + 1
         end
     end
-    local t2PowerTarget = math.min(4, math.max(1, math.floor(completedMex / 8)))
+    local t2PowerTarget = math.min(4, math.max(1, math.ceil(completedMex / 6)))
     if t2PowerCount < t2PowerTarget
         and TableGetn(t2PowerPositions) > 0
         and energyLane
@@ -9316,9 +9316,9 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         and ESCALATION.FiniteEconomyNumber(economy.massTrend, true)
         and ESCALATION.FiniteEconomyNumber(economy.energyStoredRatio)
         and ESCALATION.FiniteEconomyNumber(economy.energyTrend, true)
-        and economy.massStoredRatio >= 0.95
+        and economy.massStoredRatio >= 0.8
         and economy.massTrend >= 0
-        and economy.energyStoredRatio >= 0.5
+        and economy.energyStoredRatio >= 0.3
         and economy.energyTrend >= 0
     then
         local best = nil
