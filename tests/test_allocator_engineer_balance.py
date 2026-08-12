@@ -655,6 +655,36 @@ def test_factory_count_scales_adjacency_power_before_air_stalls() -> None:
     ]
 
 
+def test_idle_acu_builds_factory_adjacency_power_while_field_engineers_are_busy() -> None:
+    snapshot = _policy_allocator_snapshot(
+        "air_factory",
+        "power_generator",
+        "power_generator",
+        "mass_extractor",
+        "mass_extractor",
+    )
+    for unit in snapshot["units"]:
+        if unit["role"] == "engineer":
+            unit["idle"] = False
+        elif unit["role"] == "acu":
+            unit["buildRate"] = 10
+    snapshot["macro"].update(
+        expansionOpportunityCount=12,
+        expansionRecurringMassBudget=1.2,
+        expansionRecurringEnergyBudget=12,
+    )
+
+    power = [
+        intent
+        for intent in intents_of(decide(snapshot), "build_structure")
+        if intent.get("reason") == "factory_adjacency_power"
+    ]
+
+    assert [(intent["actorToken"], intent["buildRole"]) for intent in power] == [
+        ("1:1", "power_generator")
+    ]
+
+
 def test_opening_air_power_is_not_starved_by_future_commitment_reservations() -> None:
     snapshot = _policy_allocator_snapshot()
     next(unit for unit in snapshot["units"] if unit["role"] == "acu")[

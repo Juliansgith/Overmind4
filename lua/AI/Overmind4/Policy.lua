@@ -1262,12 +1262,44 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
         and (counts.power_generator or 0) < adjacencyPowerTarget
         and not plannedPower
     then
-        if AssignPlacement(
+        local assignedPower = AssignPlacement(
             'power_generator',
             placementIndex.power_generator,
             19,
             'factory_adjacency_power'
-        ) then
+        )
+        if not assignedPower
+            and reclaimPatrolAcu
+            and CanBuild(reclaimPatrolAcu, 'power_generator')
+        then
+            local acuClaimed = false
+            for _, existing in ipairs(intents or {}) do
+                if existing.actorToken == reclaimPatrolAcu.token then
+                    acuClaimed = true
+                    break
+                end
+            end
+            if not acuClaimed then
+                local position = ReservePlacement(
+                    snapshot,
+                    'power_generator',
+                    placementIndex.power_generator,
+                    virtualPlacements
+                )
+                if position then
+                    AddIntent(intents, BuildAtPlacement(
+                        reclaimPatrolAcu,
+                        'power_generator',
+                        position,
+                        19,
+                        'factory_adjacency_power'
+                    ))
+                    reclaimPatrolAcu = nil
+                    assignedPower = true
+                end
+            end
+        end
+        if assignedPower then
             plannedPower = true
             placementIndex.power_generator = placementIndex.power_generator + 1
             counts.power_generator = (counts.power_generator or 0) + 1
