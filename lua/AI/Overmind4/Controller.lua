@@ -4932,6 +4932,7 @@ local function ValidCampaignOperation(controller, observation, operation)
     if not StructureOperation(operation)
         or operation.buildRole ~= 'mass_extractor'
         or (operation.reason ~= 'frontier_expansion'
+            and operation.reason ~= 'regional_expansion'
             and operation.reason ~= 'rebuild_mex')
         or type(operation.siteKey) ~= 'string'
         or not IsCampaignPosition(operation.position)
@@ -4952,7 +4953,8 @@ end
 local function CampaignCandidate(controller, observation)
     for _, token in ipairs(SortedKeys(controller.pending)) do
         local operation = controller.pending[token]
-        if operation.reason == 'frontier_expansion'
+        if (operation.reason == 'frontier_expansion'
+                or operation.reason == 'regional_expansion')
             and ValidCampaignOperation(controller, observation, operation)
             and PressureClusterForSite(controller, operation.siteKey) ~= nil
         then

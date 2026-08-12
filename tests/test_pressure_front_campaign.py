@@ -41,6 +41,20 @@ def aggressive_position(harness: Any, index: int = -1) -> list[float]:
     return plain(calls[index].position)
 
 
+def test_live_director_regional_expansion_starts_pressure_front() -> None:
+    harness, _, _, _, observation = start_campaign(
+        reason="regional_expansion",
+        site_key="front-a",
+        cluster_key="front-a",
+        position=[70, 2, 40],
+        extra_markers=[layered_marker("front-b", 80, 50)],
+    )
+
+    assert harness.controller.fieldCampaign is not None
+    assert campaign_state(harness)["kind"] == "pressure_front"
+    assert len(campaign_intents(harness, observation)) == 1
+
+
 def put_units(harness: Any, units: list[Any], seed: int = 0) -> None:
     shuffled = list(units)
     random.Random(seed).shuffle(shuffled)
