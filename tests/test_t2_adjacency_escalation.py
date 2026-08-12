@@ -305,3 +305,82 @@ def test_pending_or_completed_t2_generator_suppresses_another() -> None:
         assert not any(
             call.blueprintId == "ueb1201" for call in harness.calls.buildMobile.values()
         )
+
+
+def test_completed_t2_hq_requests_two_separately_funded_tech_slots() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    harness.brain.units = harness.lua.table_from(
+        [
+            *[
+                harness.unit(
+                    entityId=index,
+                    blueprintId="ueb1202" if index < 12 else "ueb1103",
+                )
+                for index in range(10, 20)
+            ],
+            harness.unit(entityId=20, blueprintId="ueb0101"),
+            harness.unit(entityId=21, blueprintId="ueb0101"),
+            harness.unit(entityId=22, blueprintId="ueb0201"),
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    requests = plain(harness.calls.macroBuildPortfolio[1])["requests"]
+    assert [
+        request["id"] for request in requests if request["lane"] == "tech"
+    ] == ["tech-1", "tech-2"]
+
+
+def test_two_funded_mex_upgrade_slots_issue_two_distinct_upgrades() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "lanes": {"tech": {"admitted": True}},
+            "grants": [
+                {"requestId": "tech-1", "lane": "tech", "source": "bank"},
+                {"requestId": "tech-2", "lane": "tech", "source": "bank"},
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+    _set_director_result(
+        harness,
+        "techPlan",
+        {
+            "mexUpgradeSiteKeys": ["30:1", "31:1"],
+            "mexUpgradeRolesBySite": {
+                "30:1": "mass_extractor_t2",
+                "31:1": "mass_extractor_t2",
+            },
+        },
+    )
+    harness.brain.units = harness.lua.table_from(
+        [
+            harness.unit(
+                entityId=30,
+                blueprintId="ueb1103",
+                canBuild={"ueb1202": True},
+            ),
+            harness.unit(
+                entityId=31,
+                blueprintId="ueb1103",
+                canBuild={"ueb1202": True},
+            ),
+        ]
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.upgrade) == 2
+    assert {call.units[1].options.entityId for call in harness.calls.upgrade.values()} == {
+        30,
+        31,
+    }

@@ -9030,6 +9030,13 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
                 massCost = 1170, energyCost = 9100, durationTicks = 1150,
                 allowHybrid = true, required = true,
                 portfolioPriority = 1.5 })
+            if counts.landFactoriesT2 >= 1 then
+                TableInsert(requests, { id = 'tech-2', lane = 'tech',
+                    massDrain = 1, energyDrain = 6,
+                    massCost = 900, energyCost = 5400,
+                    durationTicks = 900, allowHybrid = true,
+                    optional = true, portfolioPriority = 1.6 })
+            end
         end
     end
     local commitments = {}

@@ -1484,8 +1484,10 @@ MacroDirector.PlanTech = function(snapshot)
         plan.t3UpgradeRole = 'land_factory_t3'
         plan.t3ProductionRole = 't3_direct_fire'
     end
+    local activeMexUpgrades = Number(snapshot.activeMexUpgrades, 0) or 0
+    local mexUpgradeLimit = snapshot.t2HqComplete and 2 or 1
     if healthy and funded
-        and (Number(snapshot.activeMexUpgrades, 0) or 0) == 0
+        and activeMexUpgrades < mexUpgradeLimit
         and (snapshot.t2HqComplete or t2MexCount < 2)
     then
         local t1Mex = {}
@@ -1501,13 +1503,21 @@ MacroDirector.PlanTech = function(snapshot)
         end
         SortByKey(t1Mex, 'key')
         SortByKey(t2Mex, 'key')
-        local selected = snapshot.t2HqComplete
-            and plan.t3Action == 'admit' and t2Mex[1] or nil
-        selected = selected or t1Mex[1]
-        if selected then
+        local remaining = mexUpgradeLimit - activeMexUpgrades
+        if snapshot.t2HqComplete and plan.t3Action == 'admit'
+            and t2Mex[1] and remaining > 0
+        then
+            table.insert(plan.mexUpgradeSiteKeys, t2Mex[1].key)
+            plan.mexUpgradeRolesBySite[t2Mex[1].key] = 'mass_extractor_t3'
+            remaining = remaining - 1
+        end
+        local index = 1
+        while index <= Count(t1Mex) and remaining > 0 do
+            local selected = t1Mex[index]
             table.insert(plan.mexUpgradeSiteKeys, selected.key)
-            plan.mexUpgradeRolesBySite[selected.key] = selected.tier == 2
-                and 'mass_extractor_t3' or 'mass_extractor_t2'
+            plan.mexUpgradeRolesBySite[selected.key] = 'mass_extractor_t2'
+            remaining = remaining - 1
+            index = index + 1
         end
     end
     return plan

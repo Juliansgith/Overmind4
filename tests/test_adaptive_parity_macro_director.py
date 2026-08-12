@@ -2771,5 +2771,14 @@ class TestRegionalMacro:
 
         plan = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
 
-        assert len(plan["mexUpgradeSiteKeys"]) <= 1
+        assert len(plan["mexUpgradeSiteKeys"]) == (2 if healthy else 0)
+        assert len(set(plan["mexUpgradeSiteKeys"])) == len(
+            plan["mexUpgradeSiteKeys"]
+        )
         assert plan["t3Action"] == t3_action
+
+        snapshot["activeMexUpgrades"] = 1
+        with_one_active = invoke(MODULE, GLOBAL, "PlanTech", snapshot)
+        assert len(with_one_active["mexUpgradeSiteKeys"]) == (
+            1 if healthy else 0
+        )
