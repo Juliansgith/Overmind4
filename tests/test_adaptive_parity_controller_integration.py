@@ -2464,6 +2464,60 @@ def test_single_factory_grant_fills_larger_air_deficit_before_more_land() -> Non
     assert harness.calls.buildMobile[1].blueprintId == "ueb0102"
 
 
+def test_factory_power_deficit_gets_director_builder_before_remote_work() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    engineer = harness.unit(
+        entityId=10,
+        blueprintId="uel0105",
+        canBuild={"ueb1101": True},
+    )
+    factories = [
+        harness.unit(entityId=20 + index, blueprintId="ueb0101")
+        for index in range(3)
+    ]
+    air = harness.unit(entityId=30, blueprintId="ueb0102")
+    power = [
+        harness.unit(entityId=40 + index, blueprintId="ueb1101")
+        for index in range(4)
+    ]
+    mex = [
+        harness.unit(entityId=50 + index, blueprintId="ueb1103")
+        for index in range(6)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [engineer, *factories, air, *power, *mex]
+    )
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 6,
+            "airFactoryTarget": 3,
+            "lanes": {
+                "energy_recovery": {"admitted": True},
+                "factory_growth": {"admitted": False},
+            },
+            "grants": [
+                {
+                    "requestId": "energy-1",
+                    "lane": "energy_recovery",
+                    "source": "bank",
+                }
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1101"
+
+
 def test_factory_director_cannot_take_acu_while_power_target_is_unmet() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")

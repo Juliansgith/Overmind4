@@ -10510,6 +10510,24 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
     local factoryPowerTarget = math.min(24,
         math.max(4, (currentLand + currentAir) * 3))
     local factoryPowerReady = currentPower >= factoryPowerTarget
+    local energyLane = lanes.energy_recovery or {}
+    if currentMex >= 6 and not factoryPowerReady
+        and (energyLane.admitted == true or energyLane.preserved == true)
+    then
+        local actor = ESCALATION.AvailableDirectorActor(
+            controller, observation, 'engineer', 'power_generator', reserved
+        )
+        if not actor then actor = StrategicAcu('power_generator') end
+        local positions = (observation.placements or {}).power_generator or {}
+        if actor and positions[1] then
+            reserved[actor.token] = true
+            ESCALATION.AppendDirectorIntent(intents, {
+                kind = 'build_structure', actorToken = actor.token,
+                buildRole = 'power_generator', position = CopyPosition(positions[1]),
+                reason = 'factory_power_growth', priority = 2,
+            })
+        end
+    end
     local factoryGrowthAdmitted = (lanes.factory_growth or {}).admitted == true
         and factoryPowerReady
     local openingFirstAir = currentLand >= 2 and currentAir < 1
@@ -12792,6 +12810,9 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     for _, intent in ipairs(macroPlan.intents or {}) do
         ESCALATION.AppendDirectorIntent(intents, intent)
     end
+    ESCALATION.AdaptGrowthIntents(
+        controller, observation, macroPlan, techPlan, intents, reserved
+    )
     ESCALATION.AdaptReclaimIntents(controller, reclaimPlan, intents, reserved)
     ESCALATION.RecordExpansionDenials(controller, expansionPlan.denials)
     ESCALATION.AdaptExpansionIntents(
@@ -12813,9 +12834,6 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     ESCALATION.AdaptAirIntercept(controller, observation, intents, reserved)
     ESCALATION.AdaptBomberIntent(
         controller, observation, intelState, bomberTarget, scoutPlan, intents, reserved
-    )
-    ESCALATION.AdaptGrowthIntents(
-        controller, observation, macroPlan, techPlan, intents, reserved
     )
     ESCALATION.AdaptTransportIntent(
         controller, observation, transportPlan, intents
