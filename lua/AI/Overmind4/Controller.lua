@@ -1391,6 +1391,11 @@ local function RefreshReclaim(controller, ownRecords, massSites)
             math.mod(cursor - 1 + visited, recordCount) + 1
     end
 
+    controller.reclaimQueryEngineers = TableGetn(queryRecords)
+    controller.reclaimRawProps = 0
+    controller.reclaimNormalizedProps = 0
+    controller.reclaimControlledProps = 0
+
     local activeRefs = {}
     for _, query in ipairs(queryRecords) do
         local record = query.record
@@ -1434,6 +1439,7 @@ local function RefreshReclaim(controller, ownRecords, massSites)
         end
 
         for _, prop in pairs(raw or {}) do
+            controller.reclaimRawProps = controller.reclaimRawProps + 1
             local propKey = ReclaimPropKey(prop)
             local exactReference = operation
                 and operation.targetReference
@@ -1485,9 +1491,11 @@ local function RefreshReclaim(controller, ownRecords, massSites)
                 record.token,
                 tick
             )
-            if candidate
-                and PositionControlled(controller, candidate.position, massSites)
-            then
+            if candidate then
+                controller.reclaimNormalizedProps = controller.reclaimNormalizedProps + 1
+            end
+            if candidate and PositionControlled(controller, candidate.position, massSites) then
+                controller.reclaimControlledProps = controller.reclaimControlledProps + 1
                 local previous = byKey[candidate.key]
                 if not previous
                     or candidate.mass > previous.mass
@@ -2474,6 +2482,10 @@ local function MacroSnapshot(controller, units, economy)
         homeReserveCount = homeReserve,
         reclaimTarget = reclaimTarget,
         reclaimValue = reclaimValue,
+        reclaimQueryEngineers = tonumber(controller.reclaimQueryEngineers) or 0,
+        reclaimRawProps = tonumber(controller.reclaimRawProps) or 0,
+        reclaimNormalizedProps = tonumber(controller.reclaimNormalizedProps) or 0,
+        reclaimControlledProps = tonumber(controller.reclaimControlledProps) or 0,
         rallyPosition = CopyPosition(campaign
             and controller.basePosition
             or controller.rallyPosition
@@ -8005,6 +8017,10 @@ Controller.Create = function(brain)
         lastSnapshotTick = -SNAPSHOT_INTERVAL_TICKS,
         lastReclaimQueryTick = -RECLAIM_QUERY_INTERVAL_TICKS,
         reclaimQueryCursor = 1,
+        reclaimQueryEngineers = 0,
+        reclaimRawProps = 0,
+        reclaimNormalizedProps = 0,
+        reclaimControlledProps = 0,
         lastErrorTick = -REORDER_COOLDOWN_TICKS,
         crossMapOffenseEnabled = false,
     }
@@ -12442,6 +12458,10 @@ Controller.Step = function(controller)
             air_screen = tonumber(macro.airScreenCount) or 0,
             air_scout = tonumber(macro.airScoutCount) or 0,
             reclaim_candidate_value = tonumber(macro.reclaimValue) or -1,
+            reclaim_query_engineers = tonumber(macro.reclaimQueryEngineers) or 0,
+            reclaim_raw_props = tonumber(macro.reclaimRawProps) or 0,
+            reclaim_normalized_props = tonumber(macro.reclaimNormalizedProps) or 0,
+            reclaim_controlled_props = tonumber(macro.reclaimControlledProps) or 0,
             campaign_ready = macro.campaignReady == true,
             campaign_readiness_blockers = tostring(
                 macro.campaignReadinessBlocker or 'none'
