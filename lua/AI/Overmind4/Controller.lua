@@ -3589,6 +3589,9 @@ local function ExecuteStructure(controller, intent, record)
         command = 'build_structure',
         role = intent.buildRole,
         site = intent.siteKey or 'placement',
+        travel_distance = Distance(
+            SafeCall(position, actor.GetPosition, actor), position
+        ),
     })
     return true
 end
@@ -11306,7 +11309,7 @@ ESCALATION.AdaptTransportIntent = function(
 end
 
 ESCALATION.AdaptForceIntents = function(
-    controller, forcePlan, intelState, intents, reserved
+    controller, observation, forcePlan, intelState, intents, reserved
 )
     for _, intent in ipairs((forcePlan or {}).intents or {}) do
         ESCALATION.AppendDirectorIntent(intents, intent)
@@ -11439,6 +11442,8 @@ ESCALATION.AdaptForceIntents = function(
         end
     end
     local targetRegion = nil
+    local rallyRegion = nil
+    local rallyDistance = nil
     local targetDistance = nil
     local targetRank = nil
     for _, region in ipairs((forcePlan or {}).regions or {}) do
@@ -11455,6 +11460,15 @@ ESCALATION.AdaptForceIntents = function(
         local distance = rank and DistanceSquared(
             region.position, controller.basePosition
         ) or nil
+        if region.state == 'secured' and region.productionAnchor ~= false
+            and CopyPosition(region.position)
+            and (rallyDistance == nil or distance > rallyDistance
+                or (distance == rallyDistance
+                    and tostring(region.key) < tostring(rallyRegion.key)))
+        then
+            rallyRegion = region
+            rallyDistance = distance
+        end
         if rank and (targetRank == nil or rank < targetRank
             or (rank == targetRank and rank < 3
                 and tostring(region.key) < tostring(targetRegion.key))
@@ -11475,6 +11489,7 @@ ESCALATION.AdaptForceIntents = function(
         end
     end
     table.sort(fieldTokens)
+    local assaultTarget = nil
     if TableGetn(fieldTokens) >= 40 and controller.targetPath == true
         and CopyPosition(controller.targetPosition)
     then
@@ -11500,7 +11515,7 @@ ESCALATION.AdaptForceIntents = function(
                 economicSeen = seen
             end
         end
-        targetRegion = economicTarget and {
+        assaultTarget = economicTarget and {
             key = 'enemy_economy',
             position = CopyPosition(economicTarget.position),
         } or {
@@ -11508,7 +11523,75 @@ ESCALATION.AdaptForceIntents = function(
             position = CopyPosition(controller.targetPosition),
         }
     end
-    if controller.fieldCampaign == nil
+    local mission = controller.fieldAssaultMission
+    local records = RecordByToken((observation or {}).units or {})
+    if mission then
+        local liveTokens = {}
+        for _, token in ipairs(mission.actorTokens or {}) do
+            local record = records[token]
+            if record and record.complete == true and COMBAT_ROLES[record.role] == true
+                and ((forcePlan or {}).ownershipByToken or {})[token] == 'field'
+            then
+                TableInsert(liveTokens, token)
+            end
+        end
+        if TableGetn(liveTokens) < math.max(20, math.floor((mission.initialCount or 0) * 0.5))
+            or CurrentTick(controller) - (mission.createdTick or 0) >= 1800
+        then
+            controller.fieldAssaultMission = nil
+            mission = nil
+        elseif mission.phase == 'assembling' then
+            local arrived = 0
+            for _, token in ipairs(liveTokens) do
+                local record = records[token]
+                if record and CopyPosition(record.position)
+                    and Distance(record.position, mission.rallyPosition) <= 35
+                then
+                    arrived = arrived + 1
+                end
+            end
+            local quorum = math.max(
+                math.min(30, TableGetn(liveTokens)),
+                math.ceil(TableGetn(liveTokens) * 0.75)
+            )
+            if arrived >= quorum then
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'regional_field', regionKey = mission.targetKey,
+                    actorTokens = liveTokens, position = CopyPosition(mission.targetPosition),
+                    priority = 6, assaultSerial = mission.serial, clearFirst = true,
+                })
+            elseif CurrentTick(controller) - (mission.lastRallyTick or -1000000) >= 300 then
+                mission.lastRallyTick = CurrentTick(controller)
+                ESCALATION.AppendDirectorIntent(intents, {
+                    kind = 'field_rally', regionKey = mission.rallyKey,
+                    actorTokens = liveTokens, position = CopyPosition(mission.rallyPosition),
+                    priority = 6, assaultSerial = mission.serial,
+                })
+            end
+        elseif mission.phase == 'assaulting'
+            and CurrentTick(controller) - (mission.launchTick or 0) >= 900
+        then
+            controller.fieldAssaultMission = nil
+        end
+    end
+    if not mission and assaultTarget and rallyRegion and controller.fieldCampaign == nil then
+        controller.fieldAssaultSerial = (tonumber(controller.fieldAssaultSerial) or 0) + 1
+        mission = {
+            serial = controller.fieldAssaultSerial, phase = 'assembling',
+            actorTokens = CopyArray(fieldTokens), initialCount = TableGetn(fieldTokens),
+            rallyKey = tostring(rallyRegion.key),
+            rallyPosition = CopyPosition(rallyRegion.position),
+            targetKey = assaultTarget.key, targetPosition = CopyPosition(assaultTarget.position),
+            createdTick = CurrentTick(controller), lastRallyTick = CurrentTick(controller),
+        }
+        controller.fieldAssaultMission = mission
+        ESCALATION.AppendDirectorIntent(intents, {
+            kind = 'field_rally', regionKey = mission.rallyKey,
+            actorTokens = CopyArray(mission.actorTokens),
+            position = CopyPosition(mission.rallyPosition), priority = 6,
+            assaultSerial = mission.serial,
+        })
+    elseif not mission and controller.fieldCampaign == nil
         and targetRegion and TableGetn(fieldTokens) > 0
     then
         ESCALATION.AppendDirectorIntent(intents, {
@@ -12711,7 +12794,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
     )
     ESCALATION.AdaptFieldIntercept(controller, observation, intents, reserved)
     ESCALATION.AdaptForceIntents(
-        controller, forcePlan, intelState, intents, reserved
+        controller, observation, forcePlan, intelState, intents, reserved
     )
 
     controller.intelState = intelState
@@ -13326,6 +13409,11 @@ ESCALATION.ExecuteForceMove = function(
     then
         return false
     end
+    if aggressive == true and intent.clearFirst == true
+        and not pcall(function() IssueClearCommands(actors) end)
+    then
+        return false
+    end
     local ok = aggressive == true
         and pcall(function() IssueAggressiveMove(actors, CopyPosition(intent.position)) end)
         or pcall(function() IssueMove(actors, CopyPosition(intent.position)) end)
@@ -13339,6 +13427,13 @@ ESCALATION.ExecuteForceMove = function(
         target = tostring(intent.regionKey or 'none'),
         units = TableGetn(tokens),
     })
+    if aggressive == true and type(intent.assaultSerial) == 'number'
+        and controller.fieldAssaultMission
+        and controller.fieldAssaultMission.serial == intent.assaultSerial
+    then
+        controller.fieldAssaultMission.phase = 'assaulting'
+        controller.fieldAssaultMission.launchTick = CurrentTick(controller)
+    end
     return true
 end
 
@@ -13524,6 +13619,10 @@ Controller.Execute = function(controller, intents, observation)
             elseif intent.kind == 'regional_field' then
                 issued = ESCALATION.ExecuteForceMove(
                     controller, intent, records, usedActors, 'field', true
+                )
+            elseif intent.kind == 'field_rally' then
+                issued = ESCALATION.ExecuteForceMove(
+                    controller, intent, records, usedActors, 'field', false
                 )
             elseif intent.kind == 'regional_raider' then
                 issued = ESCALATION.ExecuteForceMove(

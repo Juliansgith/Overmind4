@@ -6639,7 +6639,7 @@ def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> N
     } == {(100, 2, 100), (200, 2, 200), (300, 2, 300)}
 
 
-def test_mature_field_force_continuously_pressures_public_enemy_spawn() -> None:
+def test_mature_field_force_rallies_then_launches_one_coherent_enemy_spawn_assault() -> None:
     harness = make_harness()
     harness.lua.execute("Policy.Decide = function() return {} end")
     tanks = [
@@ -6675,10 +6675,25 @@ def test_mature_field_force_continuously_pressures_public_enemy_spawn() -> None:
 
     harness.lua.globals().Controller.Step(harness.controller)
 
+    assert len(harness.calls.aggressive) == 0
+    assert len(harness.calls.move) == 1
+    assert plain(harness.calls.move[1].position) == [60, 2, 60]
+
+    for tank in tanks:
+        tank.options.position = harness.lua.table_from([60, 2, 60])
+    harness.brain.tick = 10
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.clear) == 1
     assert len(harness.calls.aggressive) == 1
+    assert len(harness.calls.aggressive[1].units) == 40
     assert plain(harness.calls.aggressive[1].position) == plain(
         harness.controller.targetPosition
     )
+
+    harness.brain.tick = 20
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.aggressive) == 1
 
 
 def test_mature_field_force_pressures_recent_enemy_factory_instead_of_empty_spawn() -> None:
@@ -6732,6 +6747,12 @@ def test_mature_field_force_pressures_recent_enemy_factory_instead_of_empty_spaw
         },
     )
 
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.aggressive) == 0
+    for tank in tanks:
+        tank.options.position = harness.lua.table_from([60, 2, 60])
+    harness.brain.tick = 510
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.aggressive) == 1

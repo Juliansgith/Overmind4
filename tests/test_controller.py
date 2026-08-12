@@ -1228,6 +1228,10 @@ def test_build_mobile_uses_exact_four_arguments_terrain_height_and_empty_alterna
     assert call.argc == 4 and call.blueprintId == "ueb1101"
     assert plain(call.position) == [30, 30.4, 40]
     assert len(call.alternatives) == 0
+    assert any(
+        "command=build_structure" in line and "travel_distance=36.055" in line
+        for line in harness.logs
+    )
 
 
 def test_build_rechecks_can_build_at_and_actor_capability_before_order() -> None:
