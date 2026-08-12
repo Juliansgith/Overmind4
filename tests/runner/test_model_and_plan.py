@@ -9,7 +9,7 @@ from tools.overmind4_runner.model import AISpec, RunConfig, ValidationError
 from tools.overmind4_runner.plan import ArtifactPaths, build_argv
 
 
-def test_defaults_describe_one_fixed_overmind4_vs_easy_match() -> None:
+def test_defaults_describe_one_fixed_overmind4_vs_adaptive_match() -> None:
     config = RunConfig()
 
     assert config.map_id == "SCMP_007"
@@ -19,7 +19,7 @@ def test_defaults_describe_one_fixed_overmind4_vs_easy_match() -> None:
     assert config.wall_time_limit == 300
     assert config.ai_specs == (
         AISpec(slot=1, key="overmind4", faction=1, team=1),
-        AISpec(slot=2, key="easy", faction=1, team=2),
+        AISpec(slot=2, key="adaptive", faction=1, team=2),
     )
 
 
@@ -122,7 +122,7 @@ def test_exact_argv_preserves_paths_with_spaces_as_individual_arguments() -> Non
     prefs_argument = argv[argv.index("/prefs") + 1]
     assert prefs_argument == artifacts.prefs_filename
     assert prefs_argument == Path(prefs_argument).name
-    assert argv[argv.index("/aitest") + 1] == "1:overmind4:1:1,2:easy:1:2"
+    assert argv[argv.index("/aitest") + 1] == "1:overmind4:1:1,2:adaptive:1:2"
     assert argv[argv.index("/map") + 1] == "SCMP_007"
     assert argv[argv.index("/seed") + 1] == "7777"
     assert argv[argv.index("/speed") + 1] == "25"

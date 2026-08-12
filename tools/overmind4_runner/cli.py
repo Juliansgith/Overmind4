@@ -29,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wall-time", type=int, default=300)
     parser.add_argument("--unit-cap", type=int, default=1000)
     parser.add_argument("--our-ai", default="overmind4")
-    parser.add_argument("--opponent-ai", default="easy")
+    parser.add_argument("--opponent-ai", default="adaptive")
     parser.add_argument("--our-faction", type=int, default=1)
     parser.add_argument("--opponent-faction", type=int, default=1)
     parser.add_argument("--our-slot", type=int, default=1)

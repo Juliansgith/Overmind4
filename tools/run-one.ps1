@@ -22,7 +22,7 @@ param(
     [string]$OurAI = 'overmind4',
 
     [ValidateNotNullOrEmpty()]
-    [string]$OpponentAI = 'easy',
+    [string]$OpponentAI = 'adaptive',
 
     [ValidateRange(1, 4)]
     [int]$OurFaction = 1,

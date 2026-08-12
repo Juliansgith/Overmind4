@@ -16,7 +16,7 @@ def test_cli_defaults_match_daily_one_game_workflow() -> None:
     assert options.config.map_id == "SCMP_007"
     assert options.config.speed == 25
     assert options.config.ai_specs[0].key == "overmind4"
-    assert options.config.ai_specs[1].key == "easy"
+    assert options.config.ai_specs[1].key == "adaptive"
     assert options.dry_run is False
     assert options.output_dir == Path("artifacts/runs")
 
@@ -97,6 +97,7 @@ def test_powershell_entry_point_forwards_each_control_without_expression_evaluat
     assert "--opponent-faction" in source
     assert "--our-slot" in source
     assert "--opponent-slot" in source
+    assert "[string]$OpponentAI = 'adaptive'" in source
     assert "--output-dir" in source
     assert "@pythonArguments" in source
 

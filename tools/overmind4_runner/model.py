@@ -82,7 +82,7 @@ class RunConfig:
     sim_time_limit: int = 1800
     wall_time_limit: int = 300
     our_ai: str = "overmind4"
-    opponent_ai: str = "easy"
+    opponent_ai: str = "adaptive"
     our_faction: int = 1
     opponent_faction: int = 1
     our_slot: int = 1
