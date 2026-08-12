@@ -9169,23 +9169,30 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
         and economy.energyStoredRatio >= 0.5
         and economy.energyTrend >= 0
     then
-        local position = t2PowerPositions[1]
         local best = nil
+        local bestPosition = nil
         local bestDistance = nil
-        for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
-            if unit.role == 't2_engineer'
-                and (unit.available == true or unit.moving == true)
-                and controller.pending[unit.token] == nil
-                and not ESCALATION.TransportTokenClaimed(controller, unit.token)
-                and (unit.canBuild or {}).power_generator_t2 == true
-            then
-                local distance = DistanceSquared(unit.position, position)
-                if not best or distance < bestDistance
-                    or (distance == bestDistance
-                        and tostring(unit.token) < tostring(best.token))
+        for _, position in ipairs(t2PowerPositions) do
+            for _, unit in ipairs(ESCALATION.DirectorUnits(controller, observation)) do
+                if unit.role == 't2_engineer'
+                    and (unit.available == true or unit.moving == true)
+                    and controller.pending[unit.token] == nil
+                    and not ESCALATION.TransportTokenClaimed(controller, unit.token)
+                    and (unit.canBuild or {}).power_generator_t2 == true
                 then
-                    best = unit
-                    bestDistance = distance
+                    local distance = DistanceSquared(unit.position, position)
+                    local pairKey = tostring(PlacementKey(position) or '')
+                        .. ':' .. tostring(unit.token)
+                    local bestKey = bestPosition
+                        and (tostring(PlacementKey(bestPosition) or '')
+                            .. ':' .. tostring(best.token)) or nil
+                    if not best or distance < bestDistance
+                        or (distance == bestDistance and pairKey < bestKey)
+                    then
+                        best = unit
+                        bestPosition = position
+                        bestDistance = distance
+                    end
                 end
             end
         end
@@ -9194,7 +9201,7 @@ ESCALATION.StrategicHydroBuilderToken = function(controller, observation, macroP
                 kind = 'build_structure',
                 actorToken = best.token,
                 buildRole = 'power_generator_t2',
-                position = CopyPosition(position),
+                position = CopyPosition(bestPosition),
                 reason = 'factory_adjacency_t2_power',
                 priority = 2,
             }
