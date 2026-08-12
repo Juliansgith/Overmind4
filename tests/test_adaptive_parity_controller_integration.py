@@ -3834,7 +3834,40 @@ def test_reclaim_actor_is_reserved_before_expansion_planning(
     ]
     owned_mex = []
     if expected_worker:
-        for index, site in enumerate(plain(harness.controller.markers.mass)[:2]):
+        patrol_sites = [
+            {
+                "key": "remote-owned",
+                "name": "Remote owned",
+                "kind": "mass",
+                "position": [10, 2, 20],
+                "distance": 1,
+                "localSite": False,
+                "reachable": True,
+                "engineerReachable": True,
+            },
+            {
+                "key": "local-owned-a",
+                "name": "Local owned A",
+                "kind": "mass",
+                "position": [12, 2, 20],
+                "distance": 2,
+                "localSite": True,
+                "reachable": True,
+                "engineerReachable": True,
+            },
+            {
+                "key": "local-owned-b",
+                "name": "Local owned B",
+                "kind": "mass",
+                "position": [14, 2, 20],
+                "distance": 3,
+                "localSite": True,
+                "reachable": True,
+                "engineerReachable": True,
+            },
+        ]
+        harness.controller.markers.mass = lua_value(harness.lua, patrol_sites)
+        for index, site in enumerate(patrol_sites):
             owned_mex.append(
                 harness.unit(
                     entityId=100 + index,

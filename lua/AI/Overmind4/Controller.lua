@@ -11356,6 +11356,7 @@ ESCALATION.UpdateDirectors = function(controller, observation)
             local patrolSites = {}
             for _, site in ipairs((observation.sites or {}).mass or {}) do
                 if site.complete == true
+                    and site.localSite == true
                     and type(site.key) == 'string'
                     and type(site.position) == 'table'
                 then
