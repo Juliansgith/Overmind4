@@ -11400,16 +11400,29 @@ ESCALATION.AdaptForceIntents = function(
         end
     end
     local raiderTargets = {}
+    for _, token in ipairs(SortedKeys((intelState or {}).contacts or {})) do
+        local contact = intelState.contacts[token]
+        local rank = contact.role == 'factory' and 1
+            or (contact.role == 'mass_extractor_t3' and 2
+                or (contact.role == 'mass_extractor_t2' and 3
+                    or (contact.role == 'mass_extractor' and 4 or nil)))
+        local seen = tonumber(contact.lastSeenTick) or -1000000
+        if rank and CurrentTick(controller) - seen <= 600
+            and CopyPosition(contact.position)
+        then
+            TableInsert(raiderTargets, {
+                key = 'intel:' .. tostring(token),
+                position = CopyPosition(contact.position),
+                rank = rank,
+                seen = seen,
+                distance = DistanceSquared(contact.position, controller.basePosition),
+            })
+        end
+    end
     for _, region in ipairs((forcePlan or {}).regions or {}) do
         local rank = nil
         if region.state == 'contested' or region.state == 'retake' then
-            rank = 1
-        elseif (region.state == 'planned' or region.state == 'establishing'
-                or region.state == 'secured')
-            and DistanceSquared(region.position, controller.targetPosition)
-                < DistanceSquared(region.position, controller.basePosition)
-        then
-            rank = 2
+            rank = 5
         end
         if rank and CopyPosition(region.position) then
             TableInsert(raiderTargets, {
@@ -11422,6 +11435,9 @@ ESCALATION.AdaptForceIntents = function(
     end
     table.sort(raiderTargets, function(a, b)
         if a.rank ~= b.rank then return a.rank < b.rank end
+        if (a.seen or -1) ~= (b.seen or -1) then
+            return (a.seen or -1) > (b.seen or -1)
+        end
         if a.distance ~= b.distance then return a.distance > b.distance end
         return a.key < b.key
     end)
@@ -13396,7 +13412,8 @@ end
 ESCALATION.ExecuteForceMove = function(
     controller, intent, records, usedActors, bucket, aggressive
 )
-    if type(intent.actorTokens) ~= 'table' or not CopyPosition(intent.position) then return false end
+    local destination = CopyPosition(intent.position)
+    if type(intent.actorTokens) ~= 'table' or not destination then return false end
     local signature = Signature(intent)
     if OrderCoolingDown(controller, signature)
         and intent.kind ~= 'home_response'
@@ -13407,6 +13424,9 @@ ESCALATION.ExecuteForceMove = function(
     local tokens = {}
     local seen = {}
     local ownership = (controller.forcePlan or {}).ownershipByToken or {}
+    controller.forceMoveByToken = controller.forceMoveByToken or {}
+    local moveKey = tostring(bucket) .. '|' .. tostring(intent.regionKey or 'none')
+        .. '|' .. tostring(destination[1]) .. '|' .. tostring(destination[3])
     for _, token in ipairs(intent.actorTokens) do
         local record = records[token]
         if type(token) ~= 'string' or seen[token] or usedActors[token]
@@ -13415,17 +13435,27 @@ ESCALATION.ExecuteForceMove = function(
         then
             return false
         end
+        local previous = controller.forceMoveByToken[token]
+        local atTarget = CopyPosition(record.position)
+            and Distance(record.position, destination) <= 35
+        if (bucket == 'garrison' or bucket == 'raider')
+            and previous and previous.key == moveKey
+            and (atTarget
+                or CurrentTick(controller) - (tonumber(previous.tick) or 0) < 600)
+        then
+            seen[token] = true
+        else
         local actor = LiveOwnedActor(controller, token, record, record.role)
         if not actor then return false end
         seen[token] = true
         TableInsert(tokens, token)
         TableInsert(actors, actor)
+        end
     end
     if TableGetn(actors) == 0 then return false end
     local sourcePosition = CopyPosition(
         SafeCall(nil, actors[1].GetPosition, actors[1])
     )
-    local destination = CopyPosition(intent.position)
     if not IsCampaignPosition(sourcePosition) or not IsCampaignPosition(destination) then
         return false
     end
@@ -13463,7 +13493,13 @@ ESCALATION.ExecuteForceMove = function(
         return false
     end
     RememberOrder(controller, signature)
-    for _, token in ipairs(tokens) do usedActors[token] = true end
+    for _, token in ipairs(tokens) do
+        usedActors[token] = true
+        controller.forceMoveByToken[token] = {
+            key = moveKey,
+            tick = CurrentTick(controller),
+        }
+    end
     Emit(controller, 'order', {
         command = 'force_move', bucket = bucket,
         target = tostring(intent.regionKey or 'none'),

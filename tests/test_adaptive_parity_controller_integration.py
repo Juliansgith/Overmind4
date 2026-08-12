@@ -6628,7 +6628,6 @@ def test_sub_assault_field_does_not_snake_to_friendly_secured_mex() -> None:
             "intents": [],
         },
     )
-
     harness.lua.globals().Controller.Step(harness.controller)
 
     assert len(harness.calls.aggressive) == 0
@@ -6675,6 +6674,34 @@ def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> N
             "intents": [],
         },
     )
+    _set_director_result(
+        harness,
+        "intelState",
+        {
+            "contacts": {
+                "enemy-factory": {
+                    "token": "enemy-factory",
+                    "role": "factory",
+                    "position": [150, 2, 150],
+                    "lastSeenTick": 0,
+                },
+                "enemy-mex-a": {
+                    "token": "enemy-mex-a",
+                    "role": "mass_extractor",
+                    "position": [250, 2, 250],
+                    "lastSeenTick": 0,
+                },
+                "enemy-mex-b": {
+                    "token": "enemy-mex-b",
+                    "role": "mass_extractor_t2",
+                    "position": [350, 2, 350],
+                    "lastSeenTick": 0,
+                },
+            },
+            "threat": {},
+            "expansionSafety": {},
+        },
+    )
 
     harness.lua.globals().Controller.Step(harness.controller)
 
@@ -6682,7 +6709,11 @@ def test_raider_ownership_dispatches_four_unit_groups_to_distinct_regions() -> N
     assert sorted(len(call.units) for call in harness.calls.aggressive.values()) == [4, 4, 4]
     assert {
         tuple(plain(call.position)) for call in harness.calls.aggressive.values()
-    } == {(100, 2, 100), (200, 2, 200), (300, 2, 300)}
+    } == {(150, 2, 150), (250, 2, 250), (350, 2, 350)}
+
+    harness.brain.tick = 101
+    harness.lua.globals().Controller.Step(harness.controller)
+    assert len(harness.calls.aggressive) == 3
 
 
 def test_mature_field_force_rallies_then_launches_one_coherent_enemy_spawn_assault() -> None:
