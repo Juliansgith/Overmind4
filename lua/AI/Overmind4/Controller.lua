@@ -10131,6 +10131,9 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
         end
         if operation.buildRole == 'land_factory' then currentLand = currentLand + 1 end
         if operation.buildRole == 'air_factory' then currentAir = currentAir + 1 end
+        if operation.buildRole == 'power_generator' then
+            currentPower = currentPower + 1
+        end
     end
     local function StrategicAcu(buildRole)
         for _, unit in ipairs(observation.units or {}) do
@@ -10162,7 +10165,11 @@ ESCALATION.AdaptGrowthIntents = function(controller, observation, macroPlan, tec
             })
         end
     end
+    local factoryPowerTarget = math.min(24,
+        math.max(4, (currentLand + currentAir) * 3))
+    local factoryPowerReady = currentPower >= factoryPowerTarget
     local factoryGrowthAdmitted = (lanes.factory_growth or {}).admitted == true
+        and factoryPowerReady
     local openingFirstAir = currentLand > 0 and currentAir < 1
         and currentPower >= 2 and currentMex >= 2
     if factoryGrowthAdmitted then

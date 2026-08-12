@@ -2184,6 +2184,59 @@ def test_reclaiming_acu_builds_funded_second_air_when_field_engineers_are_busy()
     assert harness.controller.reclaimPatrolAssignments["1:1"] is None
 
 
+def test_factory_director_cannot_take_acu_while_power_target_is_unmet() -> None:
+    harness = make_harness()
+    harness.lua.execute("Policy.Decide = function() return {} end")
+    acu = harness.unit(
+        entityId=1,
+        blueprintId="uel0001",
+        canBuild={"ueb0102": True},
+    )
+    land_factories = [
+        harness.unit(entityId=20 + index, blueprintId="ueb0101")
+        for index in range(4)
+    ]
+    air_factories = [
+        harness.unit(entityId=30 + index, blueprintId="ueb0102")
+        for index in range(2)
+    ]
+    power = [
+        harness.unit(entityId=40 + index, blueprintId="ueb1101")
+        for index in range(10)
+    ]
+    mex = [
+        harness.unit(entityId=60 + index, blueprintId="ueb1103")
+        for index in range(17)
+    ]
+    harness.brain.units = harness.lua.table_from(
+        [acu, *land_factories, *air_factories, *power, *mex]
+    )
+    _set_director_result(
+        harness,
+        "macroPlan",
+        {
+            "valid": True,
+            "epoch": 1,
+            "landFactoryTarget": 9,
+            "airFactoryTarget": 3,
+            "lanes": {"factory_growth": {"admitted": True}},
+            "grants": [
+                {
+                    "requestId": "factory-1",
+                    "lane": "factory_growth",
+                    "source": "bank",
+                }
+            ],
+            "regions": [],
+            "intents": [],
+        },
+    )
+
+    harness.lua.globals().Controller.Step(harness.controller)
+
+    assert len(harness.calls.buildMobile) == 0
+
+
 @pytest.mark.parametrize(
     ("power_count", "has_hydro", "expected_orders"),
     [
