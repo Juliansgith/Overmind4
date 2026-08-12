@@ -1283,34 +1283,6 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             counts.air_factory = 1
         end
     end
-    if not underContact
-        and completedAdvancedMex > 0
-        and (counts.mass_storage or 0) < completedAdvancedMex * 4
-        and not plannedMassStorage
-        and FiniteNumber(economy.massStoredRatio)
-        and FiniteNumber(economy.energyStoredRatio)
-        and tonumber(economy.massStoredRatio) >= 0.5
-        and tonumber(economy.energyStoredRatio) >= 0.5
-    then
-        local assignedStorage = AssignPlacement(
-            'mass_storage',
-            placementIndex.mass_storage,
-            22,
-            'mex_adjacency_storage'
-        )
-        if not assignedStorage then
-            assignedStorage = AssignAcuPlacement(
-                'mass_storage',
-                placementIndex.mass_storage,
-                22,
-                'mex_adjacency_storage'
-            )
-        end
-        if assignedStorage then
-            plannedMassStorage = true
-            counts.mass_storage = (counts.mass_storage or 0) + 1
-        end
-    end
     local adjacencyPowerTarget = math.min(24,
         math.max(4, completedFactories * 3))
     if not underContact
@@ -1374,6 +1346,35 @@ local function EngineerDecisions(snapshot, units, counts, virtualReserved, virtu
             plannedFactory = true
             placementIndex.land_factory = placementIndex.land_factory + 1
             counts.land_factory = (counts.land_factory or 0) + 1
+        end
+    end
+
+    if not underContact
+        and completedAdvancedMex > 0
+        and (counts.mass_storage or 0) < completedAdvancedMex * 4
+        and not plannedMassStorage
+        and FiniteNumber(economy.massStoredRatio)
+        and FiniteNumber(economy.energyStoredRatio)
+        and tonumber(economy.massStoredRatio) >= 0.5
+        and tonumber(economy.energyStoredRatio) >= 0.5
+    then
+        local assignedStorage = AssignPlacement(
+            'mass_storage',
+            placementIndex.mass_storage,
+            22,
+            'mex_adjacency_storage'
+        )
+        if not assignedStorage then
+            assignedStorage = AssignAcuPlacement(
+                'mass_storage',
+                placementIndex.mass_storage,
+                22,
+                'mex_adjacency_storage'
+            )
+        end
+        if assignedStorage then
+            plannedMassStorage = true
+            counts.mass_storage = (counts.mass_storage or 0) + 1
         end
     end
 

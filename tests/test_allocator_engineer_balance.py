@@ -839,25 +839,6 @@ def test_live_twenty_minute_bank_invests_in_advanced_mex_storage() -> None:
     assert len(storage) == 1
 
 
-def test_mex_adjacency_investment_owns_last_builder_before_extra_power() -> None:
-    snapshot = _advanced_mex_storage_snapshot()
-    builder = next(unit for unit in snapshot["units"] if unit["role"] == "engineer")
-    for unit in snapshot["units"]:
-        if unit["role"] == "engineer" and unit["token"] != builder["token"]:
-            unit["idle"] = False
-        if unit["role"] == "acu":
-            unit["idle"] = False
-
-    structures = intents_of(decide(snapshot), "build_structure")
-    selected = [
-        (intent.get("buildRole"), intent.get("reason"))
-        for intent in structures
-        if intent.get("actorToken") == builder["token"]
-    ]
-
-    assert selected == [("mass_storage", "mex_adjacency_storage")]
-
-
 @pytest.mark.parametrize(
     ("change", "value"),
     [
