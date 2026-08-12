@@ -3026,6 +3026,73 @@ def test_region_package_and_mex_upgrade_intents_issue_exact_blueprints_and_persi
     }
 
 
+def test_arriving_mex_builder_reclaims_wreck_then_retries_the_same_build() -> None:
+    harness = make_harness()
+    engineer = harness.unit(
+        entityId=10,
+        blueprintId="uel0105",
+        position=[40, 2, 40],
+        canBuild={"ueb1103": True},
+    )
+    wreck = harness.lua.globals().MakeProp(
+        lua_value(
+            harness.lua,
+            {
+                "entityId": 900,
+                "mass": 36,
+                "energy": 0,
+                "position": [40, 2, 40],
+            },
+        )
+    )
+    harness.brain.units = harness.lua.table_from([engineer])
+    harness.brain.reclaimables = harness.lua.table_from([wreck])
+    harness.brain.canBuildAt = False
+    intent = {
+        "kind": "build_structure",
+        "actorToken": "10:1",
+        "buildRole": "mass_extractor",
+        "siteKey": "wrecked-mex",
+        "position": [40, 2, 40],
+        "reason": "regional_expansion",
+        "operationId": "mex:front:wrecked-mex",
+        "operationAttempt": 0,
+    }
+    harness.controller.jobLedger.jobs[intent["operationId"]] = lua_value(
+        harness.lua,
+        {
+            "id": intent["operationId"],
+            "actorToken": "10:1",
+            "targetKey": "wrecked-mex",
+            "phase": "travelling",
+        },
+    )
+
+    execute_intents(harness, [intent])
+
+    assert len(harness.calls.reclaim) == 1
+    assert len(harness.calls.buildMobile) == 0
+    assert plain(harness.controller.jobLedger.jobs[intent["operationId"]]).get(
+        "ordered"
+    ) is not True
+
+    engineer.options.idleState = False
+    engineer.options.states = lua_value(harness.lua, {"Reclaiming": True})
+    execute_intents(harness, [intent], harness.observe())
+    assert len(harness.calls.reclaim) == 1
+    assert len(harness.calls.buildMobile) == 0
+
+    harness.brain.reclaimables = harness.lua.table_from([])
+    harness.brain.canBuildAt = True
+    engineer.options.idleState = True
+    engineer.options.states = lua_value(harness.lua, {})
+    execute_intents(harness, [intent], harness.observe())
+
+    assert len(harness.calls.buildMobile) == 1
+    assert harness.calls.buildMobile[1].blueprintId == "ueb1103"
+    assert plain(harness.controller.pending)["10:1"]["siteKey"] == "wrecked-mex"
+
+
 def test_region_package_and_radar_always_require_a_valid_funded_expansion_lane() -> None:
     cases = (
         (True, {"admitted": False, "preserved": False}, False),

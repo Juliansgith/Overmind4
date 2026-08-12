@@ -3415,6 +3415,53 @@ local function RecordPending(controller, intent, record)
     end
 end
 
+ESCALATION.TryClearMexWreck = function(controller, intent, record, actor)
+    local position = TerrainPosition(intent.position)
+    if intent.buildRole ~= 'mass_extractor'
+        or type(intent.siteKey) ~= 'string'
+        or not position or not record or not actor
+        or DistanceSquared(record.position, position) > 32 * 32
+    then
+        return false
+    end
+    local raw = SafeCall({}, function()
+        return GetReclaimablesInRect(Rect(
+            position[1] - 4, position[3] - 4,
+            position[1] + 4, position[3] + 4
+        ))
+    end)
+    local candidates = {}
+    for _, prop in pairs(raw or {}) do
+        local propPosition = prop.CachePosition
+            or SafeCall(nil, prop.GetPosition, prop)
+        local key = ReclaimPropKey(prop)
+        if key and propPosition
+            and DistanceSquared(propPosition, position) <= 4 * 4
+        then
+            TableInsert(candidates, { key = key, prop = prop })
+        end
+    end
+    table.sort(candidates, function(a, b) return a.key < b.key end)
+    local target = candidates[1] and candidates[1].prop or nil
+    if not target
+        or not pcall(function() IssueClearCommands({ actor }) end)
+        or not pcall(function() IssueReclaim({ actor }, target) end)
+    then
+        return false
+    end
+    controller.expansionClearances[intent.siteKey] = {
+        actorToken = intent.actorToken,
+        startedTick = CurrentTick(controller),
+    }
+    Emit(controller, 'order', {
+        actor = intent.actorToken,
+        command = 'clear_mex_wreck',
+        role = 'engineer',
+        site = intent.siteKey,
+    })
+    return true
+end
+
 local function ExecuteStructure(controller, intent, record)
     local strategicConstruction = intent.reason == 'factory_adjacency_power'
         or intent.reason == 'production_saturation'
@@ -3427,8 +3474,6 @@ local function ExecuteStructure(controller, intent, record)
         and record.moving == true
     if controller.pending[intent.actorToken]
         or record.complete ~= true
-        or (record.idle ~= true and not preemptReclaimPatrol
-            and not preemptStrategicMove)
         or not record.canBuild
         or record.canBuild[intent.buildRole] ~= true
     then
@@ -3440,7 +3485,24 @@ local function ExecuteStructure(controller, intent, record)
     local blueprintId = Catalog.IdFor(intent.buildRole)
     if not blueprintId then return false end
     local actor = LiveOwnedActor(controller, intent.actorToken, record, record.role)
+    local clearance = intent.siteKey
+        and controller.expansionClearances[intent.siteKey] or nil
+    if clearance then
+        if clearance.actorToken ~= intent.actorToken then
+            controller.expansionClearances[intent.siteKey] = nil
+        else
+            if not actor then return false end
+            if record.idle ~= true
+                or SafeCall(false, actor.IsIdleState, actor) ~= true
+            then
+                return 'clearing'
+            end
+            controller.expansionClearances[intent.siteKey] = nil
+        end
+    end
     if not actor
+        or (record.idle ~= true and not preemptReclaimPatrol
+            and not preemptStrategicMove)
         or (SafeCall(false, actor.IsIdleState, actor) ~= true
             and not preemptReclaimPatrol and not preemptStrategicMove)
         or SafeCall(false, actor.IsUnitState, actor, 'Building') == true
@@ -3463,6 +3525,11 @@ local function ExecuteStructure(controller, intent, record)
         end
     end
     if not position then
+        if ESCALATION.TryClearMexWreck(
+            controller, intent, record, actor
+        ) then
+            return 'clearing'
+        end
         local blockKey = intent.siteKey
         if not blockKey and CopyPosition(intent.position) then
             blockKey = PlacementKey(intent.position)
@@ -8212,6 +8279,7 @@ Controller.Create = function(brain)
         airInterceptMission = nil,
         enemyRefs = {},
         operationLifecycle = {},
+        expansionClearances = {},
         fundingGrants = {},
         fundingGrantsEnabled = false,
         breachEpisodeSerial = 0,
@@ -13058,10 +13126,20 @@ ESCALATION.ExecuteEscortedExpansion = function(
     end
     local buildIntent = ESCALATION.DeepCopy(intent)
     buildIntent.kind = 'build_structure'
-    if not ExecuteStructure(controller, buildIntent, engineerRecord) then
+    local buildResult = ExecuteStructure(
+        controller, buildIntent, engineerRecord
+    )
+    if not buildResult then
         pcall(function() IssueClearCommands(escorts) end)
         ESCALATION.FailExpansionAttempt(controller, intent, 'build_order_failed')
         return false
+    end
+    if buildResult == 'clearing' then
+        usedActors[intent.actorToken] = true
+        for _, token in ipairs(intent.escortTokens or {}) do
+            usedActors[token] = true
+        end
+        return 'clearing'
     end
     local ledgerJob = (controller.jobLedger.jobs or {})[intent.operationId]
     if ledgerJob then
@@ -13250,7 +13328,7 @@ Controller.Execute = function(controller, intents, observation)
                         local ledgerJob = intent.operationId
                             and (controller.jobLedger.jobs or {})[intent.operationId]
                             or nil
-                        if issued and ledgerJob then
+                        if issued and issued ~= 'clearing' and ledgerJob then
                             ledgerJob.ordered = true
                             ledgerJob.orderedActorToken = intent.actorToken
                             ledgerJob.orderedAttempt = tonumber(intent.operationAttempt) or 0
@@ -13272,13 +13350,13 @@ Controller.Execute = function(controller, intents, observation)
                 controller.breachEpisode.operationAttempt = intent.operationAttempt
                 controller.breachEpisode.operationAttemptKey = intent.operationAttemptKey
             end
-            if issued and intent.operationId then
+            if issued and issued ~= 'clearing' and intent.operationId then
                 ESCALATION.OrderOperation(controller, intent)
             elseif not issued and intent.operationId then
                 ESCALATION.FailExpansionAttempt(controller, intent, failureReason)
             end
             if grant then
-                if issued then
+                if issued and issued ~= 'clearing' then
                     ESCALATION.CommitFundingGrant(controller, intent)
                 else
                     ESCALATION.RollbackFundingGrant(controller, intent)
