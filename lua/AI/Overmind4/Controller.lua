@@ -8821,6 +8821,7 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     local constructionBacklog = 0
     local landBacklog = 0
     local airBacklog = 0
+    local activeTechUpgrade = false
     for _, unit in ipairs(observation.units or {}) do
         if unit.complete == true then
             if unit.role == 'engineer' then counts.engineers = counts.engineers + 1 end
@@ -8855,6 +8856,12 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
     end
     for _, operation in pairs(controller.pending or {}) do
         if StructureOperation(operation) then constructionBacklog = constructionBacklog + 1 end
+        local pendingRole = operation.upgradeRole or operation.buildRole
+        if (operation.kind == 'factory_upgrade' or operation.kind == 'structure_upgrade')
+            and ESCALATION.requestLanes[pendingRole] == 'tech'
+        then
+            activeTechUpgrade = true
+        end
         if operation.buildRole == 'engineer' then
             counts.engineers = counts.engineers + 1
         end
@@ -8915,7 +8922,9 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             massDrain = 0.2, energyDrain = 9, massCost = 50,
             energyCost = 2250, required = true })
     end
-    if completedMex >= 9 and counts.landFactoriesT1 >= 2 then
+    if completedMex >= 9 and counts.landFactoriesT1 >= 2
+        and not activeTechUpgrade
+    then
         if counts.mexT2 < 2 then
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1, energyDrain = 6,
@@ -8925,7 +8934,8 @@ ESCALATION.DirectorMacroInput = function(controller, observation, intelState, re
             TableInsert(requests, { id = 'tech-1', lane = 'tech',
                 massDrain = 1.017391, energyDrain = 7.913043,
                 massCost = 1170, energyCost = 9100, durationTicks = 1150,
-                allowHybrid = true, required = true })
+                allowHybrid = true, required = true,
+                portfolioPriority = 1.5 })
         end
     end
     local commitments = {}

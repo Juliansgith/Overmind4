@@ -171,8 +171,10 @@ MacroDirector.BuildPortfolio = function(snapshot)
 
     local requests = Copy(snapshot.requests or {})
     table.sort(requests, function(a, b)
-        local aRank = LANE_RANK[a.lane] or 1000
-        local bRank = LANE_RANK[b.lane] or 1000
+        local aRank = Number(a.portfolioPriority, nil)
+            or LANE_RANK[a.lane] or 1000
+        local bRank = Number(b.portfolioPriority, nil)
+            or LANE_RANK[b.lane] or 1000
         if aRank == bRank then return tostring(a.id or '') < tostring(b.id or '') end
         return aRank < bRank
     end)
